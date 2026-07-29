@@ -3,6 +3,12 @@
 #
 #   curl -fsSL https://tools.subnsub.com/monitor/install.sh | sh -s -- <TOKEN>
 #
+# Paste the same token on every machine you want to watch — each one gets its
+# own dashboard, told apart by a random id it creates on first run. To name
+# one, add it after the token (or set MON_NAME):
+#
+#   curl -fsSL .../install.sh | sh -s -- <TOKEN> --name "tokyo build box"
+#
 # Source: https://github.com/subnsub-tools/subnsub-monitor (Apache-2.0)
 #
 # …and if you would rather look first, which is the reasonable instinct for
@@ -33,10 +39,10 @@ LABEL=com.subnsub.monitor   # shows up in `launchctl list`; brand domain there t
 # script that publishes the binaries. A binary that does not match is not installed, and a swapped binary
 # would otherwise be free to read ~/.claude/.credentials.json and post it
 # somewhere, which no amount of care in the Go source can prevent.
-SUM_linux_amd64=219fb84548bf2175b902d25b5008b7652e5810d33022102a8d30077e0316d6fb
-SUM_linux_arm64=dde26fe2c7a9909a513a230a21728df3225e69dcea2f24bf4941770c4a26b1fd
-SUM_darwin_amd64=4b03587975bb5fa7609d158631bd984fe3800ebf95002825b510e6fac25bde09
-SUM_darwin_arm64=94ce5c5ffd19403010f9e4926dc6e9306c98fce99237245d31241206a33784eb
+SUM_linux_amd64=9d0555b8732a748a7d5310e923be70d985f2405ca3428f7fc011594225a3b2b0
+SUM_linux_arm64=ab054f5d3be2219b4d68c669af2998d2831ebaa29387b20fafa643b62f9ce2d5
+SUM_darwin_amd64=67d38a15ee224bbc2b3a5c7efd2ed72e32b185e981546605491264920fbe3d43
+SUM_darwin_arm64=973c5b00a2b9e953abb3517304d727a0370326a8bc1cc1e79a5b68b7b532d29a
 
 say()  { printf '%s\n' "$*"; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -65,16 +71,40 @@ uninstall() {
         systemctl --user daemon-reload 2>/dev/null || true
         ;;
     esac
-    rm -f "${INSTALLED_BIN:-$BINDIR/$NAME}" "$HOME/.config/$NAME/token" "$manifest"
+    # agent-id and name go too: leaving the id behind means a reinstall
+    # silently reclaims the same dashboard card, which is surprising when the
+    # point of uninstalling was to stop watching this machine.
+    rm -f "${INSTALLED_BIN:-$BINDIR/$NAME}" "$HOME/.config/$NAME/token" \
+          "$HOME/.config/$NAME/agent-id" "$HOME/.config/$NAME/name" "$manifest"
     rmdir "$HOME/.config/$NAME" 2>/dev/null || true
     say "removed $NAME"
     exit 0
 }
 [ "${1:-}" = "--uninstall" ] && uninstall
 
-# ------------------------------------------------------------------- token
-TOKEN="${1:-${SUBNSUB_MONITOR_TOKEN:-}}"
-[ -n "$TOKEN" ] || die "no token. Usage: sh install.sh <TOKEN>"
+# -------------------------------------------------------------- token / name
+# The token is the first bare argument, or the environment. Checked for a
+# leading dash first: with SUBNSUB_MONITOR_TOKEN already set,
+# `sh install.sh --name box` would otherwise take "--name" as the token and
+# fail with a bewildering complaint about the characters in it.
+TOKEN=""
+case "${1:-}" in
+  ''|-*) TOKEN="${SUBNSUB_MONITOR_TOKEN:-}" ;;
+  *)     TOKEN=$1; shift ;;
+esac
+[ -n "$TOKEN" ] || die "no token. Usage: sh install.sh <TOKEN> [--name LABEL]"
+
+# What this machine is called on the dashboard. Optional, and deliberately not
+# guessed: the helper never reads the hostname, so an unnamed machine shows up
+# under its own random id rather than under whatever the box calls itself.
+NAME_ARG="${MON_NAME:-}"
+while [ $# -gt 0 ]; do
+    case "$1" in
+      --name) [ $# -ge 2 ] || die "--name needs a value"; NAME_ARG=$2; shift 2 ;;
+      --name=*) NAME_ARG=${1#--name=}; shift ;;
+      *) die "unexpected argument: $1" ;;
+    esac
+done
 
 # Same shape the relay accepts. Beyond catching typos this is what keeps a
 # token with a newline in it from adding arbitrary lines to the systemd
@@ -117,11 +147,11 @@ tmp=$(mktemp "${TMPDIR:-/tmp}/$NAME.XXXXXX")
 # Clean up on any exit path, including the failure ones below.
 trap 'rm -f "$tmp"' EXIT INT TERM
 
-if [ -n "${CM_LOCAL:-}" ]; then
+if [ -n "${MON_LOCAL:-}" ]; then
     # Install from a binary you already have — used while the download host
     # is still being set up, and handy for testing a build before publishing.
-    say "installing from $CM_LOCAL"
-    cp "$CM_LOCAL" "$tmp"
+    say "installing from $MON_LOCAL"
+    cp "$MON_LOCAL" "$tmp"
 else
     say "downloading $asset"
     if command -v curl >/dev/null 2>&1; then
@@ -135,9 +165,9 @@ fi
 
 [ -s "$tmp" ] || die "downloaded file is empty"
 
-# Verify before anything is made executable. Skipped only for CM_LOCAL, where
+# Verify before anything is made executable. Skipped only for MON_LOCAL, where
 # you supplied the file yourself and there is nothing to authenticate.
-if [ -z "${CM_LOCAL:-}" ]; then
+if [ -z "${MON_LOCAL:-}" ]; then
     eval "want=\${SUM_${goos}_${goarch}}"
     case "$want" in
       PLACEHOLDER_*) die "this installer has no checksum for $goos/$goarch — refusing to run an unverified binary" ;;
@@ -195,6 +225,19 @@ rm -f "$conf/manifest.new"
 } > "$conf/manifest.new"
 chmod 0644 "$conf/manifest.new"
 mv -f "$conf/manifest.new" "$conf/manifest"
+
+# ------------------------------------------------------------------ name file
+# Written as a file rather than passed through the service definition on
+# purpose: a name is free text — spaces, quotes, CJK — and interpolating that
+# into a systemd unit or a plist is how a label becomes a parse error, or
+# worse. The helper reads it, trims it and drops control characters; nothing
+# here has to be escaped because nothing here is a template.
+if [ -n "$NAME_ARG" ]; then
+    rm -f "$conf/name.new"
+    printf '%s\n' "$NAME_ARG" > "$conf/name.new"
+    chmod 0600 "$conf/name.new"
+    mv -f "$conf/name.new" "$conf/name"
+fi
 
 # ------------------------------------------------------------------ service
 case "$goos" in

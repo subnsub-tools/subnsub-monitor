@@ -175,6 +175,7 @@ subnsub-monitor watch [SEC]       # reprint every SEC seconds
 subnsub-monitor serve [PORT]      # serve /quota + /events on 127.0.0.1 only
 subnsub-monitor selftest          # show what the collectors can and cannot open
 subnsub-monitor token             # mint a relay token
+subnsub-monitor name [LABEL]      # show or set this machine's dashboard name
 subnsub-monitor connect URL [TOKEN]
 ```
 
@@ -183,6 +184,36 @@ subnsub-monitor connect URL [TOKEN]
 
 Pass the token via `SUBNSUB_MONITOR_TOKEN` rather than as an argument to keep it
 out of `ps`.
+
+## One machine, one dashboard
+
+You paste the same token on every machine you want to watch, so each snapshot
+carries an `agent_id` that says which machine it came from. A relay that keeps
+a slot per id shows them as separate dashboards; one that ignores the field
+gets the old behaviour, where the last machine to push wins.
+
+The id is created on first run and kept in `~/.config/subnsub-monitor/agent-id`.
+**It is random, not derived** — no hostname, no MAC, no machine-id, nothing
+hashed from any of them. That is deliberate and it is the same bar the health
+fields clear: an id derived from hardware is a fingerprint that survives
+reinstalls and can be correlated across accounts by whoever ends up holding the
+relay's storage. Delete the file and you get a new one; that is the whole
+extent of what it means. Set `MON_AGENT_ID` to pin it instead, which is what a
+container image or a config-management run wants.
+
+A name is optional and is the one piece of free text this agent sends. It is
+never inferred — in particular never from the hostname, which would quietly
+reintroduce exactly what the paragraph above rules out:
+
+```sh
+sh install.sh <TOKEN> --name "tokyo build box"   # at install time
+subnsub-monitor name "tokyo build box"           # any time after
+subnsub-monitor name                             # show what it will report
+```
+
+Control characters, bidi overrides and invisible padding are stripped before it
+travels, and it is cut to 24 characters. A relay should re-do all of that on
+arrival anyway — see the warning below.
 
 ## Pointing it at your own relay
 

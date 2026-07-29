@@ -18,11 +18,16 @@ const usage = `subnsub-monitor — AI coding quota for machines you can't reach
   subnsub-monitor serve [PORT]           serve /quota + /events on 127.0.0.1
   subnsub-monitor token                  mint a relay token
   subnsub-monitor connect URL [TOKEN]    dial out and push to the relay
+  subnsub-monitor name [LABEL]           show or set this machine's dashboard name
   subnsub-monitor selftest               show what the collectors can and cannot open
 
 serve only ever shows you THIS machine. connect is the real shape:
 outbound-only, so a browser anywhere can watch a box it has no route to.
 The token may also come from SUBNSUB_MONITOR_TOKEN, which keeps it out of ps.
+
+Every machine you paste the same token on gets its own dashboard, told apart
+by a random id created on first run. Give it a name and the dashboard says
+that instead; the name is yours to type and is never taken from the hostname.
 `
 
 func main() {
@@ -81,6 +86,22 @@ func main() {
 			}
 		}
 		connect(args[1], token, every)
+
+	case "name":
+		if len(args) > 1 {
+			if err := setLabel(args[1]); err != nil {
+				warnf("could not save the name")
+				os.Exit(1)
+			}
+		}
+		// Printed from the loader rather than from the argument, so what you
+		// see is what the dashboard will show after cleaning — a name that got
+		// trimmed should say so here, not surprise you on the page.
+		if label := agentLabel(); label != "" {
+			fmt.Printf("%s  (%s)\n", label, agentID())
+		} else {
+			fmt.Printf("unnamed  (%s)\n", agentID())
+		}
 
 	case "selftest":
 		selftest()

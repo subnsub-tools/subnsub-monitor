@@ -72,6 +72,13 @@ type Snapshot struct {
 	OK         bool       `json:"ok"`
 	CapturedAt float64    `json:"captured_at"`
 	Providers  []Provider `json:"providers"`
+	// Which machine this came from. One token is pasted on every machine an
+	// account watches, so without this they all push into one slot and the
+	// page shows whichever pushed last. Random, never derived from hardware —
+	// see agent.go. The label is optional and operator-set; omitted when
+	// unset, so the page falls back to the id rather than inventing a name.
+	AgentID    string `json:"agent_id,omitempty"`
+	AgentLabel string `json:"agent_name,omitempty"`
 	// Machine health. A pointer so a platform that can measure nothing at all
 	// omits the key rather than shipping a shell of nulls — see system.go for
 	// what each platform can actually read, and why.
@@ -93,7 +100,7 @@ func bp(b bool) *bool       { return &b }
 // these run on other people's machines against files this program does not
 // control, and one bad rollout should not take the helper down.
 func collectAll() Snapshot {
-	snap := Snapshot{CapturedAt: now()}
+	snap := Snapshot{CapturedAt: now(), AgentID: agentID(), AgentLabel: agentLabel()}
 	for _, c := range []struct {
 		id string
 		fn func() Provider
