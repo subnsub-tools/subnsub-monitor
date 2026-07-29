@@ -78,10 +78,21 @@ const (
 	ampMaxOut  = 64 << 10 // the real output is four lines; this is a runaway guard
 )
 
+// The floor is on ATTEMPTS, not on successes.
+//
+// Keying it to the last success looked equivalent and was not: once a cached
+// success aged past the interval, every failing collection left the clock
+// untouched, so an Amp outage turned the floor off entirely and the push loop
+// ran the CLI every 30 seconds for as long as the outage lasted — most work
+// done exactly when it is least likely to help. A failure now occupies the
+// window the same way a success does, and is served back from cache while it
+// holds, so the card keeps saying the same true thing instead of flickering.
 var ampCache struct {
 	sync.Mutex
-	last      *Provider
-	fetchedAt float64
+	last        *Provider // last SUCCESSFUL reading
+	fetchedAt   float64   // when that reading was actually fetched
+	fail        *Provider // last failure, served while the floor holds
+	attemptedAt float64   // when the CLI last ran at all
 }
 
 func collectAmp() Provider {
@@ -89,23 +100,39 @@ func collectAmp() Provider {
 	defer ampCache.Unlock()
 
 	t := now()
-	if ampCache.last != nil && t-ampCache.fetchedAt < ampMinInterval {
-		cached := *ampCache.last
-		cached.CapturedAt = t // when we looked; RecordedAt still says when it was fetched
-		return cached
+	serve := func(p *Provider) Provider {
+		out := *p
+		out.CapturedAt = t // when we looked; RecordedAt still says when it was fetched
+		return out
 	}
 
+	if ampCache.last != nil && t-ampCache.fetchedAt < ampMinInterval {
+		return serve(ampCache.last)
+	}
+	if ampCache.attemptedAt > 0 && t-ampCache.attemptedAt < ampMinInterval {
+		// Inside the floor with no fresh success: whatever the last attempt
+		// produced stands, rather than running the CLI again.
+		if ampCache.last != nil && t-ampCache.fetchedAt < ampStaleMax {
+			return serve(ampCache.last)
+		}
+		if ampCache.fail != nil {
+			return serve(ampCache.fail)
+		}
+	}
+
+	ampCache.attemptedAt = t
 	p := fetchAmp()
 	if p.OK {
-		ampCache.last = &p
-		ampCache.fetchedAt = t
+		ampCache.last, ampCache.fetchedAt, ampCache.fail = &p, t, nil
 		return p
 	}
+	ampCache.fail = &p
+	// A stale-but-real number beats an error nobody can act on, up to a point;
+	// past ampStaleMax the error is the more honest answer.
 	if ampCache.last != nil && t-ampCache.fetchedAt < ampStaleMax {
-		cached := *ampCache.last
-		cached.CapturedAt = t
-		return cached
+		return serve(ampCache.last)
 	}
+	ampCache.last = nil
 	return p
 }
 
@@ -120,29 +147,31 @@ func fetchAmp() Provider {
 	if bin == "" {
 		return fail("not-installed", "找不到可用的 amp 命令")
 	}
-	out, err := runAmpUsage(bin)
+	out, exited, err := runAmpUsage(bin)
 	if err != nil {
 		// Never err.Error(): exec errors quote the full path being run, which
 		// carries the local username straight onto every watcher's screen.
-		switch {
-		case err == errAmpTimeout:
+		if err == errAmpTimeout {
 			return fail("unreachable", "amp usage 超时")
-		default:
-			return fail("cli-failed", "amp usage 执行失败")
 		}
+		return fail("cli-failed", "amp usage 执行失败")
 	}
-	return parseAmpUsage(p, out, now())
+	return parseAmpUsage(p, out, now(), exited)
 }
 
 // Where the CLI is allowed to be.
 //
-// Deliberately not exec.LookPath first. PATH is inherited from whatever
-// launched the helper, and "run the first thing called amp on PATH" is how a
-// service ends up executing a file someone dropped in a directory that got
-// prepended by a shell profile three years ago. The fixed candidates are the
-// two locations Amp's own installer uses plus the two usual package prefixes;
-// LookPath stays as a last resort so an unusual-but-legitimate install still
-// works, and MON_AMP_BIN is there for the rest.
+// PATH is never consulted. It is inherited from whatever launched the helper,
+// and "run the first thing called amp on PATH" is how a service ends up
+// executing a file someone dropped in a directory that got prepended by a
+// shell profile three years ago — a file that would sail through usableBinary,
+// since an attacker's own 0755 binary is not world-writable.
+//
+// An earlier version kept exec.LookPath as a "last resort for unusual
+// installs", which quietly gave back everything the fixed list was for: the
+// fallback triggers precisely when the trustworthy locations came up empty,
+// which is exactly the situation where PATH is least worth trusting. An
+// unusual install sets MON_AMP_BIN and names the file outright.
 func ampBinary() string {
 	if v := strings.TrimSpace(os.Getenv(ampBinEnv)); v != "" {
 		// An override that does not hold up is a refusal, not a reason to go
@@ -164,9 +193,6 @@ func ampBinary() string {
 		if usableBinary(c) {
 			return c
 		}
-	}
-	if p, err := exec.LookPath("amp"); err == nil && usableBinary(p) {
-		return p
 	}
 	return ""
 }
@@ -196,7 +222,9 @@ type ampErr struct{ s string }
 
 func (e *ampErr) Error() string { return e.s }
 
-func runAmpUsage(bin string) (string, error) {
+// Returns the output, whether the process exited non-zero, and an error only
+// when there is nothing usable to parse at all.
+func runAmpUsage(bin string) (string, bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), ampTimeout)
 	defer cancel()
 
@@ -205,47 +233,112 @@ func runAmpUsage(bin string) (string, error) {
 	// to prompt must hit EOF and exit rather than hold the push loop open until
 	// the deadline.
 	cmd.Stdin = nil
-	cmd.Env = append(os.Environ(), "NO_COLOR=1")
+	cmd.Env = ampEnv()
+
+	// Without this the deadline is a suggestion. Custom writers make os/exec
+	// build pipes and copy them in goroutines, and cancelling the context kills
+	// only the direct child — a grandchild that inherited the write end keeps
+	// the pipe open, so Wait blocks on the copy forever. It would block holding
+	// the collector's mutex, which wedges every later collection, not just
+	// Amp's. WaitDelay closes the pipes and lets Wait return.
+	cmd.WaitDelay = 2 * time.Second
 
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &limitedWriter{w: &stdout, n: ampMaxOut}
-	cmd.Stderr = &limitedWriter{w: &stderr, n: ampMaxOut}
+	lo := &limitedWriter{w: &stdout, n: ampMaxOut}
+	le := &limitedWriter{w: &stderr, n: ampMaxOut}
+	cmd.Stdout, cmd.Stderr = lo, le
 
 	err := cmd.Run()
 	if ctx.Err() == context.DeadlineExceeded {
-		return "", errAmpTimeout
+		return "", false, errAmpTimeout
 	}
-	// A non-zero exit still gets parsed: `amp usage` reports "not signed in" on
-	// stderr with a failing status, and that is a state worth rendering rather
-	// than a generic execution failure. Only an unusable result is an error.
+	// Four lines of text overflowing a 64 KiB buffer means the thing on the
+	// other end is not the CLI we think it is. Refuse the whole reading rather
+	// than parse a prefix: the prefix can be perfectly well-formed, and
+	// reporting a number scraped off the front of a runaway is worse than
+	// reporting nothing.
+	if lo.over || le.over {
+		return "", false, &ampErr{"output too large"}
+	}
+
 	out := stdout.String()
 	if strings.TrimSpace(out) == "" {
 		out = stderr.String()
 	}
 	if strings.TrimSpace(out) == "" {
 		if err != nil {
-			return "", err
+			return "", true, err
 		}
-		return "", &ampErr{"empty output"}
+		return "", false, &ampErr{"empty output"}
 	}
-	return out, nil
+	// A non-zero exit still gets parsed — `amp usage` reports being signed out
+	// with a failing status, and that is a state worth rendering — but the
+	// status travels with the text so the parser can tell "signed out" from
+	// "the service is down", which look alike from the output alone.
+	return out, err != nil, nil
+}
+
+// What the child is allowed to see.
+//
+// An earlier version passed os.Environ() straight through, which handed Amp's
+// process this helper's OWN relay bearer token: the installed unit supplies it
+// as SUBNSUB_MONITOR_TOKEN through EnvironmentFile, so every invocation leaked
+// the credential for the account's dashboard into a third party's address
+// space. Nothing suggests Amp would look at it, and that is not the point — a
+// program whose central claim is that credentials stay put does not hand one
+// to a subprocess because it was convenient.
+//
+// So the environment is rebuilt from an allowlist, the same way the relay
+// rebuilds a payload. The list is generous about what a network client on a
+// corporate machine legitimately needs (proxies, CA bundles, locale) and says
+// nothing about secrets. AMP_* passes through because those are Amp's own
+// settings — including its API key, which is Amp's to hold.
+var ampEnvKeys = []string{
+	"HOME", "PATH", "USER", "LOGNAME", "SHELL", "TERM", "TZ", "TMPDIR", "LANG",
+	"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR",
+	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+	"http_proxy", "https_proxy", "no_proxy",
+	"SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+}
+
+func ampEnv() []string {
+	out := []string{"NO_COLOR=1"}
+	for _, k := range ampEnvKeys {
+		if v, ok := os.LookupEnv(k); ok {
+			out = append(out, k+"="+v)
+		}
+	}
+	for _, kv := range os.Environ() {
+		i := strings.IndexByte(kv, '=')
+		if i <= 0 {
+			continue
+		}
+		if k := kv[:i]; strings.HasPrefix(k, "AMP_") || strings.HasPrefix(k, "LC_") {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 type limitedWriter struct {
-	w io.Writer
-	n int
+	w    io.Writer
+	n    int
+	over bool
 }
 
 // Always reports the FULL length as written, whatever it actually kept. A
 // short write is an error to os/exec, which would abandon the read and turn a
-// capped-output run into a failed one — the opposite of the point.
+// capped-output run into a failed one — the opposite of the point. Overflow is
+// recorded rather than merely absorbed, because a caller that cannot tell it
+// happened will happily parse the truncated prefix and call it a reading.
 func (l *limitedWriter) Write(p []byte) (int, error) {
 	total := len(p)
 	if l.n <= 0 {
-		return total, nil // swallow the overflow; the process keeps running
+		l.over = true
+		return total, nil // swallow the rest; the process keeps running
 	}
 	if len(p) > l.n {
-		p = p[:l.n]
+		p, l.over = p[:l.n], true
 	}
 	n, err := l.w.Write(p)
 	l.n -= n
@@ -261,31 +354,48 @@ func (l *limitedWriter) Write(p []byte) (int, error) {
 // renames a row we lose that row and keep the others; the failure mode is a
 // gauge going missing, never a gauge going wrong.
 
+// Two rules hold every pattern below together, and both were mistakes in the
+// first version worth naming so they do not come back.
+//
+// SPACING IS [ \t], NEVER \s. In Go, \s matches \n, so `^Amp Free:\s*(digits)`
+// happily reaches across a line break and pairs the label on one line with a
+// number from somewhere further down the output. Restricting the run to
+// horizontal whitespace is what actually makes these single-line patterns.
+//
+// NUMBERS CARRY A GROUPING GRAMMAR. `[0-9][0-9,]*` accepts commas anywhere,
+// and the parser then strips them — so "$1,2.34" became $12.34 and "2,3 days"
+// became 23 days, both published as confident readings. The alternation below
+// accepts either properly grouped thousands or no separators at all, and
+// nothing in between; anything else fails to match and contributes no row,
+// which is the only acceptable direction to be wrong in.
 var (
 	ansiRE = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
 
-	amount = `([0-9][0-9,]*(?:\.[0-9]+)?)`
+	amount = `([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)`
+	days   = `([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)`
 
 	// "Signed in as someone@example.com" — matched for its shape only. The
 	// address is deliberately outside every capture group.
-	ampSignedInRE = regexp.MustCompile(`(?im)^\s*Signed in as\s+\S`)
+	ampSignedInRE = regexp.MustCompile(`(?im)^[ \t]*Signed in as[ \t]+\S`)
 
 	// "Amp Free: 100% remaining today (resets daily)"
-	ampFreePctRE = regexp.MustCompile(`(?im)^\s*Amp Free:\s*` + amount + `\s*%\s+remaining`)
+	ampFreePctRE = regexp.MustCompile(`(?im)^[ \t]*Amp Free:[ \t]*` + amount + `[ \t]*%[ \t]+remaining`)
 
 	// "Amp Free: $4.20 / $10.00 remaining (replenishes +$0.42/hour)" — the
 	// balance-shaped variant of the same row.
-	ampFreeAmtRE = regexp.MustCompile(`(?im)^\s*Amp Free:\s*\$?` + amount +
-		`\s*/\s*\$?` + amount + `\s+remaining(?:\s*\(replenishes\s*\+?\$?` + amount + `\s*/\s*hour\))?`)
+	ampFreeAmtRE = regexp.MustCompile(`(?im)^[ \t]*Amp Free:[ \t]*\$?` + amount +
+		`[ \t]*/[ \t]*\$?` + amount + `[ \t]+remaining(?:[ \t]*\(replenishes[ \t]*\+?\$?` +
+		amount + `[ \t]*/[ \t]*hour\))?`)
 
 	// "Subscription Megawatt: 19% other usage and 100% orb usage remaining -
 	//  resets upon renewal in 23 days"
-	ampSubRE = regexp.MustCompile(`(?im)^\s*Subscription\s+(.+?):\s*` + amount +
-		`\s*%\s+other\s+usage\s+and\s+` + amount +
-		`\s*%\s+orb\s+usage\s+remaining(?:\s*-\s*resets\s+upon\s+renewal\s+in\s+([0-9][0-9,]*)\s+days?)?`)
+	ampSubRE = regexp.MustCompile(`(?im)^[ \t]*Subscription[ \t]+(.+?):[ \t]*` + amount +
+		`[ \t]*%[ \t]+other[ \t]+usage[ \t]+and[ \t]+` + amount +
+		`[ \t]*%[ \t]+orb[ \t]+usage[ \t]+remaining(?:[ \t]*-[ \t]*resets[ \t]+upon[ \t]+renewal[ \t]+in[ \t]+` +
+		days + `[ \t]+days?)?`)
 
 	// "Individual credits: $8.71 remaining"
-	ampCreditsRE = regexp.MustCompile(`(?im)^\s*Individual credits:\s*\$?` + amount + `\s+remaining`)
+	ampCreditsRE = regexp.MustCompile(`(?im)^[ \t]*Individual credits:[ \t]*\$?` + amount + `[ \t]+remaining`)
 
 	ampSignedOutRE = regexp.MustCompile(`(?i)not (?:signed|logged) in|please (?:sign|log) in|run ['"` + "`" + `]?amp login`)
 )
@@ -312,7 +422,7 @@ func ampUsed(remaining float64) float64 {
 	return round2(used)
 }
 
-func parseAmpUsage(p Provider, out string, t float64) Provider {
+func parseAmpUsage(p Provider, out string, t float64, exited bool) Provider {
 	fail := func(err, detail string) Provider {
 		p.Error, p.Detail = err, detail
 		return p
@@ -379,8 +489,23 @@ func parseAmpUsage(p Provider, out string, t float64) Provider {
 	}
 
 	if len(p.Limits) == 0 && p.Credits == nil {
-		if ampSignedOutRE.MatchString(text) || !ampSignedInRE.MatchString(text) {
+		// Three different problems that look alike from an empty parse, and
+		// telling them apart is the whole value of the message: the fix for
+		// one is `amp login`, the fix for another is to wait, and the third is
+		// a parser we need to update.
+		//
+		// The earlier version treated "no sign-in line" as proof of being
+		// signed out, so a CLI printing "service unavailable" and exiting
+		// non-zero told the user to log in again — advice that cannot work and
+		// hides a transient outage. Only an explicit signed-out phrase claims
+		// that diagnosis now; a failing exit is reported as a failing exit.
+		switch {
+		case ampSignedOutRE.MatchString(text):
 			return fail("not-signed-in", "amp 未登录；跑一次 amp login。")
+		case exited:
+			return fail("cli-failed", "amp usage 以非零状态退出")
+		case !ampSignedInRE.MatchString(text):
+			return fail("cli-failed", "amp usage 的输出不是预期的形状")
 		}
 		return fail("no-readings", "amp usage 没有输出可识别的额度行")
 	}

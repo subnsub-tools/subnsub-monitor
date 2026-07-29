@@ -39,10 +39,10 @@ LABEL=com.subnsub.monitor   # shows up in `launchctl list`; brand domain there t
 # script that publishes the binaries. A binary that does not match is not installed, and a swapped binary
 # would otherwise be free to read ~/.claude/.credentials.json and post it
 # somewhere, which no amount of care in the Go source can prevent.
-SUM_linux_amd64=c5a1389c31babffd18de7beb04a302ed09254b00158d9bb403e2dbbbec2c6f20
-SUM_linux_arm64=5faa2f4758d0e6b59e4a7985a1babca83c5d857b34a47f04eede5b64aa1d81e8
-SUM_darwin_amd64=06be973233bea2c346fda3774484132cfa69ab9cb8708e87d8eefda35a49518b
-SUM_darwin_arm64=815dcf357cc437f8d2ac19afcd50ec6ac5a54dc7359056fce059f47bc6d2b8a4
+SUM_linux_amd64=c715153c44cd5993225791924cff5215f091e5206e06eff64929ddf8a87d7284
+SUM_linux_arm64=1f5603265cd81c8a13b215275cb659ec7f764541c2cec1ec0ee54342e76bdc9b
+SUM_darwin_amd64=3779c73c263207010621df09cea67c8161c2b2981270babe6ff828983cab52c7
+SUM_darwin_arm64=2ba97ca5f0d4e85cd44ba9f45d8b54c501c9e15487471810f2e62dc85a05be74
 
 say()  { printf '%s\n' "$*"; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
