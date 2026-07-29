@@ -100,22 +100,26 @@ func loadAgent() {
 //  2. the file, which is the ordinary case;
 //  3. a fresh id, saved if the directory will take it.
 func resolveAgent(dir, envID, envLabel string) (id, label string) {
+	// The label is settled FIRST, before any early return. It used to be read
+	// only on the path that reads the id file, so pinning MON_AGENT_ID — the
+	// container case, exactly where a name is most useful — silently threw away
+	// the name that `--name` had installed.
 	label = cleanLabel(envLabel)
+	// A label file sits beside the id and is only consulted when the
+	// environment did not supply one, so `MON_NAME=x` on a single run does not
+	// have to be undone afterwards.
+	if label == "" && dir != "" {
+		if b, err := os.ReadFile(filepath.Join(dir, "name")); err == nil {
+			label = cleanLabel(string(b))
+		}
+	}
+
 	if v := cleanID(envID); v != "" {
 		return v, label
 	}
 	if dir == "" {
 		warnf("no home directory: this machine's id will change on restart")
 		return newID(), label
-	}
-
-	// A label file sits beside the id and is only consulted when the
-	// environment did not supply one, so `MON_NAME=x` on a single run does not
-	// have to be undone afterwards.
-	if label == "" {
-		if b, err := os.ReadFile(filepath.Join(dir, "name")); err == nil {
-			label = cleanLabel(string(b))
-		}
 	}
 
 	path := filepath.Join(dir, "agent-id")

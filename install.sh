@@ -39,10 +39,10 @@ LABEL=com.subnsub.monitor   # shows up in `launchctl list`; brand domain there t
 # script that publishes the binaries. A binary that does not match is not installed, and a swapped binary
 # would otherwise be free to read ~/.claude/.credentials.json and post it
 # somewhere, which no amount of care in the Go source can prevent.
-SUM_linux_amd64=9d0555b8732a748a7d5310e923be70d985f2405ca3428f7fc011594225a3b2b0
-SUM_linux_arm64=ab054f5d3be2219b4d68c669af2998d2831ebaa29387b20fafa643b62f9ce2d5
-SUM_darwin_amd64=67d38a15ee224bbc2b3a5c7efd2ed72e32b185e981546605491264920fbe3d43
-SUM_darwin_arm64=973c5b00a2b9e953abb3517304d727a0370326a8bc1cc1e79a5b68b7b532d29a
+SUM_linux_amd64=17c2096341fd6de6c590b8f9292771963d95098f3243723abea3db9b6ef8ad8a
+SUM_linux_arm64=9a00e28688cc652ef5ffd83926134230db3fd5d1512451b7ba1688e54decfecf
+SUM_darwin_amd64=4eb2dc64f409eef878ab46a74225eb2a7be34288d33197ee883ea1aadb1f1a5e
+SUM_darwin_arm64=84c57ca1d36002cd11f0b84b225c9647627ec201f7a74d528de966418df50701
 
 say()  { printf '%s\n' "$*"; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -239,6 +239,14 @@ if [ -n "$NAME_ARG" ]; then
     mv -f "$conf/name.new" "$conf/name"
 fi
 
+# Materialise this machine's dashboard id now, out here, rather than leaving it
+# to the first run of the service. The service is sandboxed (see the unit
+# below) and on a host where that sandbox is actually enforced it cannot write
+# to $HOME — so the id would be regenerated on every start and the machine
+# would arrive at the relay as a brand new one after each restart. Creating it
+# here means the ordinary path never needs a runtime write at all.
+"$BINDIR/$NAME" name >/dev/null 2>&1 || true
+
 # ------------------------------------------------------------------ service
 case "$goos" in
   linux)
@@ -260,6 +268,13 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
+# …with one hole, and only this one: the directory holding this machine's
+# dashboard id. Without it, a host that actually enforces the sandbox above
+# gives the helper a read-only \$HOME, the id cannot be written, and every
+# restart shows up at the relay as a different machine. The leading '-' makes
+# it optional, so deleting the directory downgrades the helper rather than
+# leaving a unit that refuses to start.
+ReadWritePaths=-$conf
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
