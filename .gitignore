@@ -1,0 +1,8 @@
+# Cross-compiled binaries — regenerate with `cd go && sh build.sh`.
+# Never committed: a binary in the tree invites people to run bytes nobody
+# can diff, which is the opposite of what this repository is for.
+go/dist/
+
+# Python bytecode from the reference implementation.
+__pycache__/
+*.pyc
