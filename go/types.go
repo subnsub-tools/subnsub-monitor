@@ -105,8 +105,12 @@ func collectAll() Snapshot {
 		id string
 		fn func() Provider
 	}{
-		// Codex first: its numbers cost nothing — no credential, no network.
+		// Cheapest first, so the expensive ones cannot delay the free one.
+		// Codex is a local file — no credential, no network. Amp is a
+		// subprocess that talks to Amp on our behalf, so we hold no key. Claude
+		// is the only one where this program handles a credential itself.
 		{"codex", collectCodex},
+		{"amp", collectAmp},
 		{"claude", collectClaude},
 	} {
 		snap.Providers = append(snap.Providers, safeCollect(c.id, c.fn))
