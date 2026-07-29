@@ -28,28 +28,57 @@ code — but the idea got here from there, and that is the part worth crediting.
 
 ## What it can read, and what each reading costs
 
-Two providers, and the difference between them is the single most important
+Three providers, and what each one *costs to read* is the single most important
 fact about this program:
 
-| | Codex | Claude Code |
-|---|---|---|
-| Source | its own session logs on disk | the usage endpoint, over the network |
-| Credential needed | **none** | yes — the OAuth token Claude Code stores |
-| Network access needed | **none** | yes |
-| Freshness | only as current as your last actual Codex call | live at the moment of reading |
-| Reported as | `local log` | `live query` |
+| | Codex | Amp | Claude Code |
+|---|---|---|---|
+| Source | its own session logs on disk | `amp usage`, the vendor's own CLI | the usage endpoint, over the network |
+| Credential needed | **none** | **none — Amp's key stays inside Amp** | yes — the OAuth token Claude Code stores |
+| Network access needed | **none** | yes, but the request is Amp's, not ours | yes |
+| Freshness | only as current as your last actual Codex call | live at the moment of reading | live at the moment of reading |
+| Reported as | `local log` | `via CLI` | `live query` |
 
 Codex writes the rate-limit object the server hands it straight into
 `~/.codex/sessions/**/rollout-*.jsonl`, so reading a file is enough.
+
+Amp writes no balance to disk either, but it ships a CLI that will answer the
+question itself, so this program runs `amp usage` and parses four lines of text.
+That is the cheapest tier short of a local file: the API key in
+`~/.local/share/amp/secrets.json` is never opened, never held, never sent — the
+only thing crossing into this process is stdout. (Amp's first output line is the
+signed-in email address. It is matched for shape and discarded; no capture group
+in the parser can reach it, and a test asserts the address cannot appear in a
+published payload.)
 
 Claude Code writes **no quota to disk at all** — every nested key in recent
 transcripts was walked to check, and only `service_tier` is there. So the
 numbers have to be asked for, and asking requires the credential.
 
 Of eight AI-tool config directories examined on one developer machine, **only
-Codex persisted quota locally**. If you are wondering why tools in this space
-reach for OAuth tokens rather than reading a file: for every provider but one,
-there is no file.
+Codex persisted quota locally**. That is why tools in this space reach for OAuth
+tokens rather than reading a file — but it is not the whole story, because
+"ask the vendor's own CLI" is a third option that costs no credential at all,
+and it is the one to prefer wherever a vendor offers it.
+
+### Running another program
+
+Amp support means this helper executes a binary, which everything else here
+does not — the rest only reads files and makes one HTTPS request. The rules
+that come with that:
+
+- The binary is resolved to an **absolute path from a fixed list** (Amp's own
+  two install locations plus the two usual package prefixes), not taken from
+  `PATH`. `PATH` lookup remains only as a last resort, and `MON_AMP_BIN`
+  overrides everything — an override that does not check out is a refusal, not
+  a reason to run something else.
+- A **world-writable** binary is refused. Group-writable is not, because that is
+  the ordinary state of a Homebrew prefix.
+- stdin is the null device (a CLI that decides to prompt hits EOF instead of
+  hanging), there is a 15-second deadline, and output is read into a bounded
+  buffer.
+- Failures never quote the path being run: on a normal install that path
+  carries the local username, and collector failures are published.
 
 ## The line that holds
 
