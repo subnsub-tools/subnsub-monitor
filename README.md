@@ -150,9 +150,22 @@ cd go && sh build.sh          # → dist/codex-meter-{linux,darwin}-{amd64,arm64
 go test ./...
 ```
 
-Builds use `-trimpath`, so two people building the same commit get the same
-bytes. That is what makes "verify it against the source" a real offer rather
-than a slogan.
+Builds are reproducible: `-trimpath` keeps absolute paths out and
+`-buildvcs=false` keeps git state out. Build the same source anywhere and you
+get the same bytes as the published release — check them against the
+`SUM_*` lines in `install.sh`:
+
+```sh
+cd go && sh build.sh && sha256sum dist/*
+```
+
+That is what makes "verify it against the source" a real offer rather than a
+slogan, and it is worth stating why the second flag is there: Go stamps the
+commit hash and dirty flag into any binary built inside a work tree, so
+without it the same source built from a checkout, a tarball and our own tree
+produced three different binaries — and anyone taking the invitation to verify
+would have found a mismatch with no way to tell an innocent stamp from a
+swapped binary.
 
 ## Run it without installing anything
 

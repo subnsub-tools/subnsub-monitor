@@ -5,10 +5,19 @@
 #
 # Binaries are not committed — this is what regenerates them.
 #
-# -trimpath keeps absolute build paths out of the binary, which matters for
-# reproducibility: two people building the same commit should get the same
-# bytes, and that is the only thing that makes "verify it against the source"
-# a meaningful offer rather than a slogan.
+# -trimpath keeps absolute build paths out of the binary and -buildvcs=false
+# keeps the git state out of it. Both are needed for reproducibility: two
+# people building the same source should get the same bytes, and that is the
+# only thing that makes "verify it against the source" a meaningful offer
+# rather than a slogan.
+#
+# -buildvcs=false was NOT there at first, and the omission was invisible until
+# measured: Go stamps the commit hash and dirty flag into every binary built
+# inside a work tree, so the same source built from a checkout, a tarball, or
+# our own tree produced three different binaries. Anyone following the README's
+# invitation to verify would have found a mismatch and had no way to tell an
+# innocent stamp from a swapped binary. Losing the embedded commit is the
+# cheaper trade — SHA256SUMS already ties a release to its bytes.
 set -eu
 
 cd "$(dirname "$0")"
@@ -26,7 +35,7 @@ for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
     # CGO off so the Linux builds are genuinely static — a helper that needs a
     # matching glibc is a helper that fails on someone's older VPS.
     CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
-      "$go" build -trimpath -ldflags="-s -w" -o "$bin" .
+      "$go" build -trimpath -buildvcs=false -ldflags="-s -w" -o "$bin" .
     printf '%-24s %6s KiB\n' "$target" "$(( $(wc -c < "$bin") / 1024 ))"
 done
 
