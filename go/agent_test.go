@@ -111,6 +111,31 @@ func TestLabelPrecedenceAndPersistence(t *testing.T) {
 	if _, label := resolveAgent(t.TempDir(), "", ""); label != "" {
 		t.Fatalf("an unnamed machine should have no label, got %q", label)
 	}
+
+	// Pinning the id must not cost the machine its name. The container case —
+	// MON_AGENT_ID set because the filesystem does not survive a restart — is
+	// exactly where a human-readable name is worth most, and an early return
+	// before the label file is read silently threw it away.
+	if id, label := resolveAgent(dir, "pinned-by-env", ""); id != "pinned-by-env" || label != "from file" {
+		t.Fatalf("pinning the id lost the name: id=%q label=%q", id, label)
+	}
+}
+
+// Two helpers that started together must not stay in step: they share one
+// room, the relay paces the room, and a fixed cadence makes the pair that
+// collided once collide on every round forever.
+func TestJitterIsBounded(t *testing.T) {
+	seen := map[float64]bool{}
+	for i := 0; i < 200; i++ {
+		v := jitter()
+		if v < 0 || v >= 1 {
+			t.Fatalf("jitter() = %v, want [0,1)", v)
+		}
+		seen[v] = true
+	}
+	if len(seen) < 100 {
+		t.Fatalf("jitter() produced only %d distinct values in 200 draws", len(seen))
+	}
 }
 
 // The name is the only free text the helper sends. It is repaired rather than

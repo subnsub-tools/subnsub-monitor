@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"fmt"
 	"math"
 	"net/http"
@@ -178,18 +179,50 @@ func connect(base, token string, every float64) {
 				warnf("reconnected")
 			}
 			fails = 0
+		case resp.StatusCode == 429:
+			// The relay is pacing the ROOM, not rejecting us: several machines
+			// share one, and two that started together collide.
+			//
+			// Backing off by whole multiples of a fixed cadence is exactly the
+			// wrong answer here — the phase between two helpers never changes,
+			// so the pair that collided once collides on every subsequent
+			// round, forever. A short RANDOM wait is what breaks the lock:
+			// after it, the two are no longer in step.
+			resp.Body.Close()
+			warnf("relay is pacing us; retrying shortly")
+			wait = 2 + 3*jitter()
 		default:
 			// 4xx means this client is wrong (bad token, room not enabled) and
-			// retrying at speed won't fix it; 429 is the relay pacing us.
-			// Either way, back off rather than hammer.
+			// retrying at speed won't fix it. Back off rather than hammer.
 			code := resp.StatusCode
 			resp.Body.Close()
 			fails++
 			warnf("push rejected: %d", code)
 			wait = every * math.Min(math.Pow(2, float64(fails)), 10)
 		}
+		// Spread the steady-state cadence too, by a few percent. Machines
+		// installed in one sitting otherwise stay in lockstep for as long as
+		// they run, and the collision that costs one of them a push is the same
+		// collision every time.
+		if wait == every {
+			wait = every * (0.95 + 0.1*jitter())
+		}
 		time.Sleep(time.Duration(wait * float64(time.Second)))
 	}
+}
+
+// A float in [0,1), from the system CSPRNG.
+//
+// crypto/rand rather than math/rand because this binary already imports it for
+// the token and the machine id, and pulling in a second generator to seed for
+// scheduling noise buys nothing. A failure falls back to no jitter, which is
+// the pre-jitter behaviour rather than a hang.
+func jitter() float64 {
+	var b [2]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return 0
+	}
+	return float64(uint16(b[0])<<8|uint16(b[1])) / 65536.0
 }
 
 // A usable number of seconds, whatever was passed in.
