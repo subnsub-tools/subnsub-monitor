@@ -1,4 +1,4 @@
-codex-meter
+subnsub-monitor
 Copyright 2026 SUB&SUB LLC
 
 This product includes software developed at SUB&SUB LLC.
@@ -14,7 +14,7 @@ it — comes from CodexBar by Peter Steinberger:
     https://github.com/steipete/CodexBar
     MIT License, Copyright (c) Peter Steinberger
 
-CodexBar is a macOS menu-bar application. codex-meter is an independent
+CodexBar is a macOS menu-bar application. subnsub-monitor is an independent
 implementation in a different shape: a headless agent that dials out and
 pushes to a relay, so a browser can watch a machine it has no route to. No
 CodexBar source code is used or included here.

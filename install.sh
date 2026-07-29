@@ -1,14 +1,14 @@
 #!/bin/sh
-# codex-meter installer.
+# subnsub-monitor installer.
 #
-#   curl -fsSL https://tools.subnsub.com/meter/install.sh | sh -s -- <TOKEN>
+#   curl -fsSL https://tools.subnsub.com/monitor/install.sh | sh -s -- <TOKEN>
 #
-# Source: https://github.com/subnsub-tools/codex-meter (Apache-2.0)
+# Source: https://github.com/subnsub-tools/subnsub-monitor (Apache-2.0)
 #
 # …and if you would rather look first, which is the reasonable instinct for
 # anything that installs a background process:
 #
-#   curl -fsSL https://tools.subnsub.com/meter/install.sh -o install.sh
+#   curl -fsSL https://tools.subnsub.com/monitor/install.sh -o install.sh
 #   less install.sh && sh install.sh <TOKEN>
 #
 # Installs a single static binary to ~/.local/bin and registers it to run at
@@ -18,11 +18,11 @@
 # Uninstall:  sh install.sh --uninstall
 set -eu
 
-RELAY="${CM_RELAY:-https://meter.subnsub.com}"
-BASE="${CM_BASE:-https://tools.subnsub.com/meter}"   # where the binaries live
-NAME=codex-meter
-BINDIR="${CM_BINDIR:-$HOME/.local/bin}"
-LABEL=com.subnsub.codex-meter   # shows up in `launchctl list`; brand domain there too
+RELAY="${MON_RELAY:-https://monitor.subnsub.com}"
+BASE="${MON_BASE:-https://tools.subnsub.com/monitor}"   # where the binaries live
+NAME=subnsub-monitor
+BINDIR="${MON_BINDIR:-$HOME/.local/bin}"
+LABEL=com.subnsub.monitor   # shows up in `launchctl list`; brand domain there too
 
 # Expected SHA-256 of each published binary, baked in.
 #
@@ -33,10 +33,10 @@ LABEL=com.subnsub.codex-meter   # shows up in `launchctl list`; brand domain the
 # script that publishes the binaries. A binary that does not match is not installed, and a swapped binary
 # would otherwise be free to read ~/.claude/.credentials.json and post it
 # somewhere, which no amount of care in the Go source can prevent.
-SUM_linux_amd64=df94dff81c2e9019c776c14c5aefdbf981e3a374cef5603e4b9d43f88966456c
-SUM_linux_arm64=8634ff063a96a3d1870c0c8eb676fdd6dd221fa960970f1ad793475f8cf28a1d
-SUM_darwin_amd64=6c7c93059c848c868e9ffbbe16bc67f4df86ff3f84787ab7a9f202294b676bb7
-SUM_darwin_arm64=f247fbe147e33aaad92b7cc78cca76873b9dfc67f59ee7008dec7286df26e922
+SUM_linux_amd64=219fb84548bf2175b902d25b5008b7652e5810d33022102a8d30077e0316d6fb
+SUM_linux_arm64=dde26fe2c7a9909a513a230a21728df3225e69dcea2f24bf4941770c4a26b1fd
+SUM_darwin_amd64=4b03587975bb5fa7609d158631bd984fe3800ebf95002825b510e6fac25bde09
+SUM_darwin_arm64=94ce5c5ffd19403010f9e4926dc6e9306c98fce99237245d31241206a33784eb
 
 say()  { printf '%s\n' "$*"; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -44,8 +44,8 @@ die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 # ---------------------------------------------------------------- uninstall
 uninstall() {
     # Where the install actually put things, not where a default would guess.
-    # Without this, uninstalling after `CM_BINDIR=/opt/bin sh install.sh` would
-    # delete an unrelated ~/.local/bin/codex-meter and leave the real one
+    # Without this, uninstalling after `MON_BINDIR=/opt/bin sh install.sh` would
+    # delete an unrelated ~/.local/bin/subnsub-monitor and leave the real one
     # running.
     manifest="$HOME/.config/$NAME/manifest"
     if [ -f "$manifest" ]; then
@@ -73,7 +73,7 @@ uninstall() {
 [ "${1:-}" = "--uninstall" ] && uninstall
 
 # ------------------------------------------------------------------- token
-TOKEN="${1:-${CODEX_METER_TOKEN:-}}"
+TOKEN="${1:-${SUBNSUB_MONITOR_TOKEN:-}}"
 [ -n "$TOKEN" ] || die "no token. Usage: sh install.sh <TOKEN>"
 
 # Same shape the relay accepts. Beyond catching typos this is what keeps a
@@ -181,7 +181,7 @@ umask 077
 # and keeps whatever mode the old file had until the chmod lands — by which
 # time the secret has already been written under it.
 rm -f "$conf/token.new"
-printf 'CODEX_METER_TOKEN=%s\n' "$TOKEN" > "$conf/token.new"
+printf 'SUBNSUB_MONITOR_TOKEN=%s\n' "$TOKEN" > "$conf/token.new"
 chmod 0600 "$conf/token.new"
 mv -f "$conf/token.new" "$conf/token"
 
@@ -203,7 +203,7 @@ case "$goos" in
     mkdir -p "$unitdir"
     cat > "$unitdir/$NAME.service" <<EOF
 [Unit]
-Description=codex-meter — pushes AI coding quota to $RELAY
+Description=subnsub-monitor — pushes AI coding quota to $RELAY
 After=network-online.target
 
 [Service]
@@ -259,7 +259,7 @@ EOF
     <string>$RELAY</string>
   </array>
   <key>EnvironmentVariables</key>
-  <dict><key>CODEX_METER_TOKEN</key><string>$TOKEN</string></dict>
+  <dict><key>SUBNSUB_MONITOR_TOKEN</key><string>$TOKEN</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>30</integer>

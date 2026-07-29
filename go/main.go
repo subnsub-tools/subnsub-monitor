@@ -11,18 +11,18 @@ import (
 
 var stderr = os.Stderr
 
-const usage = `codex-meter — AI coding quota for machines you can't reach
+const usage = `subnsub-monitor — AI coding quota for machines you can't reach
 
-  codex-meter                        one snapshot as JSON, exit
-  codex-meter watch [SEC]            reprint every SEC seconds
-  codex-meter serve [PORT]           serve /quota + /events on 127.0.0.1
-  codex-meter token                  mint a relay token
-  codex-meter connect URL [TOKEN]    dial out and push to the relay
-  codex-meter selftest               show what the collectors can and cannot open
+  subnsub-monitor                        one snapshot as JSON, exit
+  subnsub-monitor watch [SEC]            reprint every SEC seconds
+  subnsub-monitor serve [PORT]           serve /quota + /events on 127.0.0.1
+  subnsub-monitor token                  mint a relay token
+  subnsub-monitor connect URL [TOKEN]    dial out and push to the relay
+  subnsub-monitor selftest               show what the collectors can and cannot open
 
 serve only ever shows you THIS machine. connect is the real shape:
 outbound-only, so a browser anywhere can watch a box it has no route to.
-The token may also come from CODEX_METER_TOKEN, which keeps it out of ps.
+The token may also come from SUBNSUB_MONITOR_TOKEN, which keeps it out of ps.
 `
 
 func main() {
@@ -64,11 +64,11 @@ func main() {
 			fmt.Print(usage)
 			os.Exit(2)
 		}
-		token := os.Getenv("CODEX_METER_TOKEN")
+		token := os.Getenv("SUBNSUB_MONITOR_TOKEN")
 		rest := args[2:]
 		if token == "" {
 			if len(args) < 3 {
-				warnf("no token: pass one, or set CODEX_METER_TOKEN")
+				warnf("no token: pass one, or set SUBNSUB_MONITOR_TOKEN")
 				os.Exit(2)
 			}
 			token = args[2]

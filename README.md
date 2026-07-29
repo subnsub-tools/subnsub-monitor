@@ -1,4 +1,4 @@
-# codex-meter
+# subnsub-monitor
 
 Reads how much AI coding quota is left on a machine, and pushes it somewhere
 you can see it.
@@ -12,7 +12,7 @@ route.
 ```
   machine you can't reach                     you
   ┌──────────────────┐                  ┌───────────┐
-  │  codex-meter     │──POST /push──▶ relay ◀──WS──│  browser  │
+  │  subnsub-monitor     │──POST /push──▶ relay ◀──WS──│  browser  │
   └──────────────────┘   (outbound only)           └───────────┘
 ```
 
@@ -116,14 +116,14 @@ machine.
 ## Install
 
 ```sh
-curl -fsSL https://tools.subnsub.com/meter/install.sh | sh -s -- <TOKEN>
+curl -fsSL https://tools.subnsub.com/monitor/install.sh | sh -s -- <TOKEN>
 ```
 
 …and if you would rather look first, which is the reasonable instinct for
 anything that installs a background process:
 
 ```sh
-curl -fsSL https://tools.subnsub.com/meter/install.sh -o install.sh
+curl -fsSL https://tools.subnsub.com/monitor/install.sh -o install.sh
 less install.sh && sh install.sh <TOKEN>
 ```
 
@@ -139,14 +139,14 @@ authenticates nothing — whoever can swap one can swap the other. These live in
 the file you were invited to read.
 
 > The copy of `install.sh` in this repository is a snapshot. The authoritative
-> one is served from `tools.subnsub.com/meter/install.sh` and is re-stamped
+> one is served from `tools.subnsub.com/monitor/install.sh` and is re-stamped
 > with fresh checksums on every release, so the hashes here may lag a release
 > behind.
 
 ## Build it yourself
 
 ```sh
-cd go && sh build.sh          # → dist/codex-meter-{linux,darwin}-{amd64,arm64}
+cd go && sh build.sh          # → dist/subnsub-monitor-{linux,darwin}-{amd64,arm64}
 go test ./...
 ```
 
@@ -170,18 +170,18 @@ swapped binary.
 ## Run it without installing anything
 
 ```sh
-codex-meter                   # one snapshot as JSON, exit
-codex-meter watch [SEC]       # reprint every SEC seconds
-codex-meter serve [PORT]      # serve /quota + /events on 127.0.0.1 only
-codex-meter selftest          # show what the collectors can and cannot open
-codex-meter token             # mint a relay token
-codex-meter connect URL [TOKEN]
+subnsub-monitor                   # one snapshot as JSON, exit
+subnsub-monitor watch [SEC]       # reprint every SEC seconds
+subnsub-monitor serve [PORT]      # serve /quota + /events on 127.0.0.1 only
+subnsub-monitor selftest          # show what the collectors can and cannot open
+subnsub-monitor token             # mint a relay token
+subnsub-monitor connect URL [TOKEN]
 ```
 
 `serve` only ever shows you *this* machine, and binds to `127.0.0.1` — never
 `0.0.0.0`. `connect` is the shape that matters.
 
-Pass the token via `CODEX_METER_TOKEN` rather than as an argument to keep it
+Pass the token via `SUBNSUB_MONITOR_TOKEN` rather than as an argument to keep it
 out of `ps`.
 
 ## Pointing it at your own relay
@@ -191,18 +191,18 @@ accept tokens issued to accounts entitled to use it. **You do not need it.**
 The agent talks to any endpoint that implements two things:
 
 - `POST /push` with `Authorization: Bearer <token>` and a JSON body — the
-  snapshot as printed by `codex-meter` with no arguments. Answer `200` to
+  snapshot as printed by `subnsub-monitor` with no arguments. Answer `200` to
   accept. Non-2xx makes the agent back off exponentially.
 - Whatever you like for delivery to a viewer. The agent does not care.
 
 ```sh
-CM_RELAY=https://relay.example.com sh install.sh <TOKEN>
+MON_RELAY=https://relay.example.com sh install.sh <TOKEN>
 # or, without installing:
-codex-meter connect https://relay.example.com <TOKEN>
+subnsub-monitor connect https://relay.example.com <TOKEN>
 ```
 
 A token is a bearer secret: whoever holds it can push readings and read them.
-`codex-meter token` mints one from the system CSPRNG.
+`subnsub-monitor token` mints one from the system CSPRNG.
 
 Treat everything a helper pushes as hostile input. The protocol is public and
 this agent is open source, so anyone can POST anything at your relay —
@@ -211,7 +211,7 @@ arrived, or you have built an XSS delivery service with a CDN in front of it.
 
 ## Reference implementation
 
-`reference/codex-meter.py` is the original Python proof of concept. It is kept
+`reference/monitor.py` is the original Python proof of concept. It is kept
 because it is where the file formats, the endpoint, and every trap five review
 rounds turned up were actually found. The Go port is what ships; the Python is
 what explains it.

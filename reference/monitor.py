@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""codex-meter — AI coding quota for machines you can't reach.
+"""subnsub-monitor — AI coding quota for machines you can't reach.
 
    Two providers, and they get their numbers in fundamentally different ways.
 
@@ -47,12 +47,12 @@
    openat2(RESOLVE_BENEATH) where this walks by hand).
 
    Usage:
-     ./codex-meter.py                        one snapshot as JSON, exit
-     ./codex-meter.py --watch [SEC]          reprint every SEC seconds
-     ./codex-meter.py --serve [PORT]         serve /quota + /events locally
-     ./codex-meter.py --new-token            mint a relay token
-     ./codex-meter.py --connect URL TOKEN    dial out and push to the relay
-     ./codex-meter.py --selftest             show exactly which paths get opened
+     ./monitor.py                        one snapshot as JSON, exit
+     ./monitor.py --watch [SEC]          reprint every SEC seconds
+     ./monitor.py --serve [PORT]         serve /quota + /events locally
+     ./monitor.py --new-token            mint a relay token
+     ./monitor.py --connect URL TOKEN    dial out and push to the relay
+     ./monitor.py --selftest             show exactly which paths get opened
 
    --serve only ever shows you THIS machine. --connect is the real shape:
    outbound-only, so a browser anywhere can watch a box it has no route to.
@@ -534,7 +534,7 @@ def collect_claude(timeout=8.0):
         req = urllib.request.Request(CLAUDE_USAGE_URL, headers={
             'Authorization': 'Bearer ' + token,
             'Content-Type': 'application/json',
-            'User-Agent': 'codex-meter/poc',
+            'User-Agent': 'subnsub-monitor/poc',
         })
         # Default urlopen follows redirects and Python's redirect handler keeps
         # the Authorization header while doing it — a redirect from the usage
@@ -677,7 +677,7 @@ def _dump(payload):
 # --------------------------------------------------------------------------
 # Local server for the demo page.
 #
-# The shipping design has the helper DIAL OUT to a relay it connects to, so
+# The shipping design has the helper DIAL OUT over WSS to a Durable Object, so
 # a browser can watch a machine it has no route to. This local listener exists
 # only so the PoC can be driven from a demo page with no server deployed; the
 # collection half above is unchanged either way.
@@ -785,7 +785,7 @@ def _serve(port):
     # 127.0.0.1, never 0.0.0.0 — this must not be reachable from the network.
     srv = ThreadingHTTPServer(('127.0.0.1', port), Handler)
     srv.daemon_threads = True
-    print('codex-meter serving on http://127.0.0.1:%d  (/quota, /events)' % port,
+    print('subnsub-monitor serving on http://127.0.0.1:%d  (/quota, /events)' % port,
           file=sys.stderr)
     srv.serve_forever()
 
@@ -822,7 +822,7 @@ def _connect(base, token, every=30.0):
                      # Bearer, not a query parameter: a token in the URL ends
                      # up in the relay's request logs and every proxy between.
                      'Authorization': 'Bearer ' + token,
-                     'User-Agent': 'codex-meter/poc'})
+                     'User-Agent': 'subnsub-monitor/poc'})
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 resp.read()
@@ -895,7 +895,7 @@ def _symlink_probe():
     import tempfile
     outside = link = None
     try:
-        outside = tempfile.mkdtemp(prefix='codex-meter-probe-')
+        outside = tempfile.mkdtemp(prefix='subnsub-monitor-probe-')
         (Path(outside) / 'rollout-outside.jsonl').write_text('{}\n')
         link = Path(SESSIONS_ROOT) / ('probe-dir-%d' % os.getpid())
         os.symlink(outside, link)
@@ -957,19 +957,19 @@ def main():
     elif cmd == '--new-token':
         _new_token()
     elif cmd == '--connect':
-        # CODEX_METER_TOKEN keeps the secret off the command line, where any
+        # SUBNSUB_MONITOR_TOKEN keeps the secret off the command line, where any
         # other user on the box can read it out of `ps`. The positional form
         # still works for a quick try.
-        env_token = os.environ.get('CODEX_METER_TOKEN', '').strip()
+        env_token = os.environ.get('SUBNSUB_MONITOR_TOKEN', '').strip()
         if len(args) < 2:
             print('usage: --connect <relay-url> [token] [seconds]\n'
-                  '       CODEX_METER_TOKEN=<token> --connect <relay-url> [seconds]')
+                  '       SUBNSUB_MONITOR_TOKEN=<token> --connect <relay-url> [seconds]')
             sys.exit(2)
         if env_token:
             rest = args[2:]
         else:
             if len(args) < 3:
-                print('no token: pass one, or set CODEX_METER_TOKEN')
+                print('no token: pass one, or set SUBNSUB_MONITOR_TOKEN')
                 sys.exit(2)
             env_token = args[2]
             rest = args[3:]

@@ -1,6 +1,7 @@
-// Package main — codex-meter, the shipping helper.
+// Package main — subnsub-monitor, the shipping helper.
 //
-// Ported from reference/codex-meter.py, which stays as the reference: the Python
+// Ported from the Python reference implementation, which stays as the
+// reference: the Python
 // found the file formats, the endpoint, and every trap five review rounds
 // turned up.
 //
