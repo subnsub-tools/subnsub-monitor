@@ -3,6 +3,8 @@
 #
 #   curl -fsSL https://tools.subnsub.com/meter/install.sh | sh -s -- <TOKEN>
 #
+# Source: https://github.com/subnsub-tools/codex-meter (Apache-2.0)
+#
 # …and if you would rather look first, which is the reasonable instinct for
 # anything that installs a background process:
 #
