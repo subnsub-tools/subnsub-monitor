@@ -365,8 +365,11 @@ func TestRenewalRefusalsAreTyped(t *testing.T) {
 	lapsed := renewServer(t, 403, `{"error":"plus-required"}`)
 	defer lapsed.Close()
 	_, err = requestRenewal(lapsed.URL, held)
-	if r, ok := err.(renewRefusal); !ok || !r.terminal {
-		t.Errorf("a lapsed subscription should be terminal, got %#v", err)
+	// ★ NOT terminal. Entitlement changes outside this process — somebody who
+	// resubscribes tomorrow must not find their machines frozen out for a
+	// month. Only 401 ("this token will never verify again") earns that.
+	if r, ok := err.(renewRefusal); !ok || r.terminal {
+		t.Errorf("★ a lapsed subscription is recoverable and must not be treated as final: %#v", err)
 	}
 
 	unlinked := renewServer(t, 403, `{"error":"subject-unknown"}`)
@@ -430,8 +433,17 @@ func TestRejectedRenewalRollsBackToTheWorkingToken(t *testing.T) {
 	if storedToken(officialRelay) != "" {
 		t.Error("and nothing should have been written")
 	}
-	if !r.next.After(now.Add(renewRetryMax)) {
+	if !r.next.After(now.Add(time.Minute)) {
 		t.Error("and it should not immediately try again")
+	}
+	// ★ The freeze must expire while the token we fell back to is STILL ALIVE.
+	// It has at most a fortnight left (the server only renews inside that
+	// window), so an unbounded park would still be in force when it died — and
+	// the forced path that exists to rescue exactly that would be parked too.
+	// A month of silence from a helper that had a working credential all along.
+	heldExp, _ := tokenExpiry(held)
+	if !r.next.Before(heldExp) {
+		t.Errorf("★ the rollback freeze outlives the token it protects: next=%v, token dies %v", r.next, heldExp)
 	}
 	if _, again := r.rollback(now); again {
 		t.Error("there is nothing left to roll back to")
@@ -468,5 +480,139 @@ func TestConfirmRetriesASaveThatFailed(t *testing.T) {
 	r.confirm()
 	if storedToken(officialRelay) != good {
 		t.Error("the next accepted push should retry the save")
+	}
+}
+
+// ── the state machine as the push loop actually drives it ──────────────────
+//
+// These go through afterPush, which is what transport.go calls. Driving
+// confirm() and rollback() directly proved they worked and proved nothing
+// about whether anything called them: a push loop that committed on a 429, or
+// never rolled back at all, left every one of those tests green.
+
+func newRenewerAt(t *testing.T, srvURL string) *renewer {
+	t.Helper()
+	r := newRenewer(officialRelay)
+	r.site = srvURL
+	return r
+}
+
+func TestAfterPushCommitsOnlyOnAcceptance(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	now := time.Now()
+	held := fakeTokenFor(0xA1, now.Add(3*24*time.Hour))
+	good := fakeTokenFor(0xA1, now.Add(30*24*time.Hour))
+
+	srv := renewServer(t, 200, `{"token":"`+good+`"}`)
+	defer srv.Close()
+	r := newRenewerAt(t, srv.URL)
+	tok := r.attempt(held, now)
+
+	// Anything that is not a 200 must leave it pending. 429 is the one that
+	// matters: the relay paces a busy room routinely, and treating that as
+	// proof would commit a token the relay has not actually accepted.
+	for _, code := range []int{429, 500, 503} {
+		if got := r.afterPush(code, tok, now); got != tok {
+			t.Errorf("a %d should not change the token in hand", code)
+		}
+		if storedToken(officialRelay) != "" {
+			t.Errorf("★ a %d is not acceptance and must not commit the renewal", code)
+		}
+	}
+
+	if got := r.afterPush(200, tok, now); got != tok {
+		t.Error("an accepted push keeps the token")
+	}
+	if storedToken(officialRelay) != good {
+		t.Error("★ and commits it — this is the only path that may")
+	}
+}
+
+func TestAfterPushRollsBackWhenTheRelayRefusesARenewal(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	now := time.Now()
+	held := fakeTokenFor(0xA1, now.Add(3*24*time.Hour))
+	good := fakeTokenFor(0xA1, now.Add(30*24*time.Hour))
+
+	srv := renewServer(t, 200, `{"token":"`+good+`"}`)
+	defer srv.Close()
+	r := newRenewerAt(t, srv.URL)
+	tok := r.attempt(held, now)
+
+	got := r.afterPush(403, tok, now)
+	if got != held {
+		t.Errorf("★ the push loop must fall back to the token that was working, got %q", got)
+	}
+	if storedToken(officialRelay) != "" {
+		t.Error("and must not have written the refused one")
+	}
+	// The freeze has to end while the fallback token is still alive.
+	heldExp, _ := tokenExpiry(held)
+	if !r.next.Before(heldExp) {
+		t.Errorf("★ freeze outlives the token it fell back to: next=%v, dies %v", r.next, heldExp)
+	}
+}
+
+func TestParkNeverOutlivesTheTokenItProtects(t *testing.T) {
+	now := time.Now()
+	r := newRenewer(officialRelay)
+
+	// A token with six hours left and a twelve-hour backoff: the clamp is the
+	// only thing that keeps the next attempt on the living side of expiry.
+	short := fakeTokenFor(0xA1, now.Add(6*time.Hour))
+	r.park(now, short, renewRetryMax)
+	exp, _ := tokenExpiry(short)
+	if !r.next.Before(exp) {
+		t.Errorf("★ parked past expiry: next=%v, token dies %v", r.next, exp)
+	}
+
+	// Inside the final hour it should still come back, and not spin.
+	last := fakeTokenFor(0xA1, now.Add(20*time.Minute))
+	r.park(now, last, renewRetryMax)
+	if !r.next.After(now) || r.next.After(now.Add(time.Hour)) {
+		t.Errorf("in the final stretch it should retry soon but not spin, got %v", r.next.Sub(now))
+	}
+
+	// A token with no expiry has nothing to clamp against; the plain backoff
+	// stands.
+	r.park(now, legacyToken(), renewRetryMax)
+	if r.next.Before(now.Add(renewRetryMax/2)) {
+		t.Error("an unsigned token should still get the full backoff")
+	}
+}
+
+func TestLapsedEntitlementIsRetriedBeforeTheTokenDies(t *testing.T) {
+	now := time.Now()
+	held := fakeTokenFor(0xA1, now.Add(10*24*time.Hour))
+
+	srv := renewServer(t, 403, `{"error":"plus-required"}`)
+	defer srv.Close()
+	r := newRenewerAt(t, srv.URL)
+	_ = r.attempt(held, now)
+
+	// ★ Somebody who resubscribes tomorrow morning must find their machines
+	// renewing again, not frozen out until next month.
+	if r.next.After(now.Add(renewRetryMax + time.Minute)) {
+		t.Errorf("★ a lapsed subscription must be re-checked within hours, not weeks (parked %v)", r.next.Sub(now))
+	}
+}
+
+func TestRetryAfterKeepsItsFloorThroughTheJitter(t *testing.T) {
+	r := newRenewer(officialRelay)
+	r.fails = 1
+	floor := renewRetryMin / 4
+	for i := 0; i < 64; i++ {
+		d := r.backoff(renewRefusal{msg: "too early", retryAfter: floor})
+		if d < floor {
+			// Undershooting lands the request back inside the server's own
+			// pacing gap, earning a second 429 and a longer wait than simply
+			// waiting would have cost.
+			t.Fatalf("★ jitter took the wait below its floor: %v < %v", d, floor)
+		}
+		if d > renewRetryMax {
+			t.Fatalf("and it must still respect the ceiling: %v", d)
+		}
 	}
 }
