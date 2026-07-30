@@ -79,6 +79,15 @@ type Snapshot struct {
 	// unset, so the page falls back to the id rather than inventing a name.
 	AgentID    string `json:"agent_id,omitempty"`
 	AgentLabel string `json:"agent_name,omitempty"`
+	// Which build is reporting. The dashboard is the only place anyone can
+	// find out that a machine is running a helper from before some provider
+	// existed — nothing else on a box you have no route to will tell you — and
+	// without this the page cannot tell a current helper from a year-old one.
+	//
+	// Not a fingerprint: it is the same string for everyone on a given build,
+	// says nothing about the machine, and is the one piece of self-description
+	// here that the user can act on.
+	HelperVersion string `json:"helper_version,omitempty"`
 	// Machine health. A pointer so a platform that can measure nothing at all
 	// omits the key rather than shipping a shell of nulls — see system.go for
 	// what each platform can actually read, and why.
@@ -100,7 +109,8 @@ func bp(b bool) *bool       { return &b }
 // these run on other people's machines against files this program does not
 // control, and one bad rollout should not take the helper down.
 func collectAll() Snapshot {
-	snap := Snapshot{CapturedAt: now(), AgentID: agentID(), AgentLabel: agentLabel()}
+	snap := Snapshot{CapturedAt: now(), AgentID: agentID(), AgentLabel: agentLabel(),
+		HelperVersion: helperVersion}
 	for _, c := range []struct {
 		id string
 		fn func() Provider
