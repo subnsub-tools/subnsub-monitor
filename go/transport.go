@@ -192,10 +192,7 @@ func connect(base, token string, every float64) {
 				warnf("reconnected")
 			}
 			fails = 0
-			// This token just worked. If it came from a renewal it has now
-			// earned its place on disk — see the note on renewer.pending for
-			// why receipt was not enough.
-			renew.confirm()
+			token = renew.afterPush(200, token, time.Now())
 		case resp.StatusCode == 429:
 			// The relay is pacing the ROOM, not rejecting us: several machines
 			// share one, and two that started together collide.
@@ -216,24 +213,10 @@ func connect(base, token string, every float64) {
 			fails++
 			warnf("push rejected: %d", code)
 			// 401/403 is the relay saying this token is not (or is no longer)
-			// one it will take, which is the other moment worth asking the site
-			// for a new one — an expiry that arrived while this process was
-			// running, or an entitlement that changed. The renewer keeps its own
-			// backoff, so a refusal renewal cannot fix does not turn into one
-			// request per push.
-			if code == 401 || code == 403 {
-				now := time.Now()
-				// If we are pushing with a token the site just handed us and
-				// the relay will not take it, the renewal was the problem.
-				// Going back beats renewing again into the same wall — the two
-				// sides verify with one secret, and the state where they
-				// disagree is a rotation in progress, not something to retry.
-				if back, rolled := renew.rollback(now); rolled {
-					token = back
-				} else if renew.due(token, now, true) {
-					token = renew.attempt(token, now)
-				}
-			}
+			// one it will take — the other moment worth asking the site for a
+			// new one. What that means for the renewal state lives in
+			// afterPush, so the tests exercise the same path this does.
+			token = renew.afterPush(code, token, time.Now())
 			wait = every * math.Min(math.Pow(2, float64(fails)), 10)
 		}
 		// Spread the steady-state cadence too, by a few percent. Machines

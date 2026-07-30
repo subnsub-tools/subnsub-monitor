@@ -272,8 +272,16 @@ has no idea who anyone is:
 is not ours and is not ours to present anywhere; the agent will not POST it to
 our site because your relay answered `403`. Renewal happens only when the relay
 is the one this installer ships with, or when you name your own issuer with
-`SUBNSUB_MONITOR_SITE=https://…`. A token with no expiry field is never renewed
-either, so a relay that mints its own tokens needs none of this.
+`SUBNSUB_MONITOR_SITE=https://…` — which the installer validates and writes into
+the service definition, so it survives into the background process rather than
+being lost with the shell you typed it in. A token with no expiry field is never
+renewed either, so a relay that mints its own tokens needs none of this.
+
+```sh
+MON_RELAY=https://relay.example.com \
+SUBNSUB_MONITOR_SITE=https://issuer.example.com \
+  sh install.sh <TOKEN>
+```
 
 When it is on:
 

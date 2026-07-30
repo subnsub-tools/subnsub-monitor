@@ -69,7 +69,18 @@ const (
 	// A refusal that says "this credential is finished" is not retried on that
 	// schedule at all. Nothing this side can do fixes it, and a machine left
 	// running for a year should not spend the year asking.
+	//
+	// ⚠ RESERVED FOR 401 AND NOTHING ELSE. A lapsed subscription looks similar
+	// and is not the same: entitlement changes outside this process, so somebody
+	// who resubscribes the next morning must not find their machines frozen out
+	// for a month. Only "this token will never verify again" belongs here.
 	renewRetryDead = 30 * 24 * time.Hour
+
+	// However long a backoff says, stop short of the expiry of the token we are
+	// holding. A freeze that outlives the credential it was protecting is not a
+	// backoff, it is an outage with extra steps — the machine wakes up, finds an
+	// expired token, and the forced path is still parked.
+	renewLastCall = time.Hour
 
 	// A renewal answer is two short fields. Anything larger is not one.
 	maxRenewBody = 4 << 10
@@ -382,7 +393,7 @@ func (r *renewer) attempt(tok string, now time.Time) string {
 	fresh, err := requestRenewal(r.site, tok)
 	if err != nil {
 		r.fails++
-		r.next = now.Add(r.backoff(err))
+		r.park(now, tok, r.backoff(err))
 		warnf("could not renew the relay token: %v", err)
 		return tok
 	}
@@ -408,6 +419,7 @@ func (r *renewer) attempt(tok string, now time.Time) string {
 // otherwise retry in lockstep forever.
 func (r *renewer) backoff(err error) time.Duration {
 	var d, ceiling time.Duration
+	floor := time.Duration(0)
 	switch e := err.(type) {
 	case renewRefusal:
 		switch {
@@ -415,10 +427,7 @@ func (r *renewer) backoff(err error) time.Duration {
 			// The server said when. A floor as well as a ceiling: `renew_after`
 			// is a number off the network, and it is not a channel for making
 			// this helper sleep for a year OR spin.
-			d, ceiling = e.retryAfter, renewRetryMax
-			if d < renewRetryMin/4 {
-				d = renewRetryMin / 4
-			}
+			d, ceiling, floor = e.retryAfter, renewRetryMax, renewRetryMin/4
 		case e.terminal:
 			d, ceiling = renewRetryDead, renewRetryDead
 		default:
@@ -427,15 +436,45 @@ func (r *renewer) backoff(err error) time.Duration {
 	default:
 		d, ceiling = r.growing(), renewRetryMax
 	}
-	// ±5%, so a fleet that failed together does not return together. Applied
-	// BEFORE the clamp, not after — otherwise the ceiling is a ceiling plus 5%,
-	// which is exactly the kind of "cap that isn't" a hostile retry_after would
-	// aim for.
+	// ±5%, so a fleet that failed together does not return together. Both bounds
+	// are re-applied AFTER the jitter, not before: clamping first leaves a
+	// ceiling that is really the ceiling plus 5% (the shape a hostile
+	// renew_after would aim for) and a floor that is really the floor minus 5%
+	// — and undershooting the floor lands the request back inside the server's
+	// own pacing gap, earning a second 429 and a longer wait than if it had
+	// simply waited.
 	d = time.Duration(float64(d) * (0.95 + 0.1*jitter()))
 	if d > ceiling {
 		d = ceiling
 	}
+	if d < floor {
+		d = floor
+	}
 	return d
+}
+
+// Park until `now + d`, but never past the last moment the token we hold could
+// still have been renewed.
+//
+// Every backoff here is longer than some token's remaining life: the server
+// only renews inside a 14-day window and the helper starts at 7 days, so a
+// 30-day freeze — or even a 12-hour one on a token with six hours left —
+// guarantees the machine is still parked when its credential dies, at which
+// point the forced path cannot rescue it either because the freeze outlives
+// that too. Clamping here is what keeps a backoff from becoming a one-way door.
+func (r *renewer) park(now time.Time, tok string, d time.Duration) {
+	next := now.Add(d)
+	if exp, ok := tokenExpiry(tok); ok && exp.After(now) {
+		latest := exp.Add(-renewLastCall)
+		if !latest.After(now) {
+			// Already inside the final hour. Keep trying, but not in a spin.
+			latest = now.Add(renewRetryMin / 4)
+		}
+		if next.After(latest) {
+			next = latest
+		}
+	}
+	r.next = next
 }
 
 func (r *renewer) growing() time.Duration {
@@ -475,9 +514,46 @@ func (r *renewer) rollback(now time.Time) (string, bool) {
 	}
 	back := r.prev
 	r.pending, r.prev = "", ""
-	r.next = now.Add(renewRetryDead)
+	// Long enough to sit out a secret rotation, but CLAMPED TO THE OLD TOKEN'S
+	// OWN LIFE. The token we are falling back to has at most a fortnight left —
+	// the server only renews inside that window — so an unbounded freeze here
+	// would still be in force when it expired, and the forced path that exists
+	// to rescue exactly that case would find itself parked too. A month of
+	// silence, from a helper that had a working credential the whole time.
+	r.park(now, back, renewRetryMax)
 	warnf("the relay refused the renewed token; falling back to the previous one")
 	return back, true
+}
+
+// Fold a push result into the renewal state, and hand back the token to use for
+// the next one.
+//
+// This lives here rather than inline in the push loop so that the thing the
+// tests drive is the thing transport.go runs. Testing confirm() and rollback()
+// directly proved they worked and proved nothing about whether anyone called
+// them — a push loop that committed on a 429, or never rolled back at all,
+// would have left every one of those tests green.
+func (r *renewer) afterPush(code int, tok string, now time.Time) string {
+	switch {
+	case code == 200:
+		// This token just worked. If it came from a renewal it has now earned
+		// its place on disk — see the note on renewer.pending for why receipt
+		// was not enough.
+		r.confirm()
+	case code == 401 || code == 403:
+		// If we are pushing with a token the site just handed us and the relay
+		// will not take it, the renewal was the problem. Going back beats
+		// renewing again into the same wall — the two sides verify with one
+		// secret, and the state where they disagree is a rotation in progress,
+		// not something to retry.
+		if back, rolled := r.rollback(now); rolled {
+			return back
+		}
+		if r.due(tok, now, true) {
+			return r.attempt(tok, now)
+		}
+	}
+	return tok
 }
 
 // One renewal request.
@@ -580,10 +656,13 @@ func renewError(resp *http.Response) error {
 			terminal: true,
 		}
 	case resp.StatusCode == 403 && out.Error == "plus-required":
-		return renewRefusal{
-			msg:      "this account is no longer entitled to the relay",
-			terminal: true,
-		}
+		// NOT terminal, despite reading like it. Entitlement is state that
+		// changes outside this process: somebody who resubscribes tomorrow
+		// morning must not find their machines frozen out until next month.
+		// The ordinary curve caps at twelve hours, and the token expires within
+		// a fortnight anyway — at which point 401 takes over and that one really
+		// is final.
+		return renewRefusal{msg: "this account is no longer entitled to the relay"}
 	case resp.StatusCode == 403 && out.Error == "subject-unknown":
 		return renewRefusal{msg: "this token predates renewal — open the Monitor panel once to link it"}
 	case resp.StatusCode == 429:

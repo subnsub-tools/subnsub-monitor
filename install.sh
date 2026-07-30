@@ -39,10 +39,10 @@ LABEL=com.subnsub.monitor   # shows up in `launchctl list`; brand domain there t
 # script that publishes the binaries. A binary that does not match is not installed, and a swapped binary
 # would otherwise be free to read ~/.claude/.credentials.json and post it
 # somewhere, which no amount of care in the Go source can prevent.
-SUM_linux_amd64=7464ef08d9101355ef75e09607179f99e3084f6102c1da91bd7bcd8bf6d75262
-SUM_linux_arm64=6bcc71fb468a3f3df0497749315d3eeac3a483ed8406ac3d87ef22d6aefbb0a8
-SUM_darwin_amd64=32dd69869a74427604d7f4e3199d048bb5171bc9915bce1b74f6396f7c5f2af1
-SUM_darwin_arm64=c1bf95406b4d93c223cf293172066d10b74598dd51a856d50af929993c715f89
+SUM_linux_amd64=4e3b488f7fc39348e09b4c3c259e5044b2f84a0a5bea7a4d599e55647ea6b17c
+SUM_linux_arm64=06036572b5435a3c56431e3201bb3896b9891aca765e8cfe484c735f7471cbb6
+SUM_darwin_amd64=64c6e6ad2c43de13d900cf7cb93341afa9d03b233a7385dfdf345714c56b9cf7
+SUM_darwin_arm64=bda4779717479a413d6eb28125ba0d4822de4f4cea071994e5044cfe27d62f17
 
 say()  { printf '%s\n' "$*"; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -133,6 +133,28 @@ esac
 case "$RELAY" in
   *[!A-Za-z0-9:/._-]*) die "relay URL has unexpected characters" ;;
 esac
+
+# Where tokens get renewed, for people running their own relay.
+#
+# The helper renews only against the site this build ships with, or one named
+# here — it will not offer a token minted by somebody else's issuer to ours. So
+# a custom relay needs this, and it has to survive into the SERVICE: the value
+# was only ever in the installing shell's environment, and the unit and the
+# plist below carry nothing but the token, so without persisting it the
+# background process would come up with renewal quietly switched off. An
+# install that looked like it worked and stopped reporting a month later.
+SITE="${SUBNSUB_MONITOR_SITE:-}"
+if [ -n "$SITE" ]; then
+    case "$SITE" in
+      https://*) ;;
+      *) die "SUBNSUB_MONITOR_SITE must be an https:// URL" ;;
+    esac
+    # Same interpolation-safety rule as the relay: this value is written into a
+    # systemd EnvironmentFile and an XML string.
+    case "$SITE" in
+      *[!A-Za-z0-9:/._-]*) die "SUBNSUB_MONITOR_SITE has unexpected characters" ;;
+    esac
+fi
 
 # ------------------------------------------------------------ os / arch
 os=$(uname -s)
@@ -227,7 +249,13 @@ umask 077
 # and keeps whatever mode the old file had until the chmod lands — by which
 # time the secret has already been written under it.
 rm -f "$conf/token.new"
-printf 'SUBNSUB_MONITOR_TOKEN=%s\n' "$TOKEN" > "$conf/token.new"
+{
+    printf 'SUBNSUB_MONITOR_TOKEN=%s\n' "$TOKEN"
+    # Renewal site, when one was named. Rides in the same file because it has
+    # to reach the service, and systemd reads only this one.
+    [ -n "$SITE" ] && printf 'SUBNSUB_MONITOR_SITE=%s\n' "$SITE"
+    true
+} > "$conf/token.new"
 chmod 0600 "$conf/token.new"
 mv -f "$conf/token.new" "$conf/token"
 
@@ -333,7 +361,7 @@ EOF
     <string>$RELAY</string>
   </array>
   <key>EnvironmentVariables</key>
-  <dict><key>SUBNSUB_MONITOR_TOKEN</key><string>$TOKEN</string></dict>
+  <dict><key>SUBNSUB_MONITOR_TOKEN</key><string>$TOKEN</string>$([ -n "$SITE" ] && printf '<key>SUBNSUB_MONITOR_SITE</key><string>%s</string>' "$SITE")</dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>30</integer>
