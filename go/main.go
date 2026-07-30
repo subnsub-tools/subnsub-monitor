@@ -89,7 +89,11 @@ func main() {
 		// is the bootstrap and stays where the service manager put it; whichever
 		// of the two lasts longer is the one to push with, which is also what
 		// lets a reinstall override a renewal rather than be ignored by it.
-		connect(args[1], pickToken(token, storedToken()), every)
+		//
+		// Scoped to the relay being dialled, and only consulted for a relay we
+		// could have renewed for: `connect` takes any URL, and a credential
+		// obtained for one relay must not be presented to another.
+		connect(args[1], resolveStartToken(args[1], token), every)
 
 	case "name":
 		if len(args) > 1 {

@@ -39,10 +39,10 @@ LABEL=com.subnsub.monitor   # shows up in `launchctl list`; brand domain there t
 # script that publishes the binaries. A binary that does not match is not installed, and a swapped binary
 # would otherwise be free to read ~/.claude/.credentials.json and post it
 # somewhere, which no amount of care in the Go source can prevent.
-SUM_linux_amd64=b312e7361f5ffa091970248f69cd394daaa2378f3980d6732fa850b8c2faeda9
-SUM_linux_arm64=c6fb3f4853df67e96cc0b31c573daa2d2f6206de6492212063a2cac4b127c13c
-SUM_darwin_amd64=a2253654feb20548bb4beae7fea6760a07faac335874efe249a5ab57e0039119
-SUM_darwin_arm64=3f883109cf6b8fab10c4ee6d1b0041386f73d5885dc07aaf4482332c5446f1ac
+SUM_linux_amd64=7464ef08d9101355ef75e09607179f99e3084f6102c1da91bd7bcd8bf6d75262
+SUM_linux_arm64=6bcc71fb468a3f3df0497749315d3eeac3a483ed8406ac3d87ef22d6aefbb0a8
+SUM_darwin_amd64=32dd69869a74427604d7f4e3199d048bb5171bc9915bce1b74f6396f7c5f2af1
+SUM_darwin_arm64=c1bf95406b4d93c223cf293172066d10b74598dd51a856d50af929993c715f89
 
 say()  { printf '%s\n' "$*"; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -78,8 +78,11 @@ uninstall() {
     # bearer secret like the installed one and has to go with it. Leaving it
     # behind would also mean a later reinstall silently resurrecting the old
     # credential instead of using the token just pasted.
+    # token.current.new too: it is the write-then-rename staging name, and a
+    # crash between the two steps leaves a readable bearer secret under it that
+    # nothing else would ever clean up.
     rm -f "${INSTALLED_BIN:-$BINDIR/$NAME}" "$HOME/.config/$NAME/token" \
-          "$HOME/.config/$NAME/token.current" \
+          "$HOME/.config/$NAME/token.current" "$HOME/.config/$NAME/token.current.new" \
           "$HOME/.config/$NAME/agent-id" "$HOME/.config/$NAME/name" "$manifest"
     rmdir "$HOME/.config/$NAME" 2>/dev/null || true
     say "removed $NAME"

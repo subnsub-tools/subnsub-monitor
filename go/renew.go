@@ -16,16 +16,23 @@ package main
 // until the token runs out because nobody ever looks again.
 //
 // WHAT THIS DELIBERATELY IS NOT. It is not a channel. The response is one
-// string, checked against the same alphabet the relay enforces and rejected
-// unless it actually extends our life. Nothing here can be told to change an
-// interval, run a command, or fetch anything — the helper's habit of not
-// parsing what the network says is worth keeping, and the way to keep it while
-// still renewing is to make the one parsed value a token and nothing else.
+// string, and it is accepted only if it is the SAME ACCOUNT, expires later than
+// what we hold, and does not claim an absurd lifetime. Nothing here can be told
+// to change an interval, run a command, or fetch anything — the helper's habit
+// of not parsing what the network says is worth keeping, and the way to keep it
+// while still renewing is to make the one parsed value a token and nothing else.
 //
 // And it does not talk to the relay. The relay has no database and no idea who
 // anyone is; entitlement lives on the site that issued the token in the first
 // place. Renewing there keeps the relay a stateless verifier that never learns
 // an identity, and keeps push responses unparsed — see transport.go.
+//
+// ⚠ THE TOKEN IS A BEARER SECRET AND IT BELONGS TO ONE RELAY. This file will
+// not send it anywhere the operator did not point it. Renewal is OFF unless the
+// relay is the one this build ships with, or the operator named a renewal site
+// themselves — see renewalSite(). A helper aimed at somebody's own relay must
+// never hand that relay's credential to ours because our relay happened to
+// answer 403.
 
 import (
 	"encoding/base64"
@@ -40,14 +47,12 @@ import (
 )
 
 const (
-	// Where tokens are renewed. Baked in rather than passed through the service
-	// definition, because every install that predates this has a unit file and a
-	// plist naming only the relay, and those are not rewritten by an upgrade —
-	// a value that only new installs could carry would leave exactly the
-	// machines this feature exists for unable to use it.
-	defaultSite = "https://tools.subnsub.com"
-	siteEnv     = "SUBNSUB_MONITOR_SITE"
-	renewPath   = "/api/monitor-token/renew"
+	// The relay this build ships with, and the site that issues tokens for it.
+	// Renewal is enabled only for that pair, or for a site the operator names.
+	officialRelay = "https://monitor.subnsub.com"
+	defaultSite   = "https://tools.subnsub.com"
+	siteEnv       = "SUBNSUB_MONITOR_SITE"
+	renewPath     = "/api/monitor-token/renew"
 
 	// Start trying with a week left. The server refuses renewals until a token
 	// is inside its own, wider window, so this can be generous without
@@ -61,9 +66,20 @@ const (
 	// cadence would turn one lapsed account into 2,880 requests a day.
 	renewRetryMin = time.Hour
 	renewRetryMax = 12 * time.Hour
+	// A refusal that says "this credential is finished" is not retried on that
+	// schedule at all. Nothing this side can do fixes it, and a machine left
+	// running for a year should not spend the year asking.
+	renewRetryDead = 30 * 24 * time.Hour
 
 	// A renewal answer is two short fields. Anything larger is not one.
 	maxRenewBody = 4 << 10
+
+	// The longest life this helper will believe a renewed token claims. The
+	// issuer hands out 30 days; the cap exists so a wrong or manipulated answer
+	// cannot mint something that outranks the installed token effectively
+	// forever — the file is chosen over the environment BY EXPIRY, so a forged
+	// year-long expiry would win every restart from here on.
+	maxTokenLife = 60 * 24 * time.Hour
 
 	// Where a renewed token is kept, beside the id and the name so that
 	// --uninstall takes it with everything else.
@@ -72,13 +88,22 @@ const (
 
 // The 44-byte token layout, mirrored from functions/_lib/monitortoken.js:
 // 16 bytes of identity, 4 bytes of big-endian expiry, 8 of nonce, 16 of tag.
-// Only the expiry is read here — the helper has no business interpreting the
-// rest, and cannot verify the tag anyway.
+// Only the identity and the expiry are read here — the helper has no business
+// interpreting the rest, and cannot verify the tag anyway.
 const (
 	tokenBytes   = 44
+	tokenIDLen   = 16
 	tokenExpOff  = 16
 	legacyTokLen = 43 // the self-minted tokens that predate signing: 32 raw bytes
 )
+
+func tokenRaw(tok string) ([]byte, bool) {
+	raw, err := base64.RawURLEncoding.DecodeString(tok)
+	if err != nil || len(raw) != tokenBytes {
+		return nil, false
+	}
+	return raw, true
+}
 
 // When this token stops being accepted, if it says.
 //
@@ -87,8 +112,8 @@ const (
 // never renewed — there is nothing to renew them from, and the relay's
 // allow-list path they depend on does not expire either.
 func tokenExpiry(tok string) (time.Time, bool) {
-	raw, err := base64.RawURLEncoding.DecodeString(tok)
-	if err != nil || len(raw) != tokenBytes {
+	raw, ok := tokenRaw(tok)
+	if !ok {
 		return time.Time{}, false
 	}
 	secs := binary.BigEndian.Uint32(raw[tokenExpOff : tokenExpOff+4])
@@ -96,6 +121,19 @@ func tokenExpiry(tok string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return time.Unix(int64(secs), 0), true
+}
+
+// Which ACCOUNT a token speaks for, as the opaque 16 bytes the relay names a
+// room after. Not verifiable here — the tag needs a secret this side does not
+// have — but comparing two tokens' identities does not need verification, and
+// that comparison is what stops a renewal answer from quietly moving this
+// machine's readings into somebody else's dashboard.
+func tokenIdentity(tok string) (string, bool) {
+	raw, ok := tokenRaw(tok)
+	if !ok {
+		return "", false
+	}
+	return base64.RawURLEncoding.EncodeToString(raw[:tokenIDLen]), true
 }
 
 // The alphabet the relay accepts, applied to anything the site hands back.
@@ -115,16 +153,37 @@ func cleanToken(s string) string {
 	return s
 }
 
-func siteBase() string {
+func sameHost(a, b string) bool {
+	return strings.TrimRight(strings.TrimSpace(a), "/") == strings.TrimRight(strings.TrimSpace(b), "/")
+}
+
+// Where THIS invocation may renew, and whether it may at all.
+//
+// Two ways to get a site, and no third:
+//  1. the operator named one, which is how somebody running their own relay
+//     opts in to their own issuer;
+//  2. the relay is the one this build ships with, so the site that issues its
+//     tokens is known.
+//
+// Anything else — `connect https://relay.example.com`, MON_RELAY pointed
+// elsewhere — gets no renewal. That token was not issued by us, is not ours to
+// present anywhere, and sending it to our site because their relay answered 403
+// would be handing a third party's bearer secret to a server they never chose.
+func renewalSite(relay string) (string, bool) {
 	if v := strings.TrimSpace(os.Getenv(siteEnv)); v != "" {
 		if strings.HasPrefix(v, "https://") {
-			return strings.TrimRight(v, "/")
+			return strings.TrimRight(v, "/"), true
 		}
 		// An http:// override would put the token on the wire in clear. Refuse
-		// rather than honour it; the default is not a downgrade.
+		// rather than honour it, and do not silently fall back to ours either:
+		// somebody who set this meant to use their own.
 		warnf("ignoring %s: renewal requires an https:// URL", siteEnv)
+		return "", false
 	}
-	return defaultSite
+	if sameHost(relay, officialRelay) {
+		return defaultSite, true
+	}
+	return "", false
 }
 
 // ── where a renewed token lives ────────────────────────────────────────────
@@ -134,6 +193,16 @@ func siteBase() string {
 // plist — so writing a renewal there would take effect on one platform, after a
 // restart, and never on the other. A file the HELPER reads works the same
 // everywhere and leaves the installer's formats alone.
+//
+// It records the RELAY the token belongs to. There is one such file per
+// install, and `connect` takes an arbitrary URL, so without that field a
+// renewal obtained for our relay could be picked up and presented to whatever
+// relay the next invocation happens to name.
+
+type storedCred struct {
+	Relay string `json:"relay"`
+	Token string `json:"token"`
+}
 
 func tokenPath() string {
 	dir := configDir()
@@ -143,7 +212,8 @@ func tokenPath() string {
 	return filepath.Join(dir, tokenFile)
 }
 
-func storedToken() string {
+// The token saved for this relay, or "" if there is none that belongs to it.
+func storedToken(relay string) string {
 	path := tokenPath()
 	if path == "" {
 		return ""
@@ -152,10 +222,17 @@ func storedToken() string {
 	if err != nil {
 		return ""
 	}
-	return cleanToken(string(b))
+	var c storedCred
+	if err := json.Unmarshal(b, &c); err != nil {
+		return ""
+	}
+	if !sameHost(c.Relay, relay) {
+		return ""
+	}
+	return cleanToken(c.Token)
 }
 
-func saveToken(tok string) error {
+func saveToken(relay, tok string) error {
 	dir := configDir()
 	if dir == "" {
 		return os.ErrNotExist
@@ -164,14 +241,24 @@ func saveToken(tok string) error {
 		return err
 	}
 	path := filepath.Join(dir, tokenFile)
+	body, err := json.Marshal(storedCred{Relay: strings.TrimRight(relay, "/"), Token: tok})
+	if err != nil {
+		return err
+	}
 	// Write-then-rename at 0600, the same shape the installer and the agent id
 	// use: a plain create follows a symlink to wherever it points and can leave
 	// half a secret behind if the process dies mid-write.
 	tmp := path + ".new"
-	if err := os.WriteFile(tmp, []byte(tok+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(tmp, append(body, '\n'), 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		// Do not leave a bearer secret lying around under a name nothing will
+		// ever read or clean up.
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // Which of the two tokens this machine holds is the live one.
@@ -182,6 +269,11 @@ func saveToken(tok string) error {
 // the panel and the install writes it to the environment, where it is newer
 // than whatever renewal left on disk and therefore wins. A rule of "the file
 // always wins" would make reinstalling silently do nothing.
+//
+// A stored token that names a DIFFERENT ACCOUNT never wins, whatever its
+// expiry says. Reinstalling with somebody else's token — a shared machine, a
+// second account — must not keep pushing this machine's readings into the old
+// account's dashboard.
 func pickToken(envTok, fileTok string) string {
 	envTok, fileTok = cleanToken(envTok), cleanToken(fileTok)
 	if fileTok == "" {
@@ -201,21 +293,58 @@ func pickToken(envTok, fileTok string) string {
 	if !envOK {
 		return envTok
 	}
+	// Same account, or the file does not apply here at all.
+	envID, ok1 := tokenIdentity(envTok)
+	fileID, ok2 := tokenIdentity(fileTok)
+	if !ok1 || !ok2 || envID != fileID {
+		return envTok
+	}
 	if fileExp.After(envExp) {
 		return fileTok
 	}
 	return envTok
 }
 
+// The token to start pushing with, given the relay we are pointed at.
+//
+// The stored token is only consulted when renewal is enabled for this relay —
+// which is the same condition that could have produced it. Without that,
+// `connect https://other-relay TOKEN` would pick up a credential minted for
+// ours and present it there.
+func resolveStartToken(relay, bootstrap string) string {
+	if _, ok := renewalSite(relay); !ok {
+		return bootstrap
+	}
+	return pickToken(bootstrap, storedToken(relay))
+}
+
 // ── the renewal loop's state ───────────────────────────────────────────────
 
 type renewer struct {
-	site  string
-	next  time.Time // earliest next attempt; zero means "decide from the token"
-	fails int
+	site    string
+	relay   string
+	enabled bool
+	next    time.Time // earliest next attempt; zero means "decide from the token"
+	fails   int
+
+	// A renewed token is used immediately but NOT written to disk until a push
+	// with it has been accepted. The issuer and the relay verify with the same
+	// secret, and the one operation that can put them out of step is rotating
+	// it — during which the site happily issues tokens the relay refuses.
+	// Committing on proof rather than on receipt means that window costs a
+	// failed push, not an install that has overwritten its only working
+	// credential and cannot get back.
+	pending string
+	prev    string
 }
 
-func newRenewer() *renewer { return &renewer{site: siteBase()} }
+func newRenewer(relay string) *renewer {
+	site, ok := renewalSite(relay)
+	if !ok {
+		return &renewer{relay: relay}
+	}
+	return &renewer{site: site, relay: relay, enabled: true}
+}
 
 // Should we try now? `forced` is the push loop reporting that the relay just
 // refused us, which is the other moment a token is worth questioning.
@@ -225,10 +354,17 @@ func newRenewer() *renewer { return &renewer{site: siteBase()} }
 // subscription that really did lapse — would mean one renewal request per push,
 // forever.
 func (r *renewer) due(tok string, now time.Time, forced bool) bool {
-	if now.Before(r.next) {
+	if !r.enabled || now.Before(r.next) {
 		return false
 	}
 	if forced {
+		// Still nothing to renew from: an unsigned token cannot be presented to
+		// the issuer, and asking would just leak it to a server that will
+		// refuse it.
+		if _, ok := tokenExpiry(tok); !ok {
+			r.next = now.Add(renewRetryMax)
+			return false
+		}
 		return true
 	}
 	exp, ok := tokenExpiry(tok)
@@ -246,27 +382,102 @@ func (r *renewer) attempt(tok string, now time.Time) string {
 	fresh, err := requestRenewal(r.site, tok)
 	if err != nil {
 		r.fails++
-		backoff := renewRetryMin * time.Duration(1<<min(r.fails-1, 8))
-		if backoff > renewRetryMax || backoff <= 0 {
-			backoff = renewRetryMax
-		}
-		r.next = now.Add(backoff)
+		r.next = now.Add(r.backoff(err))
 		warnf("could not renew the relay token: %v", err)
 		return tok
 	}
 	r.fails = 0
-	if err := saveToken(fresh); err != nil {
-		// Held in memory regardless, exactly like a machine id that cannot be
-		// written: this process keeps reporting, and a restart falls back to
-		// the installed token — which is the situation we were already in.
-		warnf("renewed the relay token but could not save it: it will be renewed again after a restart")
-	}
+	// Held, not committed. confirm() writes it once the relay has accepted a
+	// push made with it.
+	r.prev, r.pending = tok, fresh
 	if exp, ok := tokenExpiry(fresh); ok {
 		r.next = exp.Add(-renewLead)
 	} else {
 		r.next = now.Add(renewRetryMax)
 	}
 	return fresh
+}
+
+// How long to wait after a failure.
+//
+// Typed rather than one curve for everything: "your token is finished" and
+// "the site is having a bad minute" are not the same event, and the second is
+// the only one worth asking about again soon. Jitter on every branch for the
+// same reason the push loop has it — machines installed in one sitting share a
+// token, hit the renewal window within seconds of each other, and would
+// otherwise retry in lockstep forever.
+func (r *renewer) backoff(err error) time.Duration {
+	var d, ceiling time.Duration
+	switch e := err.(type) {
+	case renewRefusal:
+		switch {
+		case e.retryAfter > 0:
+			// The server said when. A floor as well as a ceiling: `renew_after`
+			// is a number off the network, and it is not a channel for making
+			// this helper sleep for a year OR spin.
+			d, ceiling = e.retryAfter, renewRetryMax
+			if d < renewRetryMin/4 {
+				d = renewRetryMin / 4
+			}
+		case e.terminal:
+			d, ceiling = renewRetryDead, renewRetryDead
+		default:
+			d, ceiling = r.growing(), renewRetryMax
+		}
+	default:
+		d, ceiling = r.growing(), renewRetryMax
+	}
+	// ±5%, so a fleet that failed together does not return together. Applied
+	// BEFORE the clamp, not after — otherwise the ceiling is a ceiling plus 5%,
+	// which is exactly the kind of "cap that isn't" a hostile retry_after would
+	// aim for.
+	d = time.Duration(float64(d) * (0.95 + 0.1*jitter()))
+	if d > ceiling {
+		d = ceiling
+	}
+	return d
+}
+
+func (r *renewer) growing() time.Duration {
+	d := renewRetryMin * time.Duration(1<<min(r.fails-1, 8))
+	if d > renewRetryMax || d <= 0 {
+		d = renewRetryMax
+	}
+	return d
+}
+
+// The relay accepted a push made with the token we are holding. If that token
+// was a renewal, it has now proven itself and can be written down.
+//
+// Retried on every accepted push rather than once: a save that failed because
+// the config directory was momentarily unwritable would otherwise leave the new
+// token alive only in memory, and a restart after the bootstrap token expired
+// would strand the machine with nothing that works.
+func (r *renewer) confirm() {
+	if r.pending == "" {
+		return
+	}
+	if err := saveToken(r.relay, r.pending); err != nil {
+		warnf("renewed the relay token but could not save it yet: will retry")
+		return
+	}
+	r.pending, r.prev = "", ""
+}
+
+// The relay refused a token we had just renewed into. Go back to the one that
+// was working — the new one is not trustworthy here, whatever the site said —
+// and do not try again for a long time.
+//
+// Returns the token to use and whether anything changed.
+func (r *renewer) rollback(now time.Time) (string, bool) {
+	if r.pending == "" {
+		return "", false
+	}
+	back := r.prev
+	r.pending, r.prev = "", ""
+	r.next = now.Add(renewRetryDead)
+	warnf("the relay refused the renewed token; falling back to the previous one")
+	return back, true
 }
 
 // One renewal request.
@@ -313,39 +524,83 @@ func requestRenewal(site, tok string) (string, error) {
 	if fresh == "" {
 		return "", errString("renewal answer carried no usable token")
 	}
+
+	// ── everything below decides whether this answer is worth believing ──
+	//
+	// The tag cannot be checked here, so these are the properties that can be:
+	// same account, longer life, and a life that is not absurd. They are what
+	// keeps a wrong answer from being a permanent one, since the stored token
+	// is chosen over the installed one BY EXPIRY.
+	newID, ok := tokenIdentity(fresh)
+	if !ok {
+		return "", errString("renewed token is not the shape a token has")
+	}
+	if oldID, ok := tokenIdentity(tok); ok && newID != oldID {
+		return "", errString("renewed token names a different account")
+	}
+	newExp, ok := tokenExpiry(fresh)
+	if !ok {
+		return "", errString("renewed token carries no expiry")
+	}
 	// It has to actually be worth swapping to. A reply that hands back something
 	// expiring no later than what we hold is either a bug or someone playing,
 	// and taking it would reset nothing while overwriting a working token.
-	newExp, newOK := tokenExpiry(fresh)
-	if !newOK {
-		return "", errString("renewed token carries no expiry")
-	}
 	if oldExp, ok := tokenExpiry(tok); ok && !newExp.After(oldExp) {
 		return "", errString("renewed token expires no later than the current one")
+	}
+	if newExp.After(time.Now().Add(maxTokenLife)) {
+		return "", errString("renewed token claims an implausible lifetime")
 	}
 	return fresh, nil
 }
 
+// A refusal, carried as a type so the backoff can tell the kinds apart. The
+// status is the whole decision; the message is for a human reading stderr.
+type renewRefusal struct {
+	msg        string
+	terminal   bool // nothing this side does will change the answer
+	retryAfter time.Duration
+}
+
+func (e renewRefusal) Error() string { return e.msg }
+
 // Turn a refusal into something the log can explain, without parsing anything
-// we would then act on. The status is the whole decision; the code is a hint
-// for a human reading stderr.
+// we would then act on.
 func renewError(resp *http.Response) error {
 	var out struct {
-		Error string `json:"error"`
+		Error      string  `json:"error"`
+		RenewAfter float64 `json:"renew_after"`
 	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxRenewBody))
 	_ = json.Unmarshal(body, &out)
 	switch {
 	case resp.StatusCode == 401:
-		return errString("this machine's token is no longer valid — reinstall to reconnect it")
+		return renewRefusal{
+			msg:      "this machine's token is no longer valid — reinstall to reconnect it",
+			terminal: true,
+		}
 	case resp.StatusCode == 403 && out.Error == "plus-required":
-		return errString("this account is no longer entitled to the relay")
+		return renewRefusal{
+			msg:      "this account is no longer entitled to the relay",
+			terminal: true,
+		}
 	case resp.StatusCode == 403 && out.Error == "subject-unknown":
-		return errString("this token predates renewal — open the Monitor panel once to link it")
+		return renewRefusal{msg: "this token predates renewal — open the Monitor panel once to link it"}
 	case resp.StatusCode == 429:
-		return errString("too early to renew")
+		var after time.Duration
+		if out.RenewAfter > 0 {
+			// Absolute unix seconds, as the endpoint sends it. Treated as a
+			// hint and clamped by the caller.
+			if d := time.Until(time.Unix(int64(out.RenewAfter), 0)); d > 0 {
+				after = d
+			}
+		}
+		if after == 0 {
+			after = renewRetryMin
+		}
+		return renewRefusal{msg: "too early to renew", retryAfter: after}
 	default:
-		return errString("renewal refused: " + itoa(resp.StatusCode))
+		return renewRefusal{msg: "renewal refused: " + itoa(resp.StatusCode)}
 	}
 }
 
