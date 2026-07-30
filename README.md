@@ -268,17 +268,31 @@ dark on the same day, the agent trades its token in for a fresh one shortly
 before that, against the site that issued it — never against the relay, which
 has no idea who anyone is:
 
+**If you point the agent at your own relay, renewal is OFF.** Your relay's token
+is not ours and is not ours to present anywhere; the agent will not POST it to
+our site because your relay answered `403`. Renewal happens only when the relay
+is the one this installer ships with, or when you name your own issuer with
+`SUBNSUB_MONITOR_SITE=https://…`. A token with no expiry field is never renewed
+either, so a relay that mints its own tokens needs none of this.
+
+When it is on:
+
 - `POST /api/monitor-token/renew` with `Authorization: Bearer <current token>`,
   answered with `{"token": "...", "expires_at": <unix seconds>}`.
 - The replacement is accepted only if it matches the token alphabet
-  (`[A-Za-z0-9_-]{24,128}`) and expires strictly later than the one held. One
-  string, checked twice; nothing else in that response is looked at.
-- It is written to `~/.config/subnsub-monitor/token.current`, which the agent
-  reads at startup in preference to the installed token when it lasts longer.
-
-Point `SUBNSUB_MONITOR_SITE` at your own https endpoint to serve this yourself,
-or ignore it entirely: a token with no expiry field is simply never renewed, so
-a relay of your own that mints its own tokens needs none of this.
+  (`[A-Za-z0-9_-]{24,128}`), names **the same account** as the token held,
+  expires strictly later than it, and does not claim an implausible lifetime.
+  Nothing else in that response is looked at. The account check is what stops a
+  wrong answer from quietly moving a machine's readings into someone else's
+  dashboard; the lifetime cap is because the stored token beats the installed
+  one *by expiry*, so a forged far-future date would win every restart forever.
+- It is used immediately but **written to disk only after a push made with it has
+  been accepted**, and reverted if the relay refuses it. The issuer and the relay
+  verify with one secret, and rotating that secret is exactly the window where
+  the site issues tokens the relay rejects — committing on receipt would
+  overwrite the only working credential with a broken one.
+- The file is `~/.config/subnsub-monitor/token.current`. It records the relay it
+  belongs to, and is ignored for any other one.
 
 ```sh
 MON_RELAY=https://relay.example.com sh install.sh <TOKEN>

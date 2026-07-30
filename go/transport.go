@@ -142,9 +142,10 @@ func connect(base, token string, every float64) {
 	url := strings.TrimRight(base, "/") + "/push"
 	// The token is not fixed for the life of the process: it expires, and it is
 	// traded for a fresh one before it does. See renew.go for why that happens
-	// against the site rather than against the relay, and why the relay's own
-	// responses are still never parsed.
-	renew := newRenewer()
+	// against the site rather than against the relay, why renewal is OFF for a
+	// relay we do not issue for, and why the relay's own responses are still
+	// never parsed.
+	renew := newRenewer(base)
 	client := &http.Client{
 		Timeout: 15 * time.Second,
 		// Refuse redirects here too. The relay token is a bearer secret — it
@@ -191,6 +192,10 @@ func connect(base, token string, every float64) {
 				warnf("reconnected")
 			}
 			fails = 0
+			// This token just worked. If it came from a renewal it has now
+			// earned its place on disk — see the note on renewer.pending for
+			// why receipt was not enough.
+			renew.confirm()
 		case resp.StatusCode == 429:
 			// The relay is pacing the ROOM, not rejecting us: several machines
 			// share one, and two that started together collide.
@@ -217,7 +222,15 @@ func connect(base, token string, every float64) {
 			// backoff, so a refusal renewal cannot fix does not turn into one
 			// request per push.
 			if code == 401 || code == 403 {
-				if now := time.Now(); renew.due(token, now, true) {
+				now := time.Now()
+				// If we are pushing with a token the site just handed us and
+				// the relay will not take it, the renewal was the problem.
+				// Going back beats renewing again into the same wall — the two
+				// sides verify with one secret, and the state where they
+				// disagree is a rotation in progress, not something to retry.
+				if back, rolled := renew.rollback(now); rolled {
+					token = back
+				} else if renew.due(token, now, true) {
 					token = renew.attempt(token, now)
 				}
 			}
