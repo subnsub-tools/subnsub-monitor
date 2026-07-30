@@ -255,6 +255,31 @@ The agent talks to any endpoint that implements two things:
   accept. Non-2xx makes the agent back off exponentially.
 - Whatever you like for delivery to a viewer. The agent does not care.
 
+Nothing in the push response is read. The status code is the entire protocol in
+that direction, and that is deliberate: a helper that parsed what a relay sent
+back would be a helper a compromised relay could steer, on a machine where it
+can read the credential files it reports on. If you are writing a relay, you
+cannot tell this agent anything — by design.
+
+### Token renewal (optional, and not the relay's business)
+
+Tokens issued by our site expire. Rather than let every machine on an account go
+dark on the same day, the agent trades its token in for a fresh one shortly
+before that, against the site that issued it — never against the relay, which
+has no idea who anyone is:
+
+- `POST /api/monitor-token/renew` with `Authorization: Bearer <current token>`,
+  answered with `{"token": "...", "expires_at": <unix seconds>}`.
+- The replacement is accepted only if it matches the token alphabet
+  (`[A-Za-z0-9_-]{24,128}`) and expires strictly later than the one held. One
+  string, checked twice; nothing else in that response is looked at.
+- It is written to `~/.config/subnsub-monitor/token.current`, which the agent
+  reads at startup in preference to the installed token when it lasts longer.
+
+Point `SUBNSUB_MONITOR_SITE` at your own https endpoint to serve this yourself,
+or ignore it entirely: a token with no expiry field is simply never renewed, so
+a relay of your own that mints its own tokens needs none of this.
+
 ```sh
 MON_RELAY=https://relay.example.com sh install.sh <TOKEN>
 # or, without installing:

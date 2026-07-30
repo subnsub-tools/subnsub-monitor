@@ -140,6 +140,11 @@ const (
 func connect(base, token string, every float64) {
 	every = clampInterval(every)
 	url := strings.TrimRight(base, "/") + "/push"
+	// The token is not fixed for the life of the process: it expires, and it is
+	// traded for a fresh one before it does. See renew.go for why that happens
+	// against the site rather than against the relay, and why the relay's own
+	// responses are still never parsed.
+	renew := newRenewer()
 	client := &http.Client{
 		Timeout: 15 * time.Second,
 		// Refuse redirects here too. The relay token is a bearer secret — it
@@ -155,6 +160,13 @@ func connect(base, token string, every float64) {
 	fails := 0
 
 	for {
+		// Before the push, not after: a token that expires between two pushes
+		// would otherwise cost a failed report and a card that goes silent for
+		// an interval, for a renewal that was already due.
+		if renew.due(token, time.Now(), false) {
+			token = renew.attempt(token, time.Now())
+		}
+
 		req, err := http.NewRequest("POST", url, bytes.NewReader(dump(collectAll())))
 		if err != nil {
 			warnf("cannot build request")
@@ -198,6 +210,17 @@ func connect(base, token string, every float64) {
 			resp.Body.Close()
 			fails++
 			warnf("push rejected: %d", code)
+			// 401/403 is the relay saying this token is not (or is no longer)
+			// one it will take, which is the other moment worth asking the site
+			// for a new one — an expiry that arrived while this process was
+			// running, or an entitlement that changed. The renewer keeps its own
+			// backoff, so a refusal renewal cannot fix does not turn into one
+			// request per push.
+			if code == 401 || code == 403 {
+				if now := time.Now(); renew.due(token, now, true) {
+					token = renew.attempt(token, now)
+				}
+			}
 			wait = every * math.Min(math.Pow(2, float64(fails)), 10)
 		}
 		// Spread the steady-state cadence too, by a few percent. Machines

@@ -85,7 +85,11 @@ func main() {
 				every = v // connect clamps it
 			}
 		}
-		connect(args[1], token, every)
+		// A token renewed on an earlier run outlives that run. The installed one
+		// is the bootstrap and stays where the service manager put it; whichever
+		// of the two lasts longer is the one to push with, which is also what
+		// lets a reinstall override a renewal rather than be ignored by it.
+		connect(args[1], pickToken(token, storedToken()), every)
 
 	case "name":
 		if len(args) > 1 {
