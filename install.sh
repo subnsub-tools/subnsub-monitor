@@ -39,10 +39,10 @@ LABEL=com.subnsub.monitor   # shows up in `launchctl list`; brand domain there t
 # script that publishes the binaries. A binary that does not match is not installed, and a swapped binary
 # would otherwise be free to read ~/.claude/.credentials.json and post it
 # somewhere, which no amount of care in the Go source can prevent.
-SUM_linux_amd64=88ed27b6ae9626173221390208346cb949c09f3cf76285f500629fbbe7013fc1
-SUM_linux_arm64=037bc33b9fe90a81c9a08ad146ff063285e5d1579f8e64980467b59d732c4341
-SUM_darwin_amd64=9633fd2e0584c145846a9c641b346355828dc5b90b1f9dacb81bdc8d6daa2ca4
-SUM_darwin_arm64=5d91584feadfa42c90673bcbea71becab19aadc42f58b2cd7b87dd6d2e6b4f44
+SUM_linux_amd64=b312e7361f5ffa091970248f69cd394daaa2378f3980d6732fa850b8c2faeda9
+SUM_linux_arm64=c6fb3f4853df67e96cc0b31c573daa2d2f6206de6492212063a2cac4b127c13c
+SUM_darwin_amd64=a2253654feb20548bb4beae7fea6760a07faac335874efe249a5ab57e0039119
+SUM_darwin_arm64=3f883109cf6b8fab10c4ee6d1b0041386f73d5885dc07aaf4482332c5446f1ac
 
 say()  { printf '%s\n' "$*"; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -74,7 +74,12 @@ uninstall() {
     # agent-id and name go too: leaving the id behind means a reinstall
     # silently reclaims the same dashboard card, which is surprising when the
     # point of uninstalling was to stop watching this machine.
+    # token.current is the renewed token the helper writes for itself; it is a
+    # bearer secret like the installed one and has to go with it. Leaving it
+    # behind would also mean a later reinstall silently resurrecting the old
+    # credential instead of using the token just pasted.
     rm -f "${INSTALLED_BIN:-$BINDIR/$NAME}" "$HOME/.config/$NAME/token" \
+          "$HOME/.config/$NAME/token.current" \
           "$HOME/.config/$NAME/agent-id" "$HOME/.config/$NAME/name" "$manifest"
     rmdir "$HOME/.config/$NAME" 2>/dev/null || true
     say "removed $NAME"
@@ -203,6 +208,14 @@ say "installed $BINDIR/$NAME"
 # ----------------------------------------------------------------- token file
 # Kept out of the service definition and out of the process arguments, so it
 # does not show up in `ps` or in a world-readable unit file.
+#
+# This is the BOOTSTRAP token and it is not the last word. Tokens expire after
+# 30 days, and the helper trades its own in for a fresh one before that, writing
+# the replacement to `token.current` beside this file — a place it reads itself,
+# because this file is a systemd EnvironmentFile that only a restart re-reads
+# and on macOS is not consulted at all (the token is inlined in the plist).
+# Re-running this installer with a newly pasted token still wins: the helper
+# picks whichever of the two lasts longer, and a just-issued one always does.
 conf="$HOME/.config/$NAME"
 mkdir -p "$conf"
 umask 077
