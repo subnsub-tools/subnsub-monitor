@@ -9,3 +9,12 @@ __pycache__/
 
 # The bare module-name binary `go build` drops in go/ — same rule as dist/.
 go/subnsubmonitor
+
+# The relay, built the way its README tells you to. Same rule again.
+relay/subnsub-monitor-relay
+relay/subnsubmonitorrelay
+
+# A relay's saved state: the names someone typed and the last reading from
+# each of their machines. Never something to commit.
+relay/state.json
+relay/state.json.tmp

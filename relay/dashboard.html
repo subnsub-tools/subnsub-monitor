@@ -1,0 +1,863 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>subnsub-monitor relay</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='%233cba6e'/%3E%3C/svg%3E">
+<style>
+/* The dashboard's own look: system fonts, two honest themes, semantic colour
+   used only where it means something. Deliberately not the hosted page's
+   design system — this one has to stand alone and render anywhere. */
+:root {
+  --bg: #f4f5f7; --card: #ffffff; --line: #e3e5ea; --inset: #eceef2;
+  --text: #191c21; --mute: #69707b; --accent: #3565d9;
+  --ok: #1e9e50; --warn: #c27a12; --bad: #d24141;
+  --shadow: 0 1px 2px rgba(20,24,32,.05), 0 4px 16px rgba(20,24,32,.05);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1114; --card: #16191d; --line: #262b31; --inset: #21252b;
+    --text: #e7e9ec; --mute: #8f96a0; --accent: #6b96e8;
+    --ok: #3cba6e; --warn: #dfa03c; --bad: #e05c5c;
+    --shadow: 0 1px 2px rgba(0,0,0,.35), 0 6px 20px rgba(0,0,0,.25);
+  }
+}
+html[data-theme="light"] {
+  --bg: #f4f5f7; --card: #ffffff; --line: #e3e5ea; --inset: #eceef2;
+  --text: #191c21; --mute: #69707b; --accent: #3565d9;
+  --ok: #1e9e50; --warn: #c27a12; --bad: #d24141;
+  --shadow: 0 1px 2px rgba(20,24,32,.05), 0 4px 16px rgba(20,24,32,.05);
+}
+html[data-theme="dark"] {
+  --bg: #0f1114; --card: #16191d; --line: #262b31; --inset: #21252b;
+  --text: #e7e9ec; --mute: #8f96a0; --accent: #6b96e8;
+  --ok: #3cba6e; --warn: #dfa03c; --bad: #e05c5c;
+  --shadow: 0 1px 2px rgba(0,0,0,.35), 0 6px 20px rgba(0,0,0,.25);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg); color: var(--text);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  min-height: 100vh;
+}
+button, input {
+  font: inherit; color: inherit;
+}
+.num { font-variant-numeric: tabular-nums; }
+.mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 12.5px; }
+
+header {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 20px; border-bottom: 1px solid var(--line);
+  position: sticky; top: 0; background: var(--bg); z-index: 5;
+}
+header h1 { font-size: 15px; font-weight: 650; margin: 0; letter-spacing: .01em; }
+#conn {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: var(--mute); font-size: 12.5px;
+}
+#conn .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--mute); }
+#conn.live .dot { background: var(--ok); }
+#conn.live { color: var(--text); }
+#count { color: var(--mute); font-size: 12.5px; margin-left: auto; }
+.hbtn {
+  border: 1px solid var(--line); background: var(--card); border-radius: 8px;
+  padding: 5px 10px; cursor: pointer; color: var(--mute); font-size: 12.5px;
+}
+.hbtn:hover { color: var(--text); border-color: var(--mute); }
+
+main { padding: 20px; max-width: 1400px; margin: 0 auto; }
+
+/* token gate */
+#gate { max-width: 420px; margin: 12vh auto 0; }
+.gatecard {
+  background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+  box-shadow: var(--shadow); padding: 26px;
+}
+.gatecard h2 { margin: 0 0 6px; font-size: 16px; }
+.gatecard p { margin: 0 0 16px; color: var(--mute); font-size: 13px; }
+.gatecard form { display: flex; gap: 8px; }
+.gatecard input {
+  flex: 1; border: 1px solid var(--line); background: var(--bg);
+  border-radius: 8px; padding: 8px 10px; min-width: 0;
+}
+.gatecard input:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: transparent; }
+#gate-err { color: var(--bad); font-size: 12.5px; margin: 10px 0 0; display: none; }
+
+.primary {
+  background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+  padding: 8px 14px; cursor: pointer; font-weight: 600;
+}
+.primary:hover { filter: brightness(1.06); }
+.primary:disabled { opacity: .5; cursor: default; }
+
+/* empty state */
+#empty { max-width: 560px; margin: 10vh auto 0; text-align: left; display: none; }
+#empty h2 { font-size: 16px; margin: 0 0 8px; }
+#empty p { color: var(--mute); font-size: 13px; }
+#empty pre {
+  background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+  padding: 12px 14px; overflow-x: auto; white-space: pre;
+}
+
+/* board */
+#board {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 16px; display: none;
+}
+.card {
+  background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+  box-shadow: var(--shadow); padding: 16px; min-width: 0;
+}
+.card.offline { opacity: .62; }
+.card-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.sdot { width: 9px; height: 9px; border-radius: 50%; background: var(--mute); flex: none; }
+.card.on .sdot { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
+.mname {
+  font-weight: 650; font-size: 14.5px; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; min-width: 0; cursor: text; border-radius: 6px; padding: 1px 4px;
+}
+.mname:hover { background: var(--inset); }
+.mname-input {
+  font: inherit; font-weight: 650; border: 1px solid var(--accent); border-radius: 6px;
+  padding: 0 3px; background: var(--bg); width: 12em;
+}
+.idchip, .chip {
+  font-size: 11px; color: var(--mute); background: var(--inset);
+  border-radius: 999px; padding: 2px 8px; white-space: nowrap; flex: none;
+}
+.age { margin-left: auto; color: var(--mute); font-size: 12px; flex: none; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 0; }
+
+.vitals { margin: 12px 0 0; display: grid; gap: 7px; }
+.vrow { display: grid; grid-template-columns: 44px 1fr 44px 110px; gap: 8px; align-items: center; }
+.vrow .lab { color: var(--mute); font-size: 12px; }
+.vrow .abs { color: var(--mute); font-size: 11.5px; text-align: right; white-space: nowrap; overflow: hidden; }
+.vrow .pct { font-size: 12px; text-align: right; }
+.bar { height: 6px; border-radius: 4px; background: var(--inset); overflow: hidden; }
+.bar i { display: block; height: 100%; border-radius: 4px; background: var(--accent); width: 0; transition: width .5s ease; }
+.bar.ok i { background: var(--ok); } .bar.warn i { background: var(--warn); } .bar.bad i { background: var(--bad); }
+.vna { color: var(--mute); font-size: 11.5px; margin-top: 8px; }
+
+.spark { margin-top: 10px; }
+.spark svg { display: block; width: 100%; height: 36px; }
+.spark .cpu { fill: color-mix(in srgb, var(--accent) 16%, transparent); stroke: var(--accent); stroke-width: 1; }
+.spark .mem { fill: none; stroke: var(--mute); stroke-width: 1; stroke-dasharray: 3 2; }
+.spark .leg { color: var(--mute); font-size: 10.5px; margin-top: 2px; display: flex; gap: 10px; }
+.leg .k { display: inline-flex; align-items: center; gap: 4px; }
+.leg .sw { width: 10px; height: 2px; background: var(--accent); display: inline-block; }
+.leg .sw.mem { background: var(--mute); }
+
+.provs { margin-top: 14px; display: grid; gap: 10px; }
+.prov { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.prov-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.mono-mark {
+  width: 22px; height: 22px; border-radius: 7px; background: var(--inset);
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; color: var(--mute); flex: none;
+}
+.prov-name { font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.prov-err { color: var(--bad); font-size: 12px; margin-top: 6px; }
+.prov-err small { color: var(--mute); display: block; margin-top: 2px; }
+.lims { margin-top: 8px; display: grid; gap: 6px; }
+.lrow { display: grid; grid-template-columns: minmax(70px, 130px) 1fr 42px; gap: 8px; align-items: center; }
+.lrow .lab { font-size: 12px; color: var(--mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lrow .pct { font-size: 12px; text-align: right; }
+.lsub { color: var(--mute); font-size: 11px; margin: -2px 0 0; grid-column: 1 / -1; }
+.credit { color: var(--mute); font-size: 12px; margin-top: 6px; }
+
+.updrow {
+  margin-top: 12px; display: flex; align-items: center; gap: 8px;
+  color: var(--mute); font-size: 12px; flex-wrap: wrap;
+}
+.updrow .stat { min-width: 0; }
+.ghost {
+  border: 1px solid var(--line); background: transparent; color: var(--text);
+  border-radius: 8px; padding: 4px 10px; cursor: pointer; font-size: 12.5px;
+}
+.ghost:hover { border-color: var(--accent); color: var(--accent); }
+.ghost:disabled { opacity: .5; cursor: default; }
+
+.termwrap { margin-top: 12px; }
+.term-out {
+  background: var(--inset); border-radius: 8px; padding: 10px;
+  max-height: 240px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+  margin: 8px 0; display: none;
+}
+.term-out:empty { display: none !important; }
+.termline { display: none; gap: 8px; align-items: center; margin-top: 8px; }
+.termline .ps { color: var(--mute); }
+.termline input {
+  flex: 1; border: 1px solid var(--line); border-radius: 8px; background: var(--bg);
+  padding: 6px 9px; min-width: 0;
+}
+.termline input:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: transparent; }
+.card.term-open .term-out { display: block; }
+.card.term-open .termline { display: flex; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>subnsub-monitor</h1>
+  <span id="conn"><span class="dot"></span><span id="conn-t">connecting</span></span>
+  <span id="count" class="num"></span>
+  <button class="hbtn" id="theme" title="theme">theme</button>
+  <button class="hbtn" id="lock" title="forget the token" style="display:none">sign out</button>
+</header>
+<main>
+  <div id="gate">
+    <div class="gatecard">
+      <h2>Watch this relay</h2>
+      <p>Paste the token this relay accepts. It stays in this browser.</p>
+      <form id="gate-form">
+        <input id="gate-tok" type="password" autocomplete="off" placeholder="token">
+        <button class="primary" type="submit">Watch</button>
+      </form>
+      <p id="gate-err"></p>
+    </div>
+  </div>
+  <div id="empty">
+    <h2>No machines yet</h2>
+    <p>On each machine you want to watch, install the helper against this relay:</p>
+    <pre class="mono" id="empty-cmd"></pre>
+    <p>or run it by hand: <span class="mono" id="empty-hand"></span></p>
+    <p>The first push appears here within seconds of the service starting.</p>
+  </div>
+  <div id="board"></div>
+</main>
+<script>
+'use strict';
+/* Everything a machine sent is text, never markup: every dynamic value on
+   this page lands through textContent or an attribute set to a plain string.
+   The relay already rebuilt the frames field-by-field; this page still does
+   not trust them with innerHTML. */
+(() => {
+const $ = (s, el) => (el || document).querySelector(s);
+const LSK = 'mrelay-token', LSTHEME = 'mrelay-theme';
+const store = window.localStorage;
+
+/* theme: auto -> light -> dark -> auto */
+const applyTheme = v => {
+  if (v === 'light' || v === 'dark') document.documentElement.setAttribute('data-theme', v);
+  else document.documentElement.removeAttribute('data-theme');
+  $('#theme').textContent = 'theme: ' + (v || 'auto');
+};
+applyTheme(store.getItem(LSTHEME) || '');
+$('#theme').onclick = () => {
+  const cur = store.getItem(LSTHEME) || '';
+  const next = cur === '' ? 'light' : cur === 'light' ? 'dark' : '';
+  if (next) store.setItem(LSTHEME, next); else store.removeItem(LSTHEME);
+  applyTheme(next);
+};
+
+const state = {
+  token: store.getItem(LSK) || '',
+  gen: 0,            // stream generation; a stale reader must not touch state
+  connected: false,
+  offlineAfter: 90,
+  termTTL: 120000,
+  names: {},
+  machines: new Map(), // id -> {id, seenAt(ms), reading, hist:[], ui:{...}, pend:Map, termOn:false}
+};
+
+const fmt = {
+  age(ms) {
+    const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+    if (s < 60) return s + 's ago';
+    const m = Math.floor(s / 60);
+    if (m < 60) return m + 'm ago';
+    const h = Math.floor(m / 60);
+    if (h < 48) return h + 'h ago';
+    return Math.floor(h / 24) + 'd ago';
+  },
+  until(sec) {
+    const s = Math.round(sec - Date.now() / 1000);
+    if (s <= 0) return 'resetting';
+    if (s < 60) return 'resets in ' + s + 's';
+    const m = Math.floor(s / 60);
+    if (m < 60) return 'resets in ' + m + 'm';
+    const h = Math.floor(m / 60);
+    if (h < 48) return 'resets in ' + h + 'h ' + (m % 60) + 'm';
+    return 'resets in ' + Math.floor(h / 24) + 'd';
+  },
+  up(sec) {
+    const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600);
+    if (d > 0) return 'up ' + d + 'd ' + h + 'h';
+    const m = Math.floor(sec % 3600 / 60);
+    if (h > 0) return 'up ' + h + 'h ' + m + 'm';
+    return 'up ' + m + 'm';
+  },
+  bytes(n) {
+    if (!(n > 0)) return '';
+    const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
+    let i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return (n >= 100 ? Math.round(n) : n.toFixed(1)) + ' ' + u[i];
+  },
+  pct(v) { return (v >= 100 ? Math.round(v) : v >= 10 ? v.toFixed(1) : v.toFixed(1)) + '%'; },
+};
+
+const SOURCE_LABEL = { 'api': 'live query', 'cli': 'via CLI', 'local-api': 'local probe' };
+const ERR_TEXT = {
+  'not-signed-in': 'not signed in', 'not-installed': 'not installed',
+  'cli-failed': 'its CLI failed', 'token-expired': 'credential expired',
+  'rate-limited': 'rate limited', 'api-error': 'API error',
+  'unreachable': 'unreachable', 'no-sessions': 'no sessions yet',
+  'no-readings': 'no readings yet', 'collector-crashed': 'collector crashed',
+};
+
+const el = (tag, cls, text) => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+};
+const cmdId = () => 'c' + Math.random().toString(36).slice(2, 10) + (Date.now() % 1e7).toString(36);
+
+async function op(body) {
+  const r = await fetch('/api/op', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + state.token, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error('op ' + r.status);
+  return r.json();
+}
+
+function displayName(m) {
+  return state.names[m.id] || (m.reading && m.reading.agent_name) ||
+    (m.id === '~legacy' ? 'Machine' : m.id.slice(0, 6));
+}
+
+/* ── card construction: build once, then patch ──────────────────────────── */
+
+function buildCard(m) {
+  const card = el('article', 'card');
+  const ui = m.ui = { card };
+
+  const head = el('div', 'card-head');
+  ui.dot = el('span', 'sdot');
+  ui.name = el('span', 'mname'); ui.name.title = 'click to rename';
+  ui.idchip = el('span', 'idchip mono num');
+  ui.age = el('span', 'age num');
+  head.append(ui.dot, ui.name, ui.idchip, ui.age);
+  card.append(head);
+
+  ui.name.onclick = () => {
+    if (head.querySelector('.mname-input')) return;
+    const inp = el('input', 'mname-input');
+    inp.value = state.names[m.id] || '';
+    inp.maxLength = 24;
+    inp.placeholder = displayName(m);
+    ui.name.replaceWith(inp);
+    inp.focus(); inp.select();
+    let done = false;
+    const finish = (commit) => {
+      if (done) return; done = true;
+      inp.replaceWith(ui.name);
+      if (commit) {
+        op({ t: 'name', agent: m.id, name: inp.value.trim() }).catch(() => {});
+        // optimistic, exactly what the names frame will confirm
+        if (inp.value.trim()) state.names[m.id] = inp.value.trim();
+        else delete state.names[m.id];
+        patchCard(m);
+      }
+    };
+    inp.onkeydown = e => {
+      if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+      if (e.key === 'Escape') finish(false);
+    };
+    inp.onblur = () => finish(true);
+  };
+
+  ui.chips = el('div', 'chips');
+  card.append(ui.chips);
+
+  ui.vitals = el('div', 'vitals');
+  ui.vrows = {};
+  for (const key of ['cpu', 'mem', 'swap', 'disk']) {
+    const row = el('div', 'vrow');
+    const lab = el('span', 'lab', { cpu: 'CPU', mem: 'Mem', swap: 'Swap', disk: 'Disk' }[key]);
+    const bar = el('div', 'bar'); const fill = el('i'); bar.append(fill);
+    const pct = el('span', 'pct num');
+    const abs = el('span', 'abs num');
+    row.append(lab, bar, pct, abs);
+    ui.vrows[key] = { row, bar, fill, pct, abs };
+    ui.vitals.append(row);
+  }
+  ui.vna = el('div', 'vna');
+  card.append(ui.vitals, ui.vna);
+
+  const spark = el('div', 'spark');
+  const NS = 'http://www.w3.org/2000/svg';
+  ui.svg = document.createElementNS(NS, 'svg');
+  ui.svg.setAttribute('viewBox', '0 0 120 32');
+  ui.svg.setAttribute('preserveAspectRatio', 'none');
+  ui.cpuPath = document.createElementNS(NS, 'path'); ui.cpuPath.setAttribute('class', 'cpu');
+  ui.memPath = document.createElementNS(NS, 'path'); ui.memPath.setAttribute('class', 'mem');
+  ui.svg.append(ui.cpuPath, ui.memPath);
+  const leg = el('div', 'leg');
+  const k1 = el('span', 'k'); k1.append(el('span', 'sw'), el('span', '', 'CPU'));
+  const k2 = el('span', 'k'); k2.append(el('span', 'sw mem'), el('span', '', 'memory'));
+  leg.append(k1, k2);
+  spark.append(ui.svg, leg);
+  card.append(spark);
+  ui.sparkWrap = spark;
+
+  ui.provs = el('div', 'provs');
+  card.append(ui.provs);
+
+  ui.updrow = el('div', 'updrow');
+  card.append(ui.updrow);
+
+  // console: built once and left alone by patches, so focus and scrollback
+  // survive every reading that arrives while someone is typing
+  ui.termwrap = el('div', 'termwrap');
+  ui.termBtn = el('button', 'ghost', 'Console');
+  ui.termBtn.onclick = () => toggleTerm(m);
+  ui.termOut = el('pre', 'term-out mono');
+  const line = el('form', 'termline');
+  const ps = el('span', 'ps mono', '$');
+  ui.termIn = el('input', 'mono');
+  ui.termIn.autocomplete = 'off'; ui.termIn.spellcheck = false;
+  ui.termIn.maxLength = 2000;
+  const run = el('button', 'ghost', 'Run'); run.type = 'submit';
+  line.append(ps, ui.termIn, run);
+  line.onsubmit = e => { e.preventDefault(); sendCmd(m); };
+  ui.termIn.onkeydown = e => {
+    if (e.key === 'ArrowUp') { e.preventDefault(); histStep(m, -1); }
+    if (e.key === 'ArrowDown') { e.preventDefault(); histStep(m, 1); }
+  };
+  ui.termwrap.append(ui.termBtn, ui.termOut, line);
+  card.append(ui.termwrap);
+
+  m.hist = m.hist || [];
+  m.cmdHist = []; m.cmdHistAt = 0;
+  m.pend = new Map();
+  return card;
+}
+
+function histStep(m, d) {
+  if (!m.cmdHist.length) return;
+  m.cmdHistAt = Math.min(m.cmdHist.length, Math.max(0, m.cmdHistAt + d));
+  m.ui.termIn.value = m.cmdHistAt === m.cmdHist.length ? '' : m.cmdHist[m.cmdHistAt];
+}
+
+function termAppend(m, text) {
+  const out = m.ui.termOut;
+  const stick = out.scrollTop + out.clientHeight >= out.scrollHeight - 8;
+  out.textContent += text;
+  if (out.textContent.length > 120000) out.textContent = out.textContent.slice(-100000);
+  if (stick) out.scrollTop = out.scrollHeight;
+}
+
+function toggleTerm(m) {
+  m.termOn = !m.termOn;
+  m.ui.card.classList.toggle('term-open', m.termOn);
+  m.ui.termBtn.textContent = m.termOn ? 'Hide console' : 'Console';
+  op({ t: 'term', agent: m.id, open: m.termOn }).catch(() => {});
+  if (m.termOn) m.ui.termIn.focus();
+}
+
+function sendCmd(m) {
+  const cmd = m.ui.termIn.value.trim();
+  if (!cmd) return;
+  m.ui.termIn.value = '';
+  m.cmdHist.push(cmd); m.cmdHistAt = m.cmdHist.length;
+  const id = cmdId();
+  m.pend.set(id, cmd);
+  termAppend(m, '$ ' + cmd + '\n');
+  op({ t: 'exec', agent: m.id, id, cmd }).then(r => {
+    if (r && r.error) termAppend(m, '(' + r.error + ')\n');
+  }).catch(() => termAppend(m, '(could not reach the relay)\n'));
+}
+
+function askUpdate(m) {
+  const id = cmdId();
+  // Read through m.ui every time rather than capturing the node: a reading
+  // that arrives between the click and the answer rebuilds this row.
+  const say = t => { if (m.ui.updStat) m.ui.updStat.textContent = t; };
+  say('asking…');
+  op({ t: 'update', agent: m.id, id }).then(r => {
+    if (r && r.error) say('(' + r.error + ')');
+  }).catch(() => say('(could not reach the relay)'));
+}
+
+/* ── patching ───────────────────────────────────────────────────────────── */
+
+function vitalRow(ui, key, pctVal, absText, neutral) {
+  const r = ui.vrows[key];
+  if (pctVal == null) {
+    r.row.style.display = 'none';
+    return;
+  }
+  r.row.style.display = '';
+  r.fill.style.width = Math.min(100, pctVal) + '%';
+  r.pct.textContent = fmt.pct(pctVal);
+  r.abs.textContent = absText || '';
+  let cls = 'bar';
+  if (!neutral) cls += pctVal >= 90 ? ' bad' : pctVal >= 75 ? ' warn' : ' ok';
+  r.bar.className = cls;
+}
+
+function limitTone(l) {
+  if (l.severity === 'critical') return 'bad';
+  if (l.severity === 'warning') return 'warn';
+  if (l.used_percent >= 90) return 'bad';
+  if (l.used_percent >= 75) return 'warn';
+  return '';
+}
+
+function renderProviders(m) {
+  const box = m.ui.provs;
+  box.textContent = '';
+  const r = m.reading;
+  if (!r || !r.providers) return;
+  for (const p of r.providers) {
+    const card = el('div', 'prov');
+    const head = el('div', 'prov-head');
+    const mark = el('span', 'mono-mark', (p.name || p.id).slice(0, 1).toUpperCase());
+    head.append(mark, el('span', 'prov-name', p.name || p.id));
+    if (p.plan_type) head.append(el('span', 'chip', p.plan_type));
+    head.append(el('span', 'chip', SOURCE_LABEL[p.source] || 'local log'));
+    card.append(head);
+
+    if (!p.ok) {
+      const err = el('div', 'prov-err', ERR_TEXT[p.error] || p.error || 'failed');
+      if (p.detail) err.append(el('small', '', p.detail));
+      card.append(err);
+      box.append(card);
+      continue;
+    }
+    const lims = el('div', 'lims');
+    for (const l of (p.limits || [])) {
+      const row = el('div', 'lrow');
+      row.append(el('span', 'lab', l.window_label || l.key));
+      const bar = el('div', 'bar ' + limitTone(l));
+      const fill = el('i'); fill.style.width = Math.min(100, l.used_percent) + '%';
+      bar.append(fill);
+      row.append(bar, el('span', 'pct num', fmt.pct(l.used_percent)));
+      lims.append(row);
+      const subBits = [];
+      if (l.scope) subBits.push(l.scope);
+      if (l.resets_at) subBits.push(fmt.until(l.resets_at));
+      if (subBits.length) {
+        const sub = el('div', 'lsub', subBits.join(' · '));
+        if (l.resets_at) { sub.dataset.resets = l.resets_at; sub.dataset.scope = l.scope || ''; }
+        lims.append(sub);
+      }
+    }
+    card.append(lims);
+    if (p.credits && (p.credits.unlimited || p.credits.balance)) {
+      card.append(el('div', 'credit',
+        p.credits.unlimited ? 'credits: unlimited' : 'credits: ' + p.credits.balance));
+    }
+    box.append(card);
+  }
+}
+
+function patchCard(m) {
+  const ui = m.ui, r = m.reading;
+  ui.name.textContent = displayName(m);
+  ui.idchip.textContent = m.id === '~legacy' ? 'old helper' : m.id.slice(0, 6);
+  ui.idchip.style.display = state.names[m.id] || (r && r.agent_name) || m.id === '~legacy' ? '' : 'none';
+
+  ui.chips.textContent = '';
+  const sys = r && r.system;
+  if (sys) {
+    let plat = sys.platform + (sys.arch ? ' · ' + sys.arch : '');
+    ui.chips.append(el('span', 'chip', plat));
+    if (sys.os_version) ui.chips.append(el('span', 'chip', 'kernel ' + sys.os_version));
+    if (sys.cpu_count) ui.chips.append(el('span', 'chip num', sys.cpu_count + ' cores'));
+    if (sys.uptime_sec != null) ui.chips.append(el('span', 'chip num', fmt.up(sys.uptime_sec)));
+    if (sys.load1 != null) {
+      ui.chips.append(el('span', 'chip num',
+        'load ' + sys.load1.toFixed(2) + ' ' + (sys.load5 ?? 0).toFixed(2) + ' ' + (sys.load15 ?? 0).toFixed(2)));
+    }
+  }
+  if (r && r.helper_version) ui.chips.append(el('span', 'chip num', 'helper ' + r.helper_version));
+
+  if (sys) {
+    ui.vitals.style.display = '';
+    vitalRow(ui, 'cpu', sys.cpu_percent, sys.cpu_count ? sys.cpu_count + ' cores' : '', true);
+    vitalRow(ui, 'mem', sys.mem_used_percent,
+      sys.mem_total ? fmt.bytes(sys.mem_total * (sys.mem_used_percent || 0) / 100) + ' / ' + fmt.bytes(sys.mem_total) : '');
+    vitalRow(ui, 'swap', sys.swap_used_percent,
+      sys.swap_total ? fmt.bytes(sys.swap_total * (sys.swap_used_percent || 0) / 100) + ' / ' + fmt.bytes(sys.swap_total) : '');
+    vitalRow(ui, 'disk', sys.disk_used_percent,
+      sys.disk_used != null && sys.disk_total ? fmt.bytes(sys.disk_used) + ' / ' + fmt.bytes(sys.disk_total) : '');
+    ui.vna.textContent = sys.missing && sys.missing.length
+      ? 'not measured here: ' + sys.missing.join(', ') : '';
+  } else {
+    ui.vitals.style.display = 'none';
+    ui.vna.textContent = r ? 'no system readings from this helper' : '';
+  }
+
+  drawSpark(m);
+  renderProviders(m);
+
+  ui.updrow.textContent = '';
+  if (r && r.upd) {
+    const b = el('button', 'ghost', 'Update helper');
+    b.onclick = () => askUpdate(m);
+    ui.updStat = el('span', 'stat');
+    ui.updrow.append(b, ui.updStat);
+  } else {
+    ui.updStat = null;
+  }
+
+  ui.termwrap.style.display = r && r.exec ? '' : 'none';
+  patchAge(m);
+}
+
+function drawSpark(m) {
+  const H = 32, W = 120, N = 60;
+  const h = m.hist.slice(-N);
+  m.ui.sparkWrap.style.display = h.length > 1 ? '' : 'none';
+  if (h.length < 2) return;
+  const step = W / (N - 1);
+  const y = v => H - 1 - (Math.min(100, Math.max(0, v)) / 100) * (H - 2);
+  let cpu = '', mem = '';
+  h.forEach((pt, i) => {
+    const x = (W - (h.length - 1) * step) + i * step;
+    if (pt[0] != null) cpu += (cpu ? 'L' : 'M') + x.toFixed(1) + ' ' + y(pt[0]).toFixed(1);
+    if (pt[1] != null) mem += (mem ? 'L' : 'M') + x.toFixed(1) + ' ' + y(pt[1]).toFixed(1);
+  });
+  if (cpu) {
+    const first = cpu.slice(1).split('L')[0].split(' ')[0];
+    const lastX = (W).toFixed(1);
+    m.ui.cpuPath.setAttribute('d', cpu + 'L' + lastX + ' ' + (H - 1) + 'L' + first + ' ' + (H - 1) + 'Z');
+  } else m.ui.cpuPath.removeAttribute('d');
+  if (mem) m.ui.memPath.setAttribute('d', mem);
+  else m.ui.memPath.removeAttribute('d');
+}
+
+function patchAge(m) {
+  const ui = m.ui;
+  ui.age.textContent = fmt.age(m.seenAt);
+  const quiet = Date.now() - m.seenAt > state.offlineAfter * 1000;
+  ui.card.classList.toggle('on', !quiet);
+  ui.card.classList.toggle('offline', quiet);
+  ui.dot.title = quiet ? 'no push for a while' : 'reporting';
+}
+
+/* countdown text ticks locally so a reading that arrives once a minute still
+   reads as alive */
+function tick() {
+  for (const m of state.machines.values()) {
+    patchAge(m);
+    for (const sub of m.ui.provs.querySelectorAll('.lsub[data-resets]')) {
+      const bits = [];
+      if (sub.dataset.scope) bits.push(sub.dataset.scope);
+      bits.push(fmt.until(Number(sub.dataset.resets)));
+      sub.textContent = bits.join(' · ');
+    }
+  }
+  paintCount();
+}
+setInterval(tick, 1000);
+
+/* console heartbeat: whichever consoles are open stay open at the relay */
+setInterval(() => {
+  for (const m of state.machines.values()) {
+    if (m.termOn) op({ t: 'term', agent: m.id, open: true }).catch(() => {});
+  }
+}, 40000);
+
+function paintCount() {
+  const n = state.machines.size;
+  if (!n) { $('#count').textContent = ''; return; }
+  let quiet = 0;
+  for (const m of state.machines.values()) {
+    if (Date.now() - m.seenAt > state.offlineAfter * 1000) quiet++;
+  }
+  $('#count').textContent = n + (n === 1 ? ' machine' : ' machines') + (quiet ? ' · ' + quiet + ' quiet' : '');
+}
+
+function upsertMachine(id, seenAt, reading) {
+  let m = state.machines.get(id);
+  if (!m) {
+    m = { id, seenAt: 0, reading: null, hist: [] };
+    state.machines.set(id, m);
+    const card = buildCard(m);
+    $('#board').append(card);
+  }
+  m.seenAt = seenAt;
+  if (reading) {
+    m.reading = reading;
+    const sys = reading.system || {};
+    m.hist.push([sys.cpu_percent ?? null, sys.mem_used_percent ?? null]);
+    if (m.hist.length > 240) m.hist = m.hist.slice(-120);
+  }
+  patchCard(m);
+  paintBoard();
+}
+
+function dropMissing(rosterIDs) {
+  for (const [id, m] of state.machines) {
+    if (!rosterIDs.has(id)) {
+      m.ui.card.remove();
+      state.machines.delete(id);
+    }
+  }
+}
+
+function paintBoard() {
+  const has = state.machines.size > 0;
+  $('#board').style.display = has ? 'grid' : 'none';
+  $('#empty').style.display = has || !state.connected ? 'none' : 'block';
+  paintCount();
+}
+
+/* ── frames ─────────────────────────────────────────────────────────────── */
+
+function onFrame(f) {
+  switch (f.type) {
+    case 'hello':
+      state.offlineAfter = f.offline_after || 90;
+      state.termTTL = f.term_ttl || 120000;
+      state.names = f.names || {};
+      for (const m of f.machines || []) upsertMachine(m.id, m.seen_at, m.reading);
+      dropMissing(new Set((f.machines || []).map(x => x.id)));
+      paintBoard();
+      break;
+    case 'reading': {
+      upsertMachine(f.agent_id, f.seen_at, f.reading);
+      if (f.roster) dropMissing(new Set(f.roster.map(x => x.id)));
+      break;
+    }
+    case 'names':
+      state.names = f.names || {};
+      for (const m of state.machines.values()) patchCard(m);
+      break;
+    case 'queued': {
+      const m = state.machines.get(f.agent_id);
+      if (m && f.ahead > 0) termAppend(m, '(queued behind ' + f.ahead + ')\n');
+      break;
+    }
+    case 'result': {
+      const m = state.machines.get(f.agent_id);
+      if (!m) break;
+      if (f.kind === 'update') {
+        if (m.ui.updStat) {
+          m.ui.updStat.textContent = f.error ? '(' + f.error + ')'
+            : 'done — the helper restarts itself';
+        }
+        if (f.out) termAppend(m, f.out.endsWith('\n') ? f.out : f.out + '\n');
+        break;
+      }
+      m.pend.delete(f.id);
+      let text = f.out || '';
+      if (text && !text.endsWith('\n')) text += '\n';
+      if (f.truncated) text += '(output trimmed)\n';
+      if (f.error) text += '(' + f.error + ')\n';
+      else if (typeof f.code === 'number' && f.code !== 0) text += '(exit ' + f.code + ')\n';
+      termAppend(m, text || '(no output)\n');
+      break;
+    }
+  }
+}
+
+/* ── the stream ─────────────────────────────────────────────────────────── */
+
+function setConn(liveText, isLive) {
+  $('#conn').classList.toggle('live', isLive);
+  $('#conn-t').textContent = liveText;
+}
+
+async function streamLoop(gen) {
+  let backoff = 1000;
+  while (gen === state.gen) {
+    try {
+      const resp = await fetch('/api/stream', {
+        headers: { 'Authorization': 'Bearer ' + state.token },
+        cache: 'no-store',
+      });
+      if (resp.status === 403) { forgetToken('That token was refused.'); return; }
+      if (!resp.ok || !resp.body) throw new Error('http ' + resp.status);
+      setConn('live', true);
+      state.connected = true;
+      backoff = 1000;
+      paintBoard();
+
+      const reader = resp.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done || gen !== state.gen) break;
+        buf += dec.decode(value, { stream: true });
+        let i;
+        while ((i = buf.indexOf('\n\n')) >= 0) {
+          const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+          for (const line of chunk.split('\n')) {
+            if (!line.startsWith('data: ')) continue;
+            try { onFrame(JSON.parse(line.slice(6))); } catch (_) {}
+          }
+        }
+      }
+    } catch (_) { /* fall through to retry */ }
+    if (gen !== state.gen) return;
+    state.connected = false;
+    setConn('reconnecting', false);
+    await new Promise(r => setTimeout(r, backoff + Math.random() * 400));
+    backoff = Math.min(backoff * 1.8, 30000);
+  }
+}
+
+function forgetToken(msg) {
+  store.removeItem(LSK);
+  state.token = '';
+  state.gen++;
+  state.connected = false;
+  state.machines.clear();
+  $('#board').textContent = '';
+  $('#board').style.display = 'none';
+  $('#empty').style.display = 'none';
+  $('#lock').style.display = 'none';
+  $('#gate').style.display = '';
+  setConn('signed out', false);
+  if (msg) { $('#gate-err').textContent = msg; $('#gate-err').style.display = 'block'; }
+}
+
+function start() {
+  $('#gate').style.display = 'none';
+  $('#lock').style.display = '';
+  setConn('connecting', false);
+  const origin = location.origin;
+  $('#empty-cmd').textContent =
+    'MON_RELAY=' + origin + ' \\\n  curl -fsSL https://tools.subnsub.com/monitor/install.sh | sh -s -- TOKEN';
+  $('#empty-hand').textContent = 'subnsub-monitor connect ' + origin + ' TOKEN';
+  state.gen++;
+  streamLoop(state.gen);
+}
+
+$('#gate-form').onsubmit = e => {
+  e.preventDefault();
+  const t = $('#gate-tok').value.trim();
+  if (!/^[A-Za-z0-9_-]{24,128}$/.test(t)) {
+    $('#gate-err').textContent = 'A token is 24-128 characters of A-Za-z0-9_-';
+    $('#gate-err').style.display = 'block';
+    return;
+  }
+  $('#gate-err').style.display = 'none';
+  state.token = t;
+  store.setItem(LSK, t);
+  $('#gate-tok').value = '';
+  start();
+};
+$('#lock').onclick = () => forgetToken('');
+
+if (state.token) start();
+else setConn('signed out', false);
+})();
+</script>
+</body>
+</html>
