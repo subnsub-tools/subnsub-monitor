@@ -61,8 +61,9 @@ one that would read a credential and call `cloudcode-pa.googleapis.com` — is
 deliberately **not** implemented, for the same reason the Amp bearer path is
 not.
 
-**Antigravity is not discovered on Windows**, and that is a refusal rather than
-a gap left open. Finding the server is easy there — one call maps a listening
+**Antigravity is not discovered on Windows** — which is moot while Windows is
+unpublished, and recorded because it is the one provider that could not simply
+be switched back on with the rest. It is a refusal rather than a gap left open. Finding the server is easy there — one call maps a listening
 port to a pid — but the `--csrf_token` lives in another process's *command
 line*, and reading one on Windows means either WMI (COM, or a PowerShell
 subprocess costing a second or two inside a 30-second loop) or
@@ -146,9 +147,12 @@ numbers, MAC addresses, public IP. The kernel version is deliberately cut to
 `major.minor` — "6.8" tells you whether a box is ancient; "6.8.0-1050-oracle"
 also tells anyone who reads it which cloud to aim at and which CVEs to try.
 
-Coverage is honest rather than uniform:
+Coverage is honest rather than uniform. The Windows column is kept for the
+same reason its code is — the port is written and works, it is simply **not
+published** (see Install) — so read that column as "what it does when it is
+switched on" rather than as something you can run today:
 
-| | Linux | Windows | macOS | FreeBSD |
+| | Linux | Windows (not published) | macOS | FreeBSD |
 |---|---|---|---|---|
 | CPU % | yes (differential, `/proc/stat`) | yes (`GetSystemTimes`) | — | — |
 | Memory | yes (`MemAvailable`) | yes (`GlobalMemoryStatusEx`) | — | — |
@@ -202,16 +206,10 @@ can say so, rather than rendering a zero that looks like an idle machine.
 
 ## Install
 
-**Linux, macOS, FreeBSD**
+**Linux, macOS, FreeBSD** — the published platforms.
 
 ```sh
 curl -fsSL https://tools.subnsub.com/monitor/install.sh | sh -s -- <TOKEN>
-```
-
-**Windows** (PowerShell — not the older Command Prompt)
-
-```powershell
-& ([scriptblock]::Create((irm https://tools.subnsub.com/monitor/install.ps1))) -Token <TOKEN>
 ```
 
 …and if you would rather look first, which is the reasonable instinct for
@@ -222,30 +220,18 @@ curl -fsSL https://tools.subnsub.com/monitor/install.sh -o install.sh
 less install.sh && sh install.sh <TOKEN>
 ```
 
-```powershell
-irm https://tools.subnsub.com/monitor/install.ps1 -OutFile install.ps1
-notepad install.ps1 ; .\install.ps1 -Token <TOKEN>
-```
-
 It installs one binary to `~/.local/bin` and registers it to run at login — a
-systemd **user** unit on Linux, a LaunchAgent on macOS, a **scheduled task** on
-Windows. No sudo, no administrator rights, nothing written outside your home
-directory. `sh install.sh --uninstall` (or `.\install.ps1 -Uninstall`) removes
-both.
+systemd **user** unit on Linux, a LaunchAgent on macOS. No sudo, nothing
+written outside your home directory. `sh install.sh --uninstall` removes both.
 
-**Why a scheduled task and not a Windows service.** A service has to answer the
-service control manager, which means either a second executable or a Go
-dependency this project does not carry — and registering one needs
-administrator rights nothing else about this install needs. The costs are named
-rather than hidden: a task starts at logon rather than at boot unless it can be
-registered to run whether or not you are signed in, which needs a privilege a
-standard user usually lacks. The installer tries for that, falls back, and
-prints which one your machine got.
-
-A task also carries no environment, so on Windows the agent reads the token out
-of the file the installer wrote. The two alternatives there were the task's
-command line and the user's persistent environment, and both are readable by
-every other program that user runs.
+> **Windows is not published.** The port is complete, was released on
+> 2026-08-01, and was withdrawn the same day — a product decision, not a defect.
+> The source is still in this repository (everything behind `//go:build
+> windows`), `install.ps1` is still here with its checksums reset to
+> placeholders so it declines rather than installs, and no Windows binary is
+> served. The sections below describe how it behaves when it is switched on,
+> because that is worth keeping accurate; they do not describe something you
+> can install today.
 
 **FreeBSD registers nothing**, and says so. There is no per-user service
 manager: the two ways to start something at boot are an `rc.d` script, which
@@ -273,7 +259,7 @@ the file you were invited to read.
 ## Build it yourself
 
 ```sh
-cd go && sh build.sh          # → dist/subnsub-monitor-<goos>-<goarch>[.exe]
+cd go && sh build.sh          # → dist/subnsub-monitor-<goos>-<goarch>
 go test ./...
 ```
 

@@ -197,15 +197,14 @@ case "$os" in
   Linux)   goos=linux   ;;
   Darwin)  goos=darwin  ;;
   FreeBSD) goos=freebsd ;;
-  # Somebody running this inside Git Bash, MSYS2, Cygwin or the like. The
-  # binary would install and even run, and the service registration below —
-  # systemd, launchd — is on neither of the two paths that exist there, so it
-  # would silently install nothing that survives a reboot. Point at the
-  # installer that does the Windows half properly instead of half-working.
+  # Somebody running this inside Git Bash, MSYS2, Cygwin or the like. Named
+  # separately from the catch-all below so the answer can be the true one:
+  # Windows is not a platform this is published for, rather than one nobody
+  # thought about. The port exists and is not being offered.
   MINGW*|MSYS*|CYGWIN*|Windows_NT)
-    die "this is the Unix installer. On Windows, in PowerShell:
-  & ([scriptblock]::Create((irm $BASE/install.ps1))) -Token <TOKEN>" ;;
-  *) die "unsupported OS: $os (Linux, macOS, FreeBSD; Windows via install.ps1)" ;;
+    die "Windows is not supported. No binary is published for it, and this
+installer would not register anything that survives a reboot there." ;;
+  *) die "unsupported OS: $os (Linux, macOS and FreeBSD)" ;;
 esac
 case "$arch" in
   x86_64|amd64)  goarch=amd64 ;;
