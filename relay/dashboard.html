@@ -733,6 +733,13 @@ function onFrame(f) {
       if (f.roster) dropMissing(new Set(f.roster.map(x => x.id)));
       break;
     }
+    case 'roster':
+      // The relay forgot a machine — silent past its TTL. Nothing else sends
+      // this, and without it the card would sit there until some *other*
+      // machine's next reading happened to carry a roster that omits it.
+      dropMissing(new Set((f.roster || []).map(x => x.id)));
+      paintBoard();
+      break;
     case 'names':
       state.names = f.names || {};
       for (const m of state.machines.values()) patchCard(m);
