@@ -49,7 +49,6 @@ import (
 	"context"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -226,7 +225,10 @@ func runAmpUsage(bin string) (string, bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), ampTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, bin, "usage")
+	// Not exec.CommandContext directly: on Windows a global npm CLI is a .cmd,
+	// which CreateProcess will not load and which therefore needs the command
+	// interpreter in front of it. See toolCommand in fs_windows.go.
+	cmd := toolCommand(ctx, bin, "usage")
 	// Stdin nil means the null device, which is the point: a CLI that decides
 	// to prompt must hit EOF and exit rather than hold the push loop open until
 	// the deadline.
@@ -291,12 +293,23 @@ func runAmpUsage(bin string) (string, bool, error) {
 // corporate machine legitimately needs (proxies, CA bundles, locale) and says
 // nothing about secrets. AMP_* passes through because those are Amp's own
 // settings — including its API key, which is Amp's to hold.
+// The Windows names are in the same list rather than behind a build tag: they
+// simply do not exist elsewhere, and LookupEnv skips what is not set. They are
+// there because an allowlist that names only the Unix ones is not a tighter
+// allowlist on Windows, it is a BROKEN one — a process with no SystemRoot
+// cannot resolve a DLL or open a socket, and one with no APPDATA cannot find
+// the npm and Amp configuration it is being asked about. All of them are paths
+// and none is a secret; the rule this list exists to enforce — that this
+// helper's own relay token never reaches a third party's address space —
+// is untouched.
 var ampEnvKeys = []string{
 	"HOME", "PATH", "USER", "LOGNAME", "SHELL", "TERM", "TZ", "TMPDIR", "LANG",
 	"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR",
 	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
 	"http_proxy", "https_proxy", "no_proxy",
 	"SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+	"USERPROFILE", "APPDATA", "LOCALAPPDATA", "PROGRAMFILES", "PROGRAMDATA",
+	"SystemRoot", "SystemDrive", "windir", "COMSPEC", "PATHEXT", "TEMP", "TMP",
 }
 
 func ampEnv() []string {

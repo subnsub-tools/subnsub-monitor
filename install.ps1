@@ -85,8 +85,8 @@ $ConfDir  = Join-Path $HOME '.config\subnsub-monitor'
 # installed, and a swapped binary would otherwise be free to read
 # ~/.claude/.credentials.json and post it somewhere, which no amount of care in
 # the Go source can prevent.
-$SUM_windows_amd64 = 'cbebe3b1b81a01f34c1fe77fea8dfa16e00dd79a216bc3ed5f36305496249ae6'
-$SUM_windows_arm64 = '61c0c66d1a26996c776b8681e3dd4e5b6700ff1777c3d4382970062a69b0f87e'
+$SUM_windows_amd64 = 'fd7d68e8fb10e0ecd9815699692e775a26d9ff7dda0c227cde8dfcf902c20743'
+$SUM_windows_arm64 = 'ce79f0314b1a81c495403b3fdd21271032e38c8ef070f00d63f87fddd1c056bf'
 
 function Say([string]$m) { Write-Host $m }
 function Die([string]$m) { Write-Host "error: $m" -ForegroundColor Red; exit 1 }
@@ -290,15 +290,51 @@ try {
     if ($LASTEXITCODE -ne 0) { Die "the downloaded binary does not run on this machine" }
 
     $bin = Join-Path $BinDir "$AppName.exe"
+    # Land the verified bytes in the TARGET directory first, so the step that
+    # replaces anything is a rename within one filesystem.
+    #
+    # $tmp is in the system temp directory, which is very often a different
+    # volume — and `Move-Item` across volumes silently degrades into a copy.
+    # A copy is not atomic: interrupt it and the service path holds half a
+    # binary, which is worse than holding the old one, and worse still because
+    # the old process has already been stopped by then.
+    $staged = Join-Path $BinDir ".$AppName.new"
+    Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
+    Copy-Item -LiteralPath $tmp -Destination $staged -Force
     # Windows will not overwrite a running image, so whatever is running from
     # this path has to stop first. The Unix installer can skip this entirely.
     Stop-Helper $bin
-    $moved = $false
+    # The same order the agent uses to replace itself, for the same reason: the
+    # running image can be RENAMED but not replaced in place, so it moves aside
+    # and the new one takes the name. Both steps are renames inside one
+    # directory, and the previous binary is kept — `.prev` is what somebody
+    # reaches for when an install goes wrong on a machine they cannot see.
+    $prev = "$bin.prev"
+    $done = $false
     foreach ($try in 1..10) {
-        try { Move-Item -LiteralPath $tmp -Destination $bin -Force; $moved = $true; break }
-        catch { Start-Sleep -Milliseconds 500 }
+        try {
+            if (Test-Path -LiteralPath $bin) {
+                Remove-Item -LiteralPath $prev -Force -ErrorAction SilentlyContinue
+                Move-Item -LiteralPath $bin -Destination $prev -Force
+            }
+            try {
+                Move-Item -LiteralPath $staged -Destination $bin -Force
+            } catch {
+                # Put the working one back before giving up. Without this the
+                # service path is left empty by a failure the operator is about
+                # to be told was survivable.
+                if (Test-Path -LiteralPath $prev) {
+                    Move-Item -LiteralPath $prev -Destination $bin -Force -ErrorAction SilentlyContinue
+                }
+                throw
+            }
+            $done = $true; break
+        } catch { Start-Sleep -Milliseconds 500 }
     }
-    if (-not $moved) { Die "could not replace $bin — something is still running it" }
+    if (-not $done) {
+        Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
+        Die "could not replace $bin — something is still running it"
+    }
     Say "installed $bin"
 } finally {
     Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
@@ -380,11 +416,15 @@ try {
     $triggers += New-ScheduledTaskTrigger -Once -At (Get-Date) `
         -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration ([TimeSpan]::MaxValue)
 } catch {
-    # Some builds refuse an unbounded duration on this cmdlet. A day is not
-    # forever, but the logon trigger covers a reboot and a day covers everything
-    # between two of them.
-    $triggers += New-ScheduledTaskTrigger -Once -At (Get-Date) `
-        -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 1)
+    # Some builds refuse an unbounded duration on this cmdlet. The fallback is
+    # DAILY, not a single 24-hour window, and the difference is the whole point:
+    # a one-shot trigger repeating for a day stops repeating after a day, and a
+    # machine that stays logged in — a server, which is most of them — would
+    # then have no restart path at all. Task Scheduler only repeats within the
+    # duration it was given, so the duration has to be re-armed by something,
+    # and a daily trigger is the something.
+    $triggers += New-ScheduledTaskTrigger -Daily -At (Get-Date) `
+        -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Hours 24)
 }
 
 $settings = New-ScheduledTaskSettingsSet `

@@ -2,16 +2,20 @@
 
 package main
 
-// The two things this helper needs from a filesystem that the standard library
-// does not expose portably: how many names a file has, and whether a file is
-// one this process should be willing to execute.
+// What this helper needs to know about another program's file, which the
+// standard library does not answer portably: how many names it has, whether
+// this process should be willing to run it, and how to run it.
 //
-// Both are asked in security decisions — the first guards the Codex session
-// reader against a hard link planted in the sessions tree, the second guards
-// running the Amp CLI — so both fail CLOSED on any platform that cannot answer.
+// The first two are security decisions — one guards the Codex session reader
+// against a hard link planted in the sessions tree, the other guards running
+// the Amp CLI — so both fail CLOSED on any platform that cannot answer. The
+// third is not a judgement at all; it is the plain fact that Unix runs a file
+// and Windows sometimes needs an interpreter to.
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"syscall"
 )
 
@@ -60,4 +64,11 @@ func usableBinary(path string) bool {
 	}
 	perm := st.Mode().Perm()
 	return perm&0o111 != 0 && perm&0o002 == 0
+}
+
+// How to run a tool this helper found on disk. Directly: the kernel reads the
+// shebang for a script and the ELF header for anything else, and neither needs
+// this program's help.
+func toolCommand(ctx context.Context, bin string, args ...string) *exec.Cmd {
+	return exec.CommandContext(ctx, bin, args...)
 }

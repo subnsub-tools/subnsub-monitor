@@ -5,13 +5,30 @@ package main
 // The same two jobs as console_unix.go — start a shell, and be able to kill
 // everything it started — with none of the same machinery available.
 //
-// THE SHELL. `cmd.exe /s /c "LINE"`, and the /s is load-bearing. Without it
-// cmd applies a quote-stripping rule that depends on how many quotes the line
-// contains and whether it names a real program, so `echo "a" "b"` and
-// `echo "a"` are parsed by different rules. With /s the rule is one sentence:
-// remove the first and last character if they are quotes, run the rest
-// verbatim. That is the only form in which an arbitrary line typed on the
-// dashboard reaches the shell as the person typed it.
+// THE SHELL. `cmd.exe /d /s /c "LINE"`, and both switches are load-bearing.
+//
+// Without /s, cmd applies a quote-stripping rule that depends on how many
+// quotes the line contains and whether it names a real program, so
+// `echo "a" "b"` and `echo "a"` are parsed by different rules. With /s the rule
+// is one sentence: remove the first and last character if they are quotes, run
+// the rest verbatim. That is the only form in which an arbitrary line typed on
+// the dashboard reaches the shell as the person typed it.
+//
+// Without /d, cmd first runs whatever is in the AutoRun value under
+// `HKCU\Software\Microsoft\Command Processor` — so the machine would be running
+// something nobody typed here, before every single command, with its output
+// mixed into the answer. Anything from a corporate profile script to a leftover
+// `chcp` lands there. The dashboard asked for one command; /d is what makes it
+// one command.
+//
+// WHAT DOES NOT WORK, said here because it looks like it should: output that is
+// not ASCII may arrive mangled. A program writing to a pipe picks its own
+// encoding — the OEM code page for many Windows tools — and the relay carries
+// UTF-8, so those bytes become replacement characters. The obvious fix, a
+// `chcp 65001` prefix, is not taken because it would not work: these commands
+// run with CREATE_NO_WINDOW and therefore have no console whose code page chcp
+// could set. Doing it properly means decoding per-program, which is not a thing
+// that can be done correctly from this side.
 //
 // The command line is handed over as a single string via SysProcAttr.CmdLine
 // rather than as an argv, because Windows has no argv — CreateProcess takes one
@@ -116,8 +133,8 @@ func consoleCommand(ctx context.Context, line string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, shell)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		// The first token is argv[0] as far as cmd.exe is concerned; it skips
-		// it and parses from /s onwards.
-		CmdLine:       `"` + shell + `" /s /c "` + line + `"`,
+		// it and parses from /d onwards.
+		CmdLine:       `"` + shell + `" /d /s /c "` + line + `"`,
 		CreationFlags: createNoWindow,
 	}
 	return cmd
@@ -139,22 +156,40 @@ func winShell() string {
 	return `C:\Windows\System32\cmd.exe`
 }
 
-// Put the running command in a kill-on-close job. Every failure here is
-// survivable — the command still runs, and consoleKill falls back to killing
-// the process itself — so none of them is reported anywhere: a console that
-// prints a warning about job objects before every command is a console nobody
-// reads the output of.
+// Said ONCE per process, not once per command. Failing to build the job is a
+// standing property of the machine — an incompatible job it is already in,
+// a privilege it does not hold — so it will fail for every command this helper
+// ever runs, and a warning on each one would bury the command output the
+// operator is actually reading.
+var jobWarn sync.Once
+
+// Put the running command in a kill-on-close job.
+//
+// Failure is survivable: the command still runs and consoleKill falls back to
+// killing the shell. But it is NOT silent, because what is lost is a guarantee
+// this feature states out loud — that the deadline takes down the whole tree.
+// Degrading from that without saying so is the shape of failure that gets
+// discovered as "why is there a stray process on that box", months later, by
+// somebody who had every reason to believe it could not happen.
 func consoleAdopt(cmd *exec.Cmd) {
 	if cmd == nil || cmd.Process == nil {
 		return
 	}
+	warn := func(why string) {
+		jobWarn.Do(func() {
+			warnf("console: could not put commands in a job object (%s) — a timeout "+
+				"will kill the shell but not what it started", why)
+		})
+	}
 	job, err := newKillOnCloseJob()
 	if err != nil {
+		warn(err.Error())
 		return
 	}
 	h, err := syscall.OpenProcess(processSetQuota|processTerminate, false, uint32(cmd.Process.Pid))
 	if err != nil {
 		syscall.CloseHandle(job)
+		warn(err.Error())
 		return
 	}
 	// The job holds its own reference to the process; this handle was only
@@ -162,10 +197,12 @@ func consoleAdopt(cmd *exec.Cmd) {
 	defer syscall.CloseHandle(h)
 	if err := procAssignProcessToJobObject.Find(); err != nil {
 		syscall.CloseHandle(job)
+		warn(err.Error())
 		return
 	}
-	if r, _, _ := syscall.SyscallN(procAssignProcessToJobObject.Addr(), uintptr(job), uintptr(h)); r == 0 {
+	if r, _, e := syscall.SyscallN(procAssignProcessToJobObject.Addr(), uintptr(job), uintptr(h)); r == 0 {
 		syscall.CloseHandle(job)
+		warn(e.Error())
 		return
 	}
 	consoleJobs.Store(cmd, job)

@@ -11,13 +11,23 @@ package main
 // bare name is not the DLL-planting hazard the same line would be for an
 // ordinary library. That property is the reason this file uses no other DLL.
 //
-// The calls go through syscall.SyscallN with the proc address rather than
-// LazyProc.Call, and the difference is not style. The compiler has a special
-// rule that keeps a Go object alive across a call when its address is converted
-// to uintptr in the argument list of an assembly-implemented function, and
-// SyscallN is on that list while Call — ordinary Go code — is not. Every
-// pointer below is to a struct the garbage collector would otherwise be free to
-// consider unreachable the instant it became a number.
+// EVERY CALL BELOW IS SPELLED OUT AT ITS OWN SITE, and the repetition is the
+// point rather than an oversight.
+//
+// The compiler has one rule that makes `uintptr(unsafe.Pointer(&x))` safe: the
+// conversion must appear IN THE ARGUMENT LIST of a call to an
+// assembly-implemented function, of which syscall.SyscallN is one. It then
+// keeps the object alive and unmoved for that call. Hand the same expression to
+// an ordinary Go helper — even one that does nothing but forward it to
+// SyscallN — and the rule no longer applies: by the time the real call happens
+// the pointer is a plain number the collector never saw, and a stack growth in
+// between can move what it pointed at. That is what an earlier version of this
+// file did while a comment claimed the opposite, which is the worse half of the
+// bug: it would have been correct almost always and wrong under a garbage
+// collection nobody could reproduce.
+//
+// runtime.KeepAlive does not rescue it either. KeepAlive stops a collection; it
+// does not stop the stack from moving, and the uintptr was already taken.
 //
 // WHAT WINDOWS CANNOT ANSWER, and is therefore reported as missing rather than
 // guessed at:
@@ -55,17 +65,14 @@ var (
 	procRtlGetVersion = ntdll.NewProc("RtlGetVersion")
 )
 
-// Every call is resolved before it is made. LazyProc.Addr panics on a symbol
-// that is not there, and "not there" is a real state on Wine, on ReactOS, and
-// on whatever Microsoft trims out of the next server SKU — a missing counter
+// Every symbol is resolved before it is used. LazyProc.Addr panics on one that
+// is not there, and "not there" is a real state on Wine, on ReactOS, and on
+// whatever Microsoft trims out of the next server SKU — a missing counter
 // should cost that one reading and nothing else.
-func winCall(p *syscall.LazyProc, a ...uintptr) (uintptr, bool) {
-	if err := p.Find(); err != nil {
-		return 0, false
-	}
-	r, _, _ := syscall.SyscallN(p.Addr(), a...)
-	return r, true
-}
+//
+// Resolution only. It deliberately does NOT make the call, because a helper
+// that took the arguments would be the very shape the note above rules out.
+func winReady(p *syscall.LazyProc) bool { return p.Find() == nil }
 
 type memoryStatusEx struct {
 	Length               uint32
@@ -125,11 +132,14 @@ func systemSnapshot() System {
 // that would tell you 23H2 from 24H2, also tells anyone reading the relay which
 // patch level to try things against.
 func winVersion(s *System) {
+	if !winReady(procRtlGetVersion) {
+		return
+	}
 	var v osVersionInfoExW
 	v.OSVersionInfoSize = uint32(unsafe.Sizeof(v))
 	// NTSTATUS, so zero is success — the opposite of the BOOL convention every
 	// other call in this file follows.
-	if st, ok := winCall(procRtlGetVersion, uintptr(unsafe.Pointer(&v))); !ok || st != 0 {
+	if st, _, _ := syscall.SyscallN(procRtlGetVersion.Addr(), uintptr(unsafe.Pointer(&v))); st != 0 {
 		return
 	}
 	s.OSVersion = shortKernel(
@@ -142,12 +152,16 @@ func winVersion(s *System) {
 // treating them as separate buckets inflates the total and quietly deflates
 // every percentage, the same mistake /proc/stat invites with guest time.
 func winCPU(s *System) {
+	if !winReady(procGetSystemTimes) {
+		s.miss(mCPU)
+		return
+	}
 	var idle, kernel, user syscall.Filetime
-	r, ok := winCall(procGetSystemTimes,
+	r, _, _ := syscall.SyscallN(procGetSystemTimes.Addr(),
 		uintptr(unsafe.Pointer(&idle)),
 		uintptr(unsafe.Pointer(&kernel)),
 		uintptr(unsafe.Pointer(&user)))
-	if !ok || r == 0 {
+	if r == 0 {
 		s.miss(mCPU)
 		return
 	}
@@ -172,10 +186,14 @@ func filetimeF(t syscall.Filetime) float64 {
 // here: a healthy machine keeps its cache full, and reporting free-and-nothing-
 // else makes every one of them look about to die.
 func winMem(s *System) {
+	if !winReady(procGlobalMemoryStatusEx) {
+		s.miss(mMemory)
+		return
+	}
 	var m memoryStatusEx
 	m.Length = uint32(unsafe.Sizeof(m))
-	r, ok := winCall(procGlobalMemoryStatusEx, uintptr(unsafe.Pointer(&m)))
-	if !ok || r == 0 || m.TotalPhys == 0 || m.AvailPhys > m.TotalPhys {
+	r, _, _ := syscall.SyscallN(procGlobalMemoryStatusEx.Addr(), uintptr(unsafe.Pointer(&m)))
+	if r == 0 || m.TotalPhys == 0 || m.AvailPhys > m.TotalPhys {
 		s.miss(mMemory)
 		return
 	}
@@ -192,19 +210,18 @@ func winMem(s *System) {
 // and f_bavail — so a quota that has been reached reads as full, and the
 // absolute figures still describe the disk.
 func winDisk(s *System) {
-	root := winSystemRoot()
-	p, err := syscall.UTF16PtrFromString(root)
-	if err != nil {
+	p, err := syscall.UTF16PtrFromString(winSystemRoot())
+	if err != nil || !winReady(procGetDiskFreeSpaceExW) {
 		s.miss(mDisk)
 		return
 	}
 	var availToCaller, total, totalFree uint64
-	r, ok := winCall(procGetDiskFreeSpaceExW,
+	r, _, _ := syscall.SyscallN(procGetDiskFreeSpaceExW.Addr(),
 		uintptr(unsafe.Pointer(p)),
 		uintptr(unsafe.Pointer(&availToCaller)),
 		uintptr(unsafe.Pointer(&total)),
 		uintptr(unsafe.Pointer(&totalFree)))
-	if !ok || r == 0 || total == 0 || totalFree > total {
+	if r == 0 || total == 0 || totalFree > total {
 		s.miss(mDisk)
 		return
 	}
@@ -247,12 +264,12 @@ func winUptime(s *System) {
 	// architecture, and reassembling it wrong would report a plausible but
 	// arbitrary uptime. This build targets 64-bit Windows; on anything else the
 	// reading is refused rather than guessed.
-	if ^uintptr(0)>>32 == 0 {
+	if ^uintptr(0)>>32 == 0 || !winReady(procGetTickCount64) {
 		s.miss(mUptime)
 		return
 	}
-	ms, ok := winCall(procGetTickCount64)
-	if !ok || ms == 0 {
+	ms, _, _ := syscall.SyscallN(procGetTickCount64.Addr())
+	if ms == 0 {
 		s.miss(mUptime)
 		return
 	}
