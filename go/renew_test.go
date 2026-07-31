@@ -616,3 +616,86 @@ func TestRetryAfterKeepsItsFloorThroughTheJitter(t *testing.T) {
 		}
 	}
 }
+
+// ── the token the installer wrote ──────────────────────────────────────────
+//
+// This file is the ONLY source of credentials on a Windows install: Task
+// Scheduler carries no environment, and the two alternatives — the command line
+// and the user's persistent environment — are both readable by every other
+// program that user runs. So a parsing bug here is not an inconvenience, it is
+// a machine that silently never reports.
+
+func writeTokenFile(t *testing.T, body string) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".config", "subnsub-monitor")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "token"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return home
+}
+
+func TestInstalledEnvReadsWhatTheInstallerWrites(t *testing.T) {
+	// Byte for byte what install.sh and install.ps1 produce.
+	writeTokenFile(t, "SUBNSUB_MONITOR_TOKEN=abcdefghijklmnopqrstuvwxyz012345\nSUBNSUB_MONITOR_SITE=https://tools.example.com\n")
+	env := installedEnv()
+	if got := env[tokenEnv]; got != "abcdefghijklmnopqrstuvwxyz012345" {
+		t.Fatalf("token: %q", got)
+	}
+	if got := env[siteEnv]; got != "https://tools.example.com" {
+		t.Fatalf("site: %q", got)
+	}
+}
+
+func TestInstalledEnvIsNotAnEnvironment(t *testing.T) {
+	// A whitelist of two names, not a loader. Anything else in the file is
+	// somebody else's business and must not become a setting this program acts
+	// on — the file lives in a directory a local user may be able to write.
+	writeTokenFile(t, "PATH=/tmp/evil\nSUBNSUB_MONITOR_RELAY=https://elsewhere.example\nSUBNSUB_MONITOR_TOKEN=abcdefghijklmnopqrstuvwxyz012345\n")
+	env := installedEnv()
+	if len(env) != 1 {
+		t.Fatalf("read more than the two names it is allowed to read: %v", env)
+	}
+	if _, ok := env["PATH"]; ok {
+		t.Fatal("★ read PATH out of the token file")
+	}
+}
+
+func TestInstalledEnvSurvivesTheAbsentAndTheOdd(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // no file at all
+	if env := installedEnv(); len(env) != 0 {
+		t.Fatalf("a missing file produced settings: %v", env)
+	}
+	// Trailing whitespace and CRLF: the Windows installer writes this file with
+	// PowerShell, whose default line ending is \r\n. A token with a stray \r on
+	// the end is refused by the relay, and the symptom is a machine that
+	// installs cleanly and never appears.
+	writeTokenFile(t, "SUBNSUB_MONITOR_TOKEN=abcdefghijklmnopqrstuvwxyz012345\r\n")
+	if got := installedEnv()[tokenEnv]; got != "abcdefghijklmnopqrstuvwxyz012345" {
+		t.Fatalf("★ CRLF left something on the token: %q", got)
+	}
+	// And a byte-order mark, which Notepad puts on every UTF-8 file it saves
+	// and PowerShell put on this one until version 6. It prefixes the KEY, not
+	// the value, so the symptom is not a broken token but no token at all.
+	writeTokenFile(t, "\ufeffSUBNSUB_MONITOR_TOKEN=abcdefghijklmnopqrstuvwxyz012345\n")
+	if got := installedEnv()[tokenEnv]; got != "abcdefghijklmnopqrstuvwxyz012345" {
+		t.Fatalf("★ a BOM hid the token from the parser: %q", got)
+	}
+}
+
+func TestSiteOverridePrefersTheEnvironment(t *testing.T) {
+	writeTokenFile(t, "SUBNSUB_MONITOR_SITE=https://from-file.example\n")
+	if got := siteOverride(); got != "https://from-file.example" {
+		t.Fatalf("file: %q", got)
+	}
+	// Whoever started the process wins over what an older install wrote, which
+	// is the same precedence every other switch in this helper follows.
+	t.Setenv(siteEnv, "https://from-env.example")
+	if got := siteOverride(); got != "https://from-env.example" {
+		t.Fatalf("env: %q", got)
+	}
+}

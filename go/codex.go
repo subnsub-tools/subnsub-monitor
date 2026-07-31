@@ -20,7 +20,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -188,10 +187,9 @@ func codexScanFile(root *os.Root, rel string) (rec *rollutRecord, truncated bool
 		return nil, false
 	}
 	// Refuse when the link count cannot be established, not just when it is
-	// wrong. `ok && Nlink != 1` was fail-open: on any platform where the type
-	// assertion misses, the hard-link guard silently switched itself off.
-	sys, ok := st.Sys().(*syscall.Stat_t)
-	if !ok || sys.Nlink != 1 {
+	// wrong — see singleLink, which is where the per-platform way of asking
+	// lives and where the fail-closed rule is enforced for all of them.
+	if !singleLink(f, st) {
 		return nil, false // hard link, or a link count we cannot verify
 	}
 
@@ -389,4 +387,3 @@ func windowLabel(minutes float64) *string {
 		return sp(strconv.FormatInt(m, 10) + "m")
 	}
 }
-

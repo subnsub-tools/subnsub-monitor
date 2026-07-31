@@ -51,10 +51,13 @@ LABEL=com.subnsub.monitor   # shows up in `launchctl list`; brand domain there t
 # script that publishes the binaries. A binary that does not match is not installed, and a swapped binary
 # would otherwise be free to read ~/.claude/.credentials.json and post it
 # somewhere, which no amount of care in the Go source can prevent.
-SUM_linux_amd64=98e90f42c76f630fdf1615dc606643333e216947533b88536ecbc916c2e73bdd
-SUM_linux_arm64=c13249bc5f8d6c229979451c1ea7b881309859aa76836bbad428f865d2eb2119
-SUM_darwin_amd64=94fd39d30d8b5e291df11fa821dcf3c141b93ab9b90fa1e70cf846631f2f08e7
-SUM_darwin_arm64=9646d6e5622808761c75a77452d2f65ab554237e3734b6688c0b30e68da8e610
+SUM_linux_amd64=5358461336297bda842dfe4ca2606e3cc1dd23ebffc618776a0a4efeacb8b8c8
+SUM_linux_arm64=8350a88a009eef4a86915e6b32c0b1f5e6638c1ecbbd72a549fbae3144edb537
+SUM_linux_arm=490d634bb82f05165ed4f0d797f561e8ff423e8ececf857807ffd7c8ff479c80
+SUM_darwin_amd64=6ec5c58c8800cb92c373a176ca774bb537408025ed531362103be76c046203d0
+SUM_darwin_arm64=9473a2370d4bb182b1bca57022be30157b837a600968eb0009e2594e57fd22fd
+SUM_freebsd_amd64=4cfdf10827e4fd9fbe8412012ccfd0f6eda3e9fe634f0a50d7bd4290d306fcb8
+SUM_freebsd_arm64=704cdabf9d653d0f9d09fd318fc1e952f138245c2a45efde5156b4f568d4f010
 
 say()  { printf '%s\n' "$*"; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -191,13 +194,26 @@ fi
 os=$(uname -s)
 arch=$(uname -m)
 case "$os" in
-  Linux)  goos=linux  ;;
-  Darwin) goos=darwin ;;
-  *) die "unsupported OS: $os (Linux and macOS only)" ;;
+  Linux)   goos=linux   ;;
+  Darwin)  goos=darwin  ;;
+  FreeBSD) goos=freebsd ;;
+  # Somebody running this inside Git Bash, MSYS2, Cygwin or the like. The
+  # binary would install and even run, and the service registration below —
+  # systemd, launchd — is on neither of the two paths that exist there, so it
+  # would silently install nothing that survives a reboot. Point at the
+  # installer that does the Windows half properly instead of half-working.
+  MINGW*|MSYS*|CYGWIN*|Windows_NT)
+    die "this is the Unix installer. On Windows, in PowerShell:
+  & ([scriptblock]::Create((irm $BASE/install.ps1))) -Token <TOKEN>" ;;
+  *) die "unsupported OS: $os (Linux, macOS, FreeBSD; Windows via install.ps1)" ;;
 esac
 case "$arch" in
   x86_64|amd64)  goarch=amd64 ;;
   aarch64|arm64) goarch=arm64 ;;
+  # 32-bit ARM: a Raspberry Pi running the 32-bit OS, and a fair number of
+  # cheap boxes. armv6 is NOT accepted — the published build is ARMv7 and would
+  # fault on a Pi 1 or a Zero W, which is a worse outcome than being told so.
+  armv7l|armv7|armhf) goarch=arm ;;
   *) die "unsupported architecture: $arch" ;;
 esac
 asset="$NAME-$goos-$goarch"
@@ -467,6 +483,44 @@ EOF
     launchctl unload "$plistdir/$LABEL.plist" 2>/dev/null || true
     launchctl load "$plistdir/$LABEL.plist"
     say "started (launchctl list | grep $LABEL)"
+    ;;
+
+  freebsd)
+    # NOTHING IS REGISTERED HERE, and that is a decision rather than an
+    # omission worth being explicit about.
+    #
+    # FreeBSD has no per-user service manager. The two ways to start something
+    # at boot are an rc.d script, which lives in /usr/local/etc/rc.d and needs
+    # root, and the user's crontab, which is not inside this script's promise
+    # that nothing is written outside your home directory. Quietly doing
+    # neither would be the worst of the three: an install that reports success
+    # and stops the next time the machine reboots.
+    #
+    # So the binary, the token and the machine id are all in place, and the two
+    # commands that finish the job are printed.
+    say ""
+    say "FreeBSD: no per-user service manager, so nothing was registered."
+    say "start it now:     daemon -f $BINDIR/$NAME connect $RELAY"
+    say "keep it at boot:  as root, drop this in /usr/local/etc/rc.d/subnsubmonitor"
+    say "                  and add subnsubmonitor_enable=\"YES\" to /etc/rc.conf:"
+    say ""
+    say "                    #!/bin/sh"
+    say "                    # PROVIDE: subnsubmonitor"
+    say "                    # REQUIRE: NETWORKING"
+    say "                    # KEYWORD: shutdown"
+    say "                    . /etc/rc.subr"
+    say "                    name=subnsubmonitor"
+    say "                    rcvar=subnsubmonitor_enable"
+    say "                    command=$BINDIR/$NAME"
+    say "                    command_args=\"connect $RELAY\""
+    say "                    subnsubmonitor_user=$(id -un)"
+    # HOME has to be set explicitly: rc.subr keeps root's environment when it
+    # drops privileges, and everything this helper owns — the token, the machine
+    # id, the name — is under ~/.config. Without it the service comes up as a
+    # brand new unnamed machine on every boot, or does not authenticate at all.
+    say "                    subnsubmonitor_env=\"HOME=$HOME\""
+    say "                    load_rc_config \$name"
+    say "                    run_rc_command \"\$1\""
     ;;
 esac
 

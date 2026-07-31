@@ -4,12 +4,21 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"time"
 )
 
-var stderr = os.Stderr
+// Where warnf writes — which is this machine's own record of what was done to
+// it, and the one account of a console command that does not pass through us.
+//
+// An interface rather than *os.File because on Windows there is nowhere for a
+// background process's stderr to go: systemd has the journal and launchd has a
+// log, Task Scheduler discards both streams. log_windows.go tees this into a
+// file beside the config so the promise console.go makes holds on every
+// platform rather than on two of them.
+var stderr io.Writer = os.Stderr
 
 const usage = `subnsub-monitor — AI coding quota for machines you can't reach
 
@@ -26,7 +35,8 @@ const usage = `subnsub-monitor — AI coding quota for machines you can't reach
 
 serve only ever shows you THIS machine. connect is the real shape:
 outbound-only, so a browser anywhere can watch a box it has no route to.
-The token may also come from SUBNSUB_MONITOR_TOKEN, which keeps it out of ps.
+The token may also come from SUBNSUB_MONITOR_TOKEN, or from the file the
+installer wrote — both keep it out of ps and out of the task's arguments.
 
 Every machine you paste the same token on gets its own dashboard, told apart
 by a random id created on first run. Give it a name and the dashboard says
@@ -85,15 +95,24 @@ func main() {
 			fmt.Print(usage)
 			os.Exit(2)
 		}
-		token := os.Getenv("SUBNSUB_MONITOR_TOKEN")
+		token := os.Getenv(tokenEnv)
 		rest := args[2:]
-		if token == "" {
-			if len(args) < 3 {
-				warnf("no token: pass one, or set SUBNSUB_MONITOR_TOKEN")
-				os.Exit(2)
-			}
+		if token == "" && len(args) >= 3 {
 			token = args[2]
 			rest = args[3:]
+		}
+		if token == "" {
+			// The file the installer wrote, which on Windows is the ordinary
+			// path rather than a fallback: Task Scheduler runs a program with
+			// arguments and carries no environment, and the two places a token
+			// could otherwise go there — the command line, or the user's
+			// persistent environment — are both readable by every other program
+			// that user runs. See installedEnv.
+			token = installedEnv()[tokenEnv]
+		}
+		if token == "" {
+			warnf("no token: pass one, or set SUBNSUB_MONITOR_TOKEN")
+			os.Exit(2)
 		}
 		every := 30.0
 		if len(rest) > 0 {
