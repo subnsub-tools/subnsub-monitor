@@ -274,3 +274,63 @@ func itoaTest(i int) string {
 func writeFileTest(path, body string) error {
 	return os.WriteFile(path, []byte(body), 0o600)
 }
+
+func TestSilentMachinesAreForgotten(t *testing.T) {
+	h := newHub("")
+	h.push(pushBody("machineone", false, false))
+	h.push(pushBody("machinetwo", false, false))
+	if !h.setName("machineone", "old box") {
+		t.Fatal("naming a live machine was refused")
+	}
+	// Age one of them past the TTL.
+	h.mu.Lock()
+	h.machines["machineone"].SeenAt = nowMS() - machineTTL.Milliseconds() - 1000
+	h.mu.Unlock()
+
+	if n := h.sweep(); n != 1 {
+		t.Fatalf("swept %d, want 1", n)
+	}
+	if h.machines["machineone"] != nil {
+		t.Fatal("the silent machine kept its slot")
+	}
+	if _, ok := h.names["machineone"]; ok {
+		t.Fatal("its name outlived it, which is the map that would grow forever")
+	}
+	if h.machines["machinetwo"] == nil {
+		t.Fatal("a live machine was swept")
+	}
+	// And the freed slot is usable.
+	if st := h.push(pushBody("machineone", false, false)); st != pushOK {
+		t.Fatalf("the returning machine was refused: %v", st)
+	}
+}
+
+func TestNamingAnUnknownMachineIsRefused(t *testing.T) {
+	h := newHub("")
+	if h.setName("nosuchmachine", "ghost") {
+		t.Fatal("named a machine that has never pushed")
+	}
+	if len(h.names) != 0 {
+		t.Fatalf("names = %v", h.names)
+	}
+}
+
+func TestExpiredRecordsDoNotComeBackFromDisk(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/state.json"
+	h := newHub(path)
+	h.push(pushBody("machineone", false, false))
+	h.setName("machineone", "old box")
+	h.mu.Lock()
+	h.machines["machineone"].SeenAt = nowMS() - machineTTL.Milliseconds() - 1000
+	h.mu.Unlock()
+	h.saveState()
+
+	h2 := newHub(path)
+	if len(h2.machines) != 0 {
+		t.Fatalf("a machine past the TTL was restored: %+v", h2.machines)
+	}
+	if len(h2.names) != 0 {
+		t.Fatalf("an orphan name was restored: %v", h2.names)
+	}
+}

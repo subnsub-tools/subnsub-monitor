@@ -57,6 +57,22 @@ const (
 	// refused and said so, because silently dropping the 65th machine is how
 	// an operator spends an evening blaming the helper.
 	maxMachines = 64
+
+	// How long a machine may be silent before its card is forgotten.
+	//
+	// Something has to be, or the only way a slot is ever freed is by
+	// restarting the relay: an agent id is created per install, so a box
+	// rebuilt a few times leaves its old selves on the board forever and a
+	// fleet that churns eventually hits the cap with nothing an operator can
+	// press to fix it.
+	//
+	// A week rather than the hosted relay's day. That one is holding rooms for
+	// everybody and has to be tight about it; this one is holding your own
+	// machines, and a laptop that spent a fortnight in a drawer coming back
+	// under its own name is worth more here than the few kilobytes. The name
+	// goes with the record — keeping names for machines nobody can see would
+	// be the one thing here that grows without a bound.
+	machineTTL = 7 * 24 * time.Hour
 	queueMax    = 8
 	maxWatchers = 8
 	maxPolls    = 16
@@ -298,10 +314,17 @@ func (h *Hub) setTerm(agent string, open bool) {
 	}
 }
 
-func (h *Hub) setName(agent, name string) {
+// setName records what the operator calls a machine. Only for a machine on
+// the board: a name is the one thing here that outlives a reading, so naming
+// an id nobody has ever pushed from would leave an entry with nothing to
+// expire it. Returns whether it took.
+func (h *Hub) setName(agent, name string) bool {
 	name = displayText(name, maxNameRunes)
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.machines[agent] == nil {
+		return false
+	}
 	if name == "" {
 		delete(h.names, agent)
 	} else {
@@ -309,6 +332,7 @@ func (h *Hub) setName(agent, name string) {
 	}
 	h.dirty = true
 	h.broadcast(frame{"type": "names", "names": h.names})
+	return true
 }
 
 type pollAnswer struct {
@@ -516,16 +540,14 @@ func (h *Hub) loadState() {
 		warnf("the state file is not readable JSON; starting empty")
 		return
 	}
-	for id, name := range st.Names {
-		if cleanAgentID(id) == "" && id != legacyAgent {
-			continue
-		}
-		h.names[id] = displayText(name, maxNameRunes)
-	}
 	now := nowMS()
+	cutoff := now - machineTTL.Milliseconds()
 	n := 0
 	for id, m := range st.Machines {
-		if m == nil || m.Reading == nil || (cleanAgentID(id) == "" && id != legacyAgent) {
+		// A relay that was off for a month must not restore a board full of
+		// machines it is about to forget one minute later.
+		if m == nil || m.Reading == nil || m.SeenAt < cutoff ||
+			(cleanAgentID(id) == "" && id != legacyAgent) {
 			continue
 		}
 		if n >= maxMachines {
@@ -566,6 +588,17 @@ func (h *Hub) loadState() {
 			issued: map[string]*pending{}}
 		n++
 	}
+	// Names last, and only for machines that made it back. Keeping a name
+	// whose machine expired — or whose record was refused above — is the one
+	// map here that would otherwise grow for as long as the relay runs.
+	for id, name := range st.Names {
+		if h.machines[id] == nil {
+			continue
+		}
+		if v := displayText(name, maxNameRunes); v != "" {
+			h.names[id] = v
+		}
+	}
 }
 
 func (h *Hub) saveState() {
@@ -602,11 +635,43 @@ func (h *Hub) saveState() {
 	}
 }
 
-// saveLoop flushes dirty state once a minute, and on demand at shutdown via
-// the final call in main.
-func (h *Hub) saveLoop() {
+// sweep forgets machines that have been silent past machineTTL, freeing their
+// slot and their name. Returns how many went.
+func (h *Hub) sweep() int {
+	h.mu.Lock()
+	cutoff := nowMS() - machineTTL.Milliseconds()
+	var gone []string
+	for id, m := range h.machines {
+		if m.SeenAt < cutoff {
+			gone = append(gone, id)
+		}
+	}
+	for _, id := range gone {
+		delete(h.machines, id)
+		delete(h.names, id)
+	}
+	if len(gone) > 0 {
+		h.dirty = true
+		// Told, not silent. A card disappearing from the board with no
+		// explanation anywhere is indistinguishable from a bug in this
+		// program, and the operator's journal is where the answer belongs.
+		h.broadcast(frame{"type": "roster", "roster": h.roster()})
+		h.broadcast(frame{"type": "names", "names": h.names})
+	}
+	h.mu.Unlock()
+	for _, id := range gone {
+		warnf("forgetting %s: silent for more than %v", id, machineTTL)
+	}
+	return len(gone)
+}
+
+// maintain runs the housekeeping this relay needs: forget machines nobody has
+// heard from, then flush state if anything changed. Once a minute, which is
+// far more often than either job needs and still nothing.
+func (h *Hub) maintain() {
 	for {
 		time.Sleep(time.Minute)
+		h.sweep()
 		h.saveState()
 	}
 }
