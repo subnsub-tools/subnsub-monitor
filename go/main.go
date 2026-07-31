@@ -19,6 +19,7 @@ const usage = `subnsub-monitor — AI coding quota for machines you can't reach
   subnsub-monitor token                  mint a relay token
   subnsub-monitor connect URL [TOKEN]    dial out and push to the relay
   subnsub-monitor name [LABEL]           show or set this machine's dashboard name
+  subnsub-monitor console [on|off]       show or set whether the dashboard may run commands here
   subnsub-monitor selftest               show what the collectors can and cannot open
 
 serve only ever shows you THIS machine. connect is the real shape:
@@ -28,6 +29,12 @@ The token may also come from SUBNSUB_MONITOR_TOKEN, which keeps it out of ps.
 Every machine you paste the same token on gets its own dashboard, told apart
 by a random id created on first run. Give it a name and the dashboard says
 that instead; the name is yours to type and is never taken from the hostname.
+
+console is OFF until you turn it on here, on this machine. With it on, the
+dashboard can run a command as this user and show you the output; each command
+is its own /bin/sh -c, so nothing persists between them, and every one of them
+is written to this machine's own log before it runs. Turn it off with
+'console off' and the helper stops asking the relay for work at all.
 `
 
 func main() {
@@ -109,6 +116,31 @@ func main() {
 			fmt.Printf("%s  (%s)\n", label, agentID())
 		} else {
 			fmt.Printf("unnamed  (%s)\n", agentID())
+		}
+
+	case "console":
+		if len(args) > 1 {
+			on := args[1] == "on" || args[1] == "1" || args[1] == "true" || args[1] == "yes"
+			off := args[1] == "off" || args[1] == "0" || args[1] == "false" || args[1] == "no"
+			if !on && !off {
+				// Not guessed. "console maybe" turning it ON because the word
+				// was not "off" is the failure mode this whole file is built
+				// to avoid.
+				warnf("say 'console on' or 'console off'")
+				os.Exit(2)
+			}
+			if err := setConsole(on); err != nil {
+				warnf("could not change the console setting")
+				os.Exit(1)
+			}
+		}
+		// Printed from the same reader the loop consults, so what you see is
+		// what the running helper will do — including the case where MON_CONSOLE
+		// in the environment overrides the file you just wrote.
+		if consoleEnabled() {
+			fmt.Printf("on   (%s)\n", agentID())
+		} else {
+			fmt.Printf("off  (%s)\n", agentID())
 		}
 
 	case "selftest":
