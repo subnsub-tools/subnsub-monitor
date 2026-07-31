@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -107,6 +108,11 @@ type Hub struct {
 
 	statePath string
 	dirty     bool
+	// Held for a whole save. Separate from mu, which is released while the
+	// file is written: two savers racing would otherwise fight over the same
+	// temp path, and the shutdown save could exit the process out from under
+	// the periodic one mid-write.
+	saving sync.Mutex
 }
 
 func newHub(statePath string) *Hub {
@@ -115,6 +121,17 @@ func newHub(statePath string) *Hub {
 		names:     map[string]string{},
 		watchers:  map[chan []byte]bool{},
 		statePath: statePath,
+	}
+	if statePath != "" {
+		// Make the directory now rather than discovering at the first save
+		// that it was never there. The README's own systemd example points at
+		// ~/.local/share/monitor-relay/state.json, which nothing else creates —
+		// without this the relay runs, works, and loses every name on restart.
+		if dir := filepath.Dir(statePath); dir != "" && dir != "." {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				warnf("cannot create the state directory %s: %v", dir, err)
+			}
+		}
 	}
 	h.loadState()
 	return h
@@ -174,7 +191,7 @@ func (h *Hub) push(body []byte) pushStatus {
 
 	m := h.machines[id]
 	if m == nil {
-		if len(h.machines) >= maxMachines {
+		if len(h.machines) >= maxMachines && !h.evictLRU() {
 			return pushFull
 		}
 		m = &machine{issued: map[string]*pending{}}
@@ -187,6 +204,38 @@ func (h *Hub) push(body []byte) pushStatus {
 	h.broadcast(frame{"type": "reading", "agent_id": id, "seen_at": m.SeenAt,
 		"reading": rd, "roster": h.roster()})
 	return pushOK
+}
+
+// evictLRU makes room for one new machine by forgetting the least recently
+// seen one, but only if that one is already quiet. Returns whether it did.
+//
+// The weekly sweep alone is not enough here. A box rebuilt several times in an
+// afternoon leaves an old id behind each time, and a fleet churning faster
+// than the TTL would sit at the cap for a week refusing the machines somebody
+// is actually looking at. Requiring the victim to be past the offline
+// threshold is what keeps this from being a machine-versus-machine fight: when
+// every slot is live, the cap holds and the push is told so.
+//
+// Called with the lock held.
+func (h *Hub) evictLRU() bool {
+	cutoff := nowMS() - offlineAfter*1000
+	var oldest string
+	var oldestAt int64
+	for id, m := range h.machines {
+		if m.SeenAt >= cutoff {
+			continue
+		}
+		if oldest == "" || m.SeenAt < oldestAt {
+			oldest, oldestAt = id, m.SeenAt
+		}
+	}
+	if oldest == "" {
+		return false
+	}
+	delete(h.machines, oldest)
+	delete(h.names, oldest)
+	h.dirty = true
+	return true
 }
 
 // ── the command mailbox ────────────────────────────────────────────────────
@@ -354,10 +403,33 @@ func (m *machine) takeOne(now int64) *pending {
 	return p
 }
 
+// gone reports whether the caller has already hung up, without blocking.
+func gone(stop <-chan struct{}) bool {
+	select {
+	case <-stop:
+		return true
+	default:
+		return false
+	}
+}
+
 // commands answers one helper poll, holding while a console is open and a
 // command might arrive. `stop` is the request's own cancellation — a helper
 // that hung up mid-hold should release its slot now, not at the deadline.
+//
+// It is checked immediately before every takeOne, and that placement is the
+// point: taking a command MOVES it out of the queue, so doing it for a request
+// whose response nobody will read spends the command on nothing. It sits in
+// `issued` until it expires and is never delivered — the operator watches a
+// prompt that answers nothing and has no way to tell why. The check cannot
+// close the window completely (the connection can drop after the answer is
+// composed and before it is written) but it removes the case that actually
+// happens: a browser closed, or a helper restarted, seconds before someone
+// pressed Run.
 func (h *Hub) commands(agent string, stop <-chan struct{}) pollAnswer {
+	if gone(stop) {
+		return pollAnswer{Commands: []*pending{}, Next: pollCold}
+	}
 	h.mu.Lock()
 	if h.polls >= maxPolls {
 		// Enough helpers are already parked here. Answer immediately rather
@@ -370,8 +442,10 @@ func (h *Hub) commands(agent string, stop <-chan struct{}) pollAnswer {
 		}
 		now := nowMS()
 		m.reap(now)
-		if p := m.takeOne(now); p != nil {
-			return pollAnswer{Open: true, Commands: []*pending{p}, Next: pollWarm}
+		if !gone(stop) {
+			if p := m.takeOne(now); p != nil {
+				return pollAnswer{Open: true, Commands: []*pending{p}, Next: pollWarm}
+			}
 		}
 		open := m.termUntil > now
 		next := pollCold
@@ -396,6 +470,13 @@ func (h *Hub) commands(agent string, stop <-chan struct{}) pollAnswer {
 		}
 		now := nowMS()
 		m.reap(now)
+		// Re-checked inside the loop, not just at entry: this holds for 25
+		// seconds, and the helper hanging up during the hold is exactly when a
+		// command would be taken for nobody.
+		if gone(stop) {
+			h.mu.Unlock()
+			return pollAnswer{Commands: []*pending{}, Next: pollCold}
+		}
 		if p := m.takeOne(now); p != nil {
 			h.mu.Unlock()
 			// One per answer, exactly like the hosted relay: the helper runs
@@ -605,6 +686,12 @@ func (h *Hub) saveState() {
 	if h.statePath == "" {
 		return
 	}
+	// One save at a time, start to finish. Two of them — the periodic one and
+	// the one on the way out — would otherwise write the same temp path and
+	// rename each other's half-written file.
+	h.saving.Lock()
+	defer h.saving.Unlock()
+
 	h.mu.Lock()
 	if !h.dirty {
 		h.mu.Unlock()
@@ -613,24 +700,36 @@ func (h *Hub) saveState() {
 	h.dirty = false
 	b, err := json.MarshalIndent(stateFile{Names: h.names, Machines: h.machines}, "", " ")
 	h.mu.Unlock()
+
+	// Anything that fails below leaves the state UNSAVED, so put the flag
+	// back: clearing it up front and then failing means the next tick sees a
+	// clean hub, skips the write, and the failure is never retried — the file
+	// silently stops tracking reality until something else happens to dirty it.
+	fail := func(format string, args ...any) {
+		h.mu.Lock()
+		h.dirty = true
+		h.mu.Unlock()
+		warnf(format, args...)
+	}
+
 	if err != nil {
-		warnf("could not encode the state file: %v", err)
+		fail("could not encode the state file: %v", err)
 		return
 	}
 	// Write-then-rename, so a crash mid-write leaves the previous state
 	// rather than half a JSON document. 0600: readings describe machines.
 	//
-	// Every failure below is SAID. A relay that was asked to persist and
+	// Every failure here is SAID. A relay that was asked to persist and
 	// silently does not is one whose operator finds out by losing the names
 	// they typed, and the same permission problem will still be there at
 	// shutdown — when there is no run left to notice it in.
 	tmp := h.statePath + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		warnf("could not write the state file: %v", err)
+		fail("could not write the state file: %v", err)
 		return
 	}
 	if err := os.Rename(tmp, h.statePath); err != nil {
-		warnf("could not replace the state file: %v", err)
+		fail("could not replace the state file: %v", err)
 		os.Remove(tmp)
 	}
 }

@@ -260,6 +260,7 @@ $('#theme').onclick = () => {
 const state = {
   token: store.getItem(LSK) || '',
   gen: 0,            // stream generation; a stale reader must not touch state
+  abort: null,       // the live stream's AbortController, so signing out ends it
   connected: false,
   offlineAfter: 90,
   termTTL: 120000,
@@ -440,9 +441,13 @@ function buildCard(m) {
 
   m.hist = m.hist || [];
   m.cmdHist = []; m.cmdHistAt = 0;
-  m.pend = new Map();
   return card;
 }
+
+/* How many typed lines the up-arrow can walk back through. A console left
+   open for a week is a page that never reloads, so this is the one list here
+   a person can grow without limit. */
+const MAX_CMD_HIST = 200;
 
 function histStep(m, d) {
   if (!m.cmdHist.length) return;
@@ -470,9 +475,10 @@ function sendCmd(m) {
   const cmd = m.ui.termIn.value.trim();
   if (!cmd) return;
   m.ui.termIn.value = '';
-  m.cmdHist.push(cmd); m.cmdHistAt = m.cmdHist.length;
+  m.cmdHist.push(cmd);
+  if (m.cmdHist.length > MAX_CMD_HIST) m.cmdHist = m.cmdHist.slice(-MAX_CMD_HIST);
+  m.cmdHistAt = m.cmdHist.length;
   const id = cmdId();
-  m.pend.set(id, cmd);
   termAppend(m, '$ ' + cmd + '\n');
   op({ t: 'exec', agent: m.id, id, cmd }).then(r => {
     if (r && r.error) termAppend(m, '(' + r.error + ')\n');
@@ -760,7 +766,6 @@ function onFrame(f) {
         if (f.out) termAppend(m, f.out.endsWith('\n') ? f.out : f.out + '\n');
         break;
       }
-      m.pend.delete(f.id);
       let text = f.out || '';
       if (text && !text.endsWith('\n')) text += '\n';
       if (f.truncated) text += '(output trimmed)\n';
@@ -779,14 +784,26 @@ function setConn(liveText, isLive) {
   $('#conn-t').textContent = liveText;
 }
 
-async function streamLoop(gen) {
+/* The stream, one generation at a time.
+   Every `await` here is a place where the user can sign out and sign back in
+   with a different token, and an answer to the OLD request must not be allowed
+   to act on the new one. Two things enforce that: the generation is re-checked
+   immediately after each await and before anything is touched, and signing out
+   aborts the request outright — otherwise a stale 403 would clear the token
+   somebody had just typed, and the abandoned reader would sit on a watcher
+   slot until the relay noticed. */
+async function streamLoop(gen, signal) {
   let backoff = 1000;
+  const token = state.token;
   while (gen === state.gen) {
+    let reader = null;
     try {
       const resp = await fetch('/api/stream', {
-        headers: { 'Authorization': 'Bearer ' + state.token },
+        headers: { 'Authorization': 'Bearer ' + token },
         cache: 'no-store',
+        signal,
       });
+      if (gen !== state.gen) return;
       if (resp.status === 403) { forgetToken('That token was refused.'); return; }
       if (!resp.ok || !resp.body) throw new Error('http ' + resp.status);
       setConn('live', true);
@@ -794,7 +811,7 @@ async function streamLoop(gen) {
       backoff = 1000;
       paintBoard();
 
-      const reader = resp.body.getReader();
+      reader = resp.body.getReader();
       const dec = new TextDecoder();
       let buf = '';
       for (;;) {
@@ -811,6 +828,7 @@ async function streamLoop(gen) {
         }
       }
     } catch (_) { /* fall through to retry */ }
+    finally { if (reader) reader.cancel().catch(() => {}); }
     if (gen !== state.gen) return;
     state.connected = false;
     setConn('reconnecting', false);
@@ -823,6 +841,7 @@ function forgetToken(msg) {
   store.removeItem(LSK);
   state.token = '';
   state.gen++;
+  if (state.abort) { state.abort.abort(); state.abort = null; }
   state.connected = false;
   state.machines.clear();
   $('#board').textContent = '';
@@ -843,7 +862,11 @@ function start() {
     'MON_RELAY=' + origin + ' \\\n  curl -fsSL https://tools.subnsub.com/monitor/install.sh | sh -s -- TOKEN';
   $('#empty-hand').textContent = 'subnsub-monitor connect ' + origin + ' TOKEN';
   state.gen++;
-  streamLoop(state.gen);
+  // A fresh controller per generation. Any earlier one is ended here rather
+  // than relying on the caller having gone through forgetToken.
+  if (state.abort) state.abort.abort();
+  state.abort = new AbortController();
+  streamLoop(state.gen, state.abort.signal);
 }
 
 $('#gate-form').onsubmit = e => {
