@@ -120,27 +120,39 @@ func sp(s string) *string {
 func fp(f float64) *float64 { return &f }
 func bp(b bool) *bool       { return &b }
 
+// Every provider this build ships, cheapest first so the expensive ones
+// cannot delay the free one. Codex is a local file — no credential, no
+// network. Antigravity is a request to a server already running on this
+// machine, so no credential and nothing off the box. Amp is a subprocess that
+// talks to Amp on our behalf, so we hold no key. The rest are the credential
+// rung: each reads the credential its own CLI left on disk and calls that
+// vendor and nobody else. Claude was the first; provhttp.go carries the rules
+// they all inherit.
+//
+// Ids match CodexBar's registry on purpose — the site's coverage endpoint
+// diffs the two lists by these exact strings, and a test holds this table and
+// that endpoint's SUPPORTED array to being the same list.
+var collectors = []struct {
+	id string
+	fn func() Provider
+}{
+	{"codex", collectCodex},
+	{"antigravity", collectAntigravity},
+	{"amp", collectAmp},
+	{"claude", collectClaude},
+	{"gemini", collectGemini},
+	{"copilot", collectCopilot},
+	{"factory", collectFactory},
+	{"kimi", collectKimi},
+}
+
 // Collect every provider. A collector that panics is contained and reported —
 // these run on other people's machines against files this program does not
 // control, and one bad rollout should not take the helper down.
 func collectAll() Snapshot {
 	snap := Snapshot{CapturedAt: now(), AgentID: agentID(), AgentLabel: agentLabel(),
 		HelperVersion: helperVersion, Console: consoleEnabled(), Update: updateAllowed()}
-	for _, c := range []struct {
-		id string
-		fn func() Provider
-	}{
-		// Cheapest first, so the expensive ones cannot delay the free one.
-		// Codex is a local file — no credential, no network. Antigravity is a
-		// request to a server already running on this machine, so no credential
-		// and nothing off the box. Amp is a subprocess that talks to Amp on our
-		// behalf, so we hold no key. Claude is the only one where this program
-		// handles a credential itself.
-		{"codex", collectCodex},
-		{"antigravity", collectAntigravity},
-		{"amp", collectAmp},
-		{"claude", collectClaude},
-	} {
+	for _, c := range collectors {
 		snap.Providers = append(snap.Providers, safeCollect(c.id, c.fn))
 	}
 	// Machine health rides along with the quota. Deliberately NOT part of

@@ -26,5 +26,7 @@ func systemSnapshot() System {
 	s.miss(mDisk)
 	s.miss(mLoad)
 	s.miss(mUptime)
+	s.miss(mNetwork)
+	s.miss(mProcs)
 	return s
 }

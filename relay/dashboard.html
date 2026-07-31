@@ -303,6 +303,16 @@ const fmt = {
     return (n >= 100 ? Math.round(n) : n.toFixed(1)) + ' ' + u[i];
   },
   pct(v) { return (v >= 100 ? Math.round(v) : v >= 10 ? v.toFixed(1) : v.toFixed(1)) + '%'; },
+  /* Rates are 1000-based, the way network tools label them — unlike bytes'
+     1024 above, and on purpose: each rendering is compared against a
+     different reference tool. */
+  rate(n) {
+    if (!(n >= 0) || !isFinite(n)) return '';
+    const u = ['B/s', 'kB/s', 'MB/s', 'GB/s'];
+    let i = 0;
+    while (n >= 1000 && i < u.length - 1) { n /= 1000; i++; }
+    return (n >= 100 ? Math.round(n) : n >= 10 ? n.toFixed(1) : n.toFixed(2)) + ' ' + u[i];
+  },
 };
 
 const SOURCE_LABEL = { 'api': 'live query', 'cli': 'via CLI', 'local-api': 'local probe' };
@@ -311,7 +321,8 @@ const ERR_TEXT = {
   'cli-failed': 'its CLI failed', 'token-expired': 'credential expired',
   'rate-limited': 'rate limited', 'api-error': 'API error',
   'unreachable': 'unreachable', 'no-sessions': 'no sessions yet',
-  'no-readings': 'no readings yet', 'collector-crashed': 'collector crashed',
+  'no-readings': 'no readings yet', 'not-supported': 'not supported here',
+  'collector-crashed': 'collector crashed',
 };
 
 const el = (tag, cls, text) => {
@@ -587,6 +598,12 @@ function patchCard(m) {
       ui.chips.append(el('span', 'chip num',
         'load ' + sys.load1.toFixed(2) + ' ' + (sys.load5 ?? 0).toFixed(2) + ' ' + (sys.load15 ?? 0).toFixed(2)));
     }
+    if (sys.net_rx_bps != null) {
+      ui.chips.append(el('span', 'chip num',
+        '↓ ' + fmt.rate(sys.net_rx_bps) + '  ↑ ' + fmt.rate(sys.net_tx_bps ?? 0)));
+    }
+    if (sys.procs != null) ui.chips.append(el('span', 'chip num', Math.round(sys.procs) + ' procs'));
+    if (sys.temp_c != null) ui.chips.append(el('span', 'chip num', Math.round(sys.temp_c) + '°C'));
   }
   if (r && r.helper_version) ui.chips.append(el('span', 'chip num', 'helper ' + r.helper_version));
 

@@ -28,8 +28,9 @@ code — but the idea got here from there, and that is the part worth crediting.
 
 ## What it can read, and what each reading costs
 
-Four providers, and what each one *costs to read* is the single most important
-fact about this program:
+Eight providers, and what each one *costs to read* is the single most
+important fact about this program. There are four cost rungs, and the first
+four providers are one of each:
 
 | | Codex | Antigravity | Amp | Claude Code |
 |---|---|---|---|---|
@@ -38,6 +39,20 @@ fact about this program:
 | Network access needed | **none** | **none off this machine** | yes, but the request is Amp's, not ours | yes |
 | Freshness | only as current as your last actual Codex call | live at the moment of reading | live at the moment of reading | live at the moment of reading |
 | Reported as | `local log` | `local probe` | `via CLI` | `live query` |
+
+The other four — **Gemini CLI, GitHub Copilot, Droid (Factory), and Kimi
+Code** — all sit on Claude Code's rung, and inherit its rules unchanged: each
+one reads the credential *that tool's own CLI* left on disk
+(`~/.gemini/oauth_creds.json`, `~/.config/github-copilot/apps.json`,
+`~/.factory/.env`, `~/.kimi-code/credentials/kimi-code.json`), asks the vendor
+that issued it and nobody else, and never writes anything back. Gemini is the
+one of the four whose token expires hourly, so it is also the one place this
+program performs an OAuth refresh — held in memory for its hour, never written
+to the credential file, using the OAuth client id extracted from the installed
+gemini-cli itself (`GEMINI_OAUTH_CLIENT_ID`/`GEMINI_OAUTH_CLIENT_SECRET`
+override it). A machine without a given tool reports that provider as `not
+signed in`, and the dashboard folds those into one quiet line instead of a
+column of empty tiles.
 
 Codex writes the rate-limit object the server hands it straight into
 `~/.codex/sessions/**/rollout-*.jsonl`, so reading a file is enough.

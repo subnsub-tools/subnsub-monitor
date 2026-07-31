@@ -69,6 +69,11 @@ func systemSnapshot() System {
 	s.miss(mSwap)
 	s.miss(mLoad)
 	s.miss(mUptime)
+	// Interface counters live behind NET_RT_IFLIST2 (a binary routing dump) and
+	// the process count behind kern.proc — both out of reach for the same
+	// no-cgo, stdlib-sysctl reasons the header lays out.
+	s.miss(mNetwork)
+	s.miss(mProcs)
 
 	s.OK = s.DiskUsedPercent != nil
 	return s

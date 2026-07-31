@@ -579,7 +579,7 @@ func TestParkNeverOutlivesTheTokenItProtects(t *testing.T) {
 	// A token with no expiry has nothing to clamp against; the plain backoff
 	// stands.
 	r.park(now, legacyToken(), renewRetryMax)
-	if r.next.Before(now.Add(renewRetryMax/2)) {
+	if r.next.Before(now.Add(renewRetryMax / 2)) {
 		t.Error("an unsigned token should still get the full backoff")
 	}
 }

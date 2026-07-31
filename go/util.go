@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -75,3 +76,11 @@ func dumpIndent(v any) []byte {
 }
 
 func warnf(format string, a ...any) { fmt.Fprintf(stderr, format+"\n", a...) }
+
+// A dollar amount for a balance string: two decimals when they carry
+// information, none when they are zeros — "$8.71" and "$5", never "$5.00".
+func trimAmount(v float64) string {
+	s := strconv.FormatFloat(v, 'f', 2, 64)
+	s = strings.TrimRight(s, "0")
+	return strings.TrimRight(s, ".")
+}
