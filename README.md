@@ -461,10 +461,117 @@ agent's own binary unwritable by it: `--remote-update` opens `ReadWritePaths`
 for the install directory and nothing else, and `subnsub-monitor update` tells
 you when the switch and the unit disagree.
 
-## Pointing it at your own relay
+## Running the whole thing yourself
 
 The relay this repository's installer defaults to is ours, and it will only
 accept tokens issued to accounts entitled to use it. **You do not need it.**
+There is a complete one in this repository — `relay/`, a second Go program with
+a dashboard compiled into it — and the readings from your machines never have
+to touch anyone else's hardware.
+
+```sh
+cd relay && go build -o subnsub-monitor-relay .
+./subnsub-monitor-relay -token "$(subnsub-monitor token)"
+```
+
+That prints a token and starts listening on `127.0.0.1:8788`. Open it in a
+browser, paste the token, and point machines at it:
+
+```sh
+subnsub-monitor connect http://relay.example.org:8788 <TOKEN>
+```
+
+It is one static binary with no dependencies, no database, and nothing on the
+network but the port you gave it. State — the names you typed and the last
+reading from each machine — lives in one JSON file if you pass `-state`, and
+nowhere at all if you don't.
+
+**Renewal is off when you run your own.** The agent trades expiring tokens in
+against *the site that issued them*, and your relay's tokens are not ours; it
+will not present them anywhere (see below). A self-hosted install talks to
+exactly one host, which is the one you started.
+
+### What it does
+
+| | |
+|---|---|
+| Speaks | the same `POST /push`, `GET /commands`, `POST /result` the hosted relay does, so any released helper works against it unmodified |
+| Holds | the last reading per machine, in memory, plus optional persistence to one file |
+| Serves | a dashboard at `/` — machine cards, health gauges, quota bars, the console, the update button |
+| Needs | one token. Machines push with it and browsers watch with it |
+| Talks to | nothing. No telemetry, no update check, no third-party font or script |
+
+### Options
+
+```
+-token TOKEN      the bearer secret machines push with (or MON_RELAY_TOKEN)
+-op-token TOKEN   a separate secret for the dashboard (or MON_RELAY_OP_TOKEN)
+-listen ADDR      address to bind (default 127.0.0.1:8788)
+-state PATH       file to persist names and last readings across restarts
+```
+
+`-op-token` is worth setting on anything bigger than a couple of machines. With
+one token, a machine that leaks it leaks *watching and the console* as well as
+pushing. With two, the secret sitting on every monitored box can only push
+readings — driving the console and reading the dashboard needs the one that
+never left your laptop.
+
+### Put TLS in front of it
+
+The default bind is loopback, and the reason is that a bearer token crossing a
+network in cleartext is a bearer token that network has. Terminate TLS in front
+and proxy to it:
+
+```
+# Caddy
+relay.example.org {
+        reverse_proxy 127.0.0.1:8788
+}
+```
+
+Two settings matter for whatever proxy you use: **do not buffer responses**
+(`/api/stream` is an event stream and a held `/commands` poll waits up to 25
+seconds), and allow a read timeout of at least 60 seconds. nginx needs
+`proxy_buffering off;` and `proxy_read_timeout 90s;` on that location.
+
+The installer requires an `https://` relay URL, so a proxied relay is also what
+lets you use the one-liner:
+
+```sh
+MON_RELAY=https://relay.example.org sh install.sh <TOKEN>
+```
+
+### As a service
+
+```ini
+# ~/.config/systemd/user/monitor-relay.service
+[Unit]
+Description=subnsub-monitor relay
+
+[Service]
+ExecStart=%h/.local/bin/subnsub-monitor-relay -listen 127.0.0.1:8788 -state %h/.local/share/monitor-relay/state.json
+Environment=MON_RELAY_TOKEN=...
+Restart=always
+
+[Install]
+WantedBy=default.target
+```
+
+Put the token in `Environment=` (or an `EnvironmentFile=` with mode 0600)
+rather than on the command line — arguments are readable by every other process
+on the machine, which is the same reason the helper's own installer keeps it
+out of `ExecStart`.
+
+There is a `relay/Dockerfile` too:
+
+```sh
+docker build -t monitor-relay relay/
+docker run -p 8788:8788 -e MON_RELAY_TOKEN=... \
+       -v monitor-state:/var/lib/monitor-relay monitor-relay
+```
+
+### Writing your own instead
+
 The agent talks to any endpoint that implements two things:
 
 - `POST /push` with `Authorization: Bearer <token>` and a JSON body — the
@@ -477,6 +584,11 @@ that direction, and that is deliberate: a helper that parsed what a relay sent
 back would be a helper a compromised relay could steer, on a machine where it
 can read the credential files it reports on. If you are writing a relay, you
 cannot tell this agent anything — by design.
+
+The console is opt-in on both sides and needs two more endpoints —
+`GET /commands?agent=<id>` answering `{"open":bool,"commands":[…],"next":sec}`
+and `POST /result` — which `relay/hub.go` implements in about 200 readable
+lines if you would rather copy than re-derive.
 
 ### Token renewal (optional, and not the relay's business)
 
