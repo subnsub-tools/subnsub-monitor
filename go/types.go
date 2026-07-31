@@ -122,10 +122,13 @@ func collectAll() Snapshot {
 		fn func() Provider
 	}{
 		// Cheapest first, so the expensive ones cannot delay the free one.
-		// Codex is a local file — no credential, no network. Amp is a
-		// subprocess that talks to Amp on our behalf, so we hold no key. Claude
-		// is the only one where this program handles a credential itself.
+		// Codex is a local file — no credential, no network. Antigravity is a
+		// request to a server already running on this machine, so no credential
+		// and nothing off the box. Amp is a subprocess that talks to Amp on our
+		// behalf, so we hold no key. Claude is the only one where this program
+		// handles a credential itself.
 		{"codex", collectCodex},
+		{"antigravity", collectAntigravity},
 		{"amp", collectAmp},
 		{"claude", collectClaude},
 	} {
