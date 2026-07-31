@@ -28,19 +28,38 @@ code — but the idea got here from there, and that is the part worth crediting.
 
 ## What it can read, and what each reading costs
 
-Three providers, and what each one *costs to read* is the single most important
+Four providers, and what each one *costs to read* is the single most important
 fact about this program:
 
-| | Codex | Amp | Claude Code |
-|---|---|---|---|
-| Source | its own session logs on disk | `amp usage`, the vendor's own CLI | the usage endpoint, over the network |
-| Credential needed | **none** | **none — Amp's key stays inside Amp** | yes — the OAuth token Claude Code stores |
-| Network access needed | **none** | yes, but the request is Amp's, not ours | yes |
-| Freshness | only as current as your last actual Codex call | live at the moment of reading | live at the moment of reading |
-| Reported as | `local log` | `via CLI` | `live query` |
+| | Codex | Antigravity | Amp | Claude Code |
+|---|---|---|---|---|
+| Source | its own session logs on disk | its language server, on loopback | `amp usage`, the vendor's own CLI | the usage endpoint, over the network |
+| Credential needed | **none** | **none** | **none — Amp's key stays inside Amp** | yes — the OAuth token Claude Code stores |
+| Network access needed | **none** | **none off this machine** | yes, but the request is Amp's, not ours | yes |
+| Freshness | only as current as your last actual Codex call | live at the moment of reading | live at the moment of reading | live at the moment of reading |
+| Reported as | `local log` | `local probe` | `via CLI` | `live query` |
 
 Codex writes the rate-limit object the server hands it straight into
 `~/.codex/sessions/**/rollout-*.jsonl`, so reading a file is enough.
+
+Antigravity keeps no quota on disk, but it does not need to: the language
+server it already runs will answer the question over `127.0.0.1`. That is the
+cheapest live reading of the four — nothing is launched, no credential is
+opened, and the request cannot leave the machine. The agent finds the server
+the way any process finds another one it owns (on Linux by reading `/proc`, so
+no `lsof` and no subprocess at all; elsewhere with `ps` and `lsof`), reads the
+`--csrf_token` the server was started with, and asks it
+`RetrieveUserQuotaSummary`. The reply carries the two groups Antigravity's own
+Model Quota UI shows — Gemini models and Claude/GPT models — each with a weekly
+and a five-hour bucket, which is four rows under one heading.
+
+The loopback port serves a self-signed certificate, so verification is off for
+it. No certificate authority signs `127.0.0.1` for a local process, so there is
+nothing verification could check; what bounds it is the address, which is a
+literal loopback IP the connection cannot escape. The Google OAuth path — the
+one that would read a credential and call `cloudcode-pa.googleapis.com` — is
+deliberately **not** implemented, for the same reason the Amp bearer path is
+not.
 
 Amp writes no balance to disk either, but it ships a CLI that will answer the
 question itself, so this program runs `amp usage` and parses four lines of text.
