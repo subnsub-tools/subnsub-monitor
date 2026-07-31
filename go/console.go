@@ -79,6 +79,12 @@ const (
 	// The relay holds a poll for ~25s when a console is open, so the client
 	// deadline has to clear that with room for a slow link.
 	consolePollTimeout = 45 * time.Second
+	// The same wait for a machine that only takes UPDATES — console off, the
+	// dedicated switch on. Nothing about that machine is interactive: nobody is
+	// waiting at a prompt for it, and the one thing it can be sent is a button
+	// press that already implies a minute of downloading. Paying the console's
+	// cadence for it would be six times the requests for none of the benefit.
+	updateIdleWait = 60 * time.Second
 	// What it costs when nobody is watching: one small request this often,
 	// answered immediately. It is also the worst case for how long a console
 	// someone just opened waits before this machine notices — after which the
@@ -207,8 +213,19 @@ func consoleSandboxNote(on bool) string {
 }
 
 type consoleCmd struct {
-	ID  string `json:"id"`
-	Cmd string `json:"cmd"`
+	ID string `json:"id"`
+	// What KIND of thing this is. Absent or "sh" means the shell line in Cmd,
+	// which is everything this channel carried before and everything an older
+	// relay can send. "update" carries no command at all — it is a request that
+	// this helper replace itself from the release bucket, and the payload comes
+	// from there rather than from here. See update.go for why those two
+	// authorities are kept apart.
+	//
+	// An unrecognised kind is REFUSED, not treated as a shell line. A future
+	// relay inventing a third kind must not have it silently executed by an old
+	// helper that only knew how to run strings.
+	Kind string `json:"kind,omitempty"`
+	Cmd  string `json:"cmd"`
 }
 
 type consolePoll struct {
@@ -230,28 +247,45 @@ func consoleLoop(base string, tok *tokenBox) {
 			return http.ErrUseLastResponse
 		},
 	}
-	warned := false
+	warnedConsole := false
+	warnedUpdate := false
 	fails := 0
 
 	for {
-		if !consoleEnabled() {
-			// Not enabled: no request is made at all. This is the state every
+		// Two switches, either of which is a reason to ask. Read every time
+		// round for the same reason consoleEnabled is: turning one OFF has to
+		// be the fast direction.
+		shell := consoleEnabled()
+		update := updateAllowed()
+		if !shell && !update {
+			// Neither: no request is made at all. This is the state every
 			// existing install is in, and it has to cost nothing.
 			time.Sleep(consoleIdleWait)
 			continue
 		}
-		if !warned {
+		if shell && !warnedConsole {
 			// Said once, on the machine, in its own log. Someone reading a
 			// journal to find out why a box did something should not have to
 			// already know this feature exists.
 			warnf("console is ENABLED: this machine will run commands sent from the dashboard")
-			warned = true
+			warnedConsole = true
+		}
+		if update && !shell && !warnedUpdate {
+			// Only worth its own line when the console is off, because a
+			// console being on already says something strictly larger.
+			warnf("remote update is ENABLED: the dashboard can replace this helper's binary")
+			warnedUpdate = true
+		}
+		// A machine that only takes updates is not waiting at a prompt.
+		idle := consoleIdleWait
+		if !shell {
+			idle = updateIdleWait
 		}
 
 		id := agentID()
 		token := tok.get()
 		if id == "" || token == "" {
-			time.Sleep(consoleIdleWait)
+			time.Sleep(idle)
 			continue
 		}
 
@@ -269,25 +303,74 @@ func consoleLoop(base string, tok *tokenBox) {
 		if !poll.Open {
 			// Nobody is looking. The relay answered immediately, so this sleep
 			// is the whole idle cost.
-			time.Sleep(consoleIdleWait)
+			time.Sleep(idle)
 			continue
 		}
 		for _, c := range poll.Commands {
-			if c.ID == "" || c.Cmd == "" {
+			if c.ID == "" {
 				continue
 			}
-			// Re-read the switch between the poll and the command, and again
+			// Re-read the switches between the poll and the command, and again
 			// between commands. The poll can be held for 25 seconds and a
 			// batch can take a minute to work through, so `console off` typed
 			// during either would otherwise be obeyed only after everything
 			// already in flight had run — which is the opposite of what
 			// somebody typing it in a hurry means by it.
-			if !consoleEnabled() {
+			switch c.Kind {
+			case "update":
+				if !updateAllowed() {
+					consoleReport(client, resultURL, id, tok,
+						consoleResult{ID: c.ID, Code: -1, Error: "update-off"})
+					continue
+				}
+				res, swap := runUpdate(c.ID)
+				// Reported first, always, and RETRIED — on the path that works
+				// this process is about to stop existing, and a relay blip
+				// lasting one request would otherwise consume the only account
+				// of an update that succeeded. The operator would watch a
+				// machine go quiet with nothing to read.
+				//
+				// Bounded, and it exits either way at the end of it: the new
+				// binary is already on disk under our own name, so refusing to
+				// leave would mean running the old code indefinitely to protect
+				// a message. Three tries and go.
+				for attempt := 0; attempt < 3; attempt++ {
+					if consoleReport(client, resultURL, id, tok, res) {
+						break
+					}
+					if !swap && attempt == 0 {
+						// Nothing was installed, so nothing is waiting on this
+						// process to get out of the way. One try is enough.
+						break
+					}
+					time.Sleep(2 * time.Second)
+				}
+				if swap {
+					// The new binary is already on disk under our own name.
+					// Everything after this line belongs to the next process,
+					// which systemd (Restart=always) or launchd (KeepAlive)
+					// starts for us. A helper running under neither ends here,
+					// which is the honest outcome for a foreground process
+					// that was asked to replace itself.
+					os.Exit(0)
+				}
+			case "", "sh":
+				if c.Cmd == "" {
+					continue
+				}
+				if !consoleEnabled() {
+					consoleReport(client, resultURL, id, tok,
+						consoleResult{ID: c.ID, Code: -1, Error: "console-off"})
+					continue
+				}
+				consoleReport(client, resultURL, id, tok, runConsoleCommand(c.ID, c.Cmd))
+			default:
+				// A kind this build does not know. Answered rather than
+				// dropped, so the dashboard says "that machine's helper is too
+				// old for this" instead of leaving a command that looks lost.
 				consoleReport(client, resultURL, id, tok,
-					consoleResult{ID: c.ID, Code: -1, Error: "console-off"})
-				continue
+					consoleResult{ID: c.ID, Code: -1, Error: "unknown-kind"})
 			}
-			consoleReport(client, resultURL, id, tok, runConsoleCommand(c.ID, c.Cmd))
 		}
 		// Straight back round with no sleep: a console that is open should feel
 		// like a terminal, and the relay's own hold is what paces this loop.
@@ -338,7 +421,13 @@ type consoleResult struct {
 	Error     string `json:"error,omitempty"`
 }
 
-func consoleReport(client *http.Client, resultURL, id string, tok *tokenBox, r consoleResult) {
+// Send a result back. Returns whether the relay took it.
+//
+// The caller of a shell command has nothing useful to do with that answer — it
+// already logged the refusal, and the command has run either way. The UPDATE
+// caller does: it is about to exit, and a receipt that did not land is the one
+// this whole ordering exists to protect.
+func consoleReport(client *http.Client, resultURL, id string, tok *tokenBox, r consoleResult) bool {
 	r.Agent = id
 
 	// Size the ENCODED body, not the raw output.
@@ -364,7 +453,7 @@ func consoleReport(client *http.Client, resultURL, id string, tok *tokenBox, r c
 
 	req, err := http.NewRequest("POST", resultURL, bytes.NewReader(body))
 	if err != nil {
-		return
+		return false
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+tok.get())
@@ -372,7 +461,7 @@ func consoleReport(client *http.Client, resultURL, id string, tok *tokenBox, r c
 	resp, err := client.Do(req)
 	if err != nil {
 		warnf("console: could not report the result of a command that ran")
-		return
+		return false
 	}
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	resp.Body.Close()
@@ -383,7 +472,9 @@ func consoleReport(client *http.Client, resultURL, id string, tok *tokenBox, r c
 	// nothing useful to retry.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		warnf("console: the relay refused a result (%d); the command still ran", resp.StatusCode)
+		return false
 	}
+	return true
 }
 
 // A writer that stops at a cap and remembers that it did.

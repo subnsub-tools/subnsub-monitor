@@ -94,6 +94,15 @@ type Snapshot struct {
 	// omitted key reads as the first when it means the second. See console.go
 	// for what turns it on — which is a file on this machine and nothing else.
 	Console bool `json:"exec"`
+	// Whether this machine will replace its own binary when the dashboard asks
+	// it to. Always present for the same reason `exec` is: the page has to tell
+	// "this helper says no" apart from "this helper predates the question".
+	//
+	// A separate key rather than a second meaning for `exec`, even though the
+	// console implies this one — see update.go. Folding them together would
+	// make turning the console off also turn off a switch nobody set, and would
+	// leave the console-off machine that DID opt in with no way to say so.
+	Update bool `json:"upd"`
 	// Machine health. A pointer so a platform that can measure nothing at all
 	// omits the key rather than shipping a shell of nulls — see system.go for
 	// what each platform can actually read, and why.
@@ -116,7 +125,7 @@ func bp(b bool) *bool       { return &b }
 // control, and one bad rollout should not take the helper down.
 func collectAll() Snapshot {
 	snap := Snapshot{CapturedAt: now(), AgentID: agentID(), AgentLabel: agentLabel(),
-		HelperVersion: helperVersion, Console: consoleEnabled()}
+		HelperVersion: helperVersion, Console: consoleEnabled(), Update: updateAllowed()}
 	for _, c := range []struct {
 		id string
 		fn func() Provider
