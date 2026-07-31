@@ -155,7 +155,7 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	go hub.saveLoop()
+	go hub.maintain()
 	// Flush on the way out, so a restart does not cost the names and the
 	// roster. SIGINT for a terminal, SIGTERM for a service manager.
 	stop := make(chan os.Signal, 1)
@@ -412,7 +412,10 @@ func serveOp(hub *Hub, w http.ResponseWriter, body []byte) {
 		}
 		writeJSON(w, map[string]bool{"ok": true})
 	case "name":
-		hub.setName(op.Agent, op.Name)
+		if !hub.setName(op.Agent, op.Name) {
+			writeJSON(w, map[string]string{"error": string(enqNoMachine)})
+			return
+		}
 		writeJSON(w, map[string]bool{"ok": true})
 	case "term":
 		hub.setTerm(op.Agent, op.Open)
