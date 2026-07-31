@@ -24,6 +24,9 @@ func systemSnapshot() System {
 	linuxLoad(&s)
 	linuxUptime(&s)
 	statfsRoot(&s)
+	linuxNet(&s)
+	linuxProcs(&s)
+	linuxTemp(&s)
 
 	// "ok" means the collector ran and produced at least one measurement — not
 	// that everything worked. A machine where /proc is masked (some hardened
@@ -146,6 +149,119 @@ func fsBlockSize(st *syscall.Statfs_t) float64 {
 		return float64(st.Frsize)
 	}
 	return float64(st.Bsize)
+}
+
+// /proc/net/dev, everything summed except loopback:
+//
+//	Inter-|   Receive                            ...|  Transmit
+//	 face |bytes    packets errs drop fifo frame ...|bytes    packets ...
+//	    lo: 1234567     890    0    0    0     0    ...
+//	  eth0: 9876543    2109    0    0    0     0    ...
+//
+// The sum is what travels (see NetRxBps in system.go for why no per-interface
+// rows), and lo is excluded because local chatter would drown the number the
+// gauge exists to show. Interface names are read to make that one exclusion
+// and are never kept.
+func linuxNet(s *System) {
+	raw, ok := readSmall("/proc/net/dev")
+	if !ok {
+		s.miss(mNetwork)
+		return
+	}
+	var rx, tx float64
+	var sawAny bool
+	for _, line := range strings.Split(raw, "\n") {
+		name, rest, found := strings.Cut(line, ":")
+		if !found {
+			continue // the two header lines
+		}
+		name = strings.TrimSpace(name)
+		if name == "" || name == "lo" {
+			continue
+		}
+		f := strings.Fields(rest)
+		// bytes is field 0 on the receive side and field 8 on the transmit side.
+		if len(f) < 9 {
+			continue
+		}
+		r, err1 := strconv.ParseFloat(f[0], 64)
+		t, err2 := strconv.ParseFloat(f[8], 64)
+		if err1 != nil || err2 != nil || r < 0 || t < 0 || !finite(r) || !finite(t) {
+			continue
+		}
+		rx += r
+		tx += t
+		sawAny = true
+	}
+	if !sawAny {
+		s.miss(mNetwork)
+		return
+	}
+	rxBps, txBps := netDelta(rx, tx, now())
+	if rxBps == nil {
+		// First sample since startup, or the sum went backwards (an interface
+		// vanished). Both are "no reading yet", and saying so beats a zero.
+		s.miss(mNetwork)
+		return
+	}
+	s.NetRxBps, s.NetTxBps = rxBps, txBps
+}
+
+// Fourth field of /proc/loadavg is "runnable/total"; total is the process
+// count, already maintained by the kernel — no walk of /proc, which would be
+// both the slow way and the way that reads other people's cmdlines.
+func linuxProcs(s *System) {
+	raw, ok := readSmall("/proc/loadavg")
+	if !ok {
+		s.miss(mProcs)
+		return
+	}
+	f := strings.Fields(raw)
+	if len(f) < 4 {
+		s.miss(mProcs)
+		return
+	}
+	_, totalStr, found := strings.Cut(f[3], "/")
+	if !found {
+		s.miss(mProcs)
+		return
+	}
+	n, err := strconv.ParseFloat(totalStr, 64)
+	if err != nil || n <= 0 || !finite(n) {
+		s.miss(mProcs)
+		return
+	}
+	s.Procs = fp(n)
+}
+
+// Hottest thermal zone. Millidegrees in, °C out; a zone that reads absurd
+// (≤0 or >150°C) is a broken or sleeping sensor and contributes nothing.
+// No reading at all is silent by design — see TempC in system.go.
+func linuxTemp(s *System) {
+	// A fixed, shallow scan: zone indices are small integers in practice, and a
+	// bounded loop cannot be steered by whatever else lives under /sys.
+	best := 0.0
+	found := false
+	for i := 0; i < 24; i++ {
+		raw, ok := readSmall("/sys/class/thermal/thermal_zone" + strconv.Itoa(i) + "/temp")
+		if !ok {
+			continue
+		}
+		n, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+		if err != nil || !finite(n) {
+			continue
+		}
+		c := n / 1000
+		if c <= 0 || c > 150 {
+			continue
+		}
+		if !found || c > best {
+			best, found = c, true
+		}
+	}
+	if found {
+		s.TempC = fp(round2(best))
+	}
 }
 
 func linuxLoad(s *System) {

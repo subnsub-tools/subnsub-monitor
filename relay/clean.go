@@ -51,15 +51,18 @@ var (
 var knownPlatforms = map[string]bool{
 	"linux": true, "darwin": true, "windows": true, "freebsd": true,
 	"openbsd": true, "netbsd": true, "dragonfly": true, "illumos": true, "solaris": true,
+	"aix": true, "android": true, "ios": true, "js": true, "plan9": true, "wasip1": true,
 }
 var knownArches = map[string]bool{
 	"amd64": true, "arm64": true, "386": true, "arm": true,
 	"riscv64": true, "ppc64le": true, "ppc64": true, "s390x": true,
 	"mips64le": true, "mips64": true, "loong64": true,
+	"mips": true, "mipsle": true, "wasm": true, "sparc64": true,
 }
 
 var knownMissing = map[string]bool{
 	"cpu": true, "memory": true, "swap": true, "disk": true, "load": true, "uptime": true,
+	"network": true, "procs": true,
 }
 
 // One reading as this relay is willing to hold it. Pointers where absent and
@@ -129,6 +132,10 @@ type system struct {
 	DiskUsed  *float64 `json:"disk_used,omitempty"`
 	DiskPct   *float64 `json:"disk_used_percent,omitempty"`
 	UptimeSec *float64 `json:"uptime_sec,omitempty"`
+	NetRxBps  *float64 `json:"net_rx_bps,omitempty"`
+	NetTxBps  *float64 `json:"net_tx_bps,omitempty"`
+	Procs     *float64 `json:"procs,omitempty"`
+	TempC     *float64 `json:"temp_c,omitempty"`
 	Missing   []string `json:"missing,omitempty"`
 }
 
@@ -153,7 +160,10 @@ func displayText(s string, maxRunes int) string {
 	var b strings.Builder
 	n := 0
 	for _, r := range s {
-		if r < 0x20 || r == 0x7f {
+		// 0x7f–0x9f takes the C1 controls with DEL, matching the hosted
+		// relay's filter exactly — this was one of the places the two
+		// implementations had quietly diverged.
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
 			continue
 		}
 		if (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) ||
@@ -442,6 +452,10 @@ func cleanSystem(body json.RawMessage) *system {
 		DiskUsed  *float64 `json:"disk_used"`
 		DiskPct   *float64 `json:"disk_used_percent"`
 		UptimeSec *float64 `json:"uptime_sec"`
+		NetRxBps  *float64 `json:"net_rx_bps"`
+		NetTxBps  *float64 `json:"net_tx_bps"`
+		Procs     *float64 `json:"procs"`
+		TempC     *float64 `json:"temp_c"`
 		Missing   []string `json:"missing"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
@@ -474,6 +488,20 @@ func cleanSystem(body json.RawMessage) *system {
 	s.DiskUsed = cleanNonNeg(raw.DiskUsed, 1e18)
 	s.DiskPct = cleanPctPtr(raw.DiskPct)
 	s.UptimeSec = cleanNonNeg(raw.UptimeSec, 3.2e9)
+	// Rates in bytes/second: a petabyte a second is already past any link, and
+	// the tighter ceiling catches a cumulative counter pushed as a rate.
+	s.NetRxBps = cleanNonNeg(raw.NetRxBps, 1e15)
+	s.NetTxBps = cleanNonNeg(raw.NetTxBps, 1e15)
+	if raw.Procs != nil && *raw.Procs >= 1 && *raw.Procs <= 1e7 {
+		v := float64(int64(*raw.Procs))
+		s.Procs = &v
+	}
+	// Celsius; wider than the helper's own 0–150 band on purpose, for
+	// third-party agents that are honest but colder.
+	if raw.TempC != nil && *raw.TempC >= -100 && *raw.TempC <= 300 {
+		v := *raw.TempC
+		s.TempC = &v
+	}
 	seen := map[string]bool{}
 	for _, m := range raw.Missing {
 		if len(s.Missing) >= maxMissing {

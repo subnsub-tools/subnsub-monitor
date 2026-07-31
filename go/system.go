@@ -73,6 +73,24 @@ type System struct {
 
 	UptimeSec *float64 `json:"uptime_sec,omitempty"`
 
+	// Whole-box traffic, bytes per second, summed over every interface except
+	// loopback. A rate like CPUPercent, so it needs two samples and the first
+	// collection reports nothing. The SUM is the privacy line here: per-
+	// interface rows would name interfaces, and interface names on a modern box
+	// (wg0, tailscale0, br-<hash>) describe what the machine is connected to.
+	NetRxBps *float64 `json:"net_rx_bps,omitempty"`
+	NetTxBps *float64 `json:"net_tx_bps,omitempty"`
+
+	// How many processes exist, not what any of them is. The count answers
+	// "is something leaking processes"; a list would answer "what does this
+	// person run", which is the question this file refuses.
+	Procs *float64 `json:"procs,omitempty"`
+
+	// Hottest thermal zone, °C. Absent-and-silent when the platform exposes no
+	// sensor — which is every VM — so, unlike the fields above, absence here is
+	// a configuration and never reported in `missing`. Same judgement as swap.
+	TempC *float64 `json:"temp_c,omitempty"`
+
 	// What this platform could not read, so the page can say "not available
 	// here" rather than leaving a reader to guess whether the machine is idle
 	// or the collector is broken.
@@ -82,12 +100,15 @@ type System struct {
 // Ordered so the page can render a stable list; also the vocabulary Missing
 // draws from, kept in one place so a typo cannot invent a category.
 const (
-	mCPU    = "cpu"
-	mMemory = "memory"
-	mSwap   = "swap"
-	mDisk   = "disk"
-	mLoad   = "load"
-	mUptime = "uptime"
+	mCPU     = "cpu"
+	mMemory  = "memory"
+	mSwap    = "swap"
+	mDisk    = "disk"
+	mLoad    = "load"
+	mUptime  = "uptime"
+	mNetwork = "network"
+	mProcs   = "procs"
+	// No mTemp: a sensorless machine is a configuration, not a gap — see TempC.
 )
 
 func (s *System) miss(what string) { s.Missing = append(s.Missing, what) }
@@ -131,6 +152,41 @@ func cpuDelta(busy, total float64) *float64 {
 		pct = 100
 	}
 	return fp(round2(pct))
+}
+
+// Network counters are cumulative bytes, so a rate needs two samples AND the
+// wall-clock span between them — unlike cpuDelta, whose jiffies carry their own
+// time base. Same first-sample rule: the first collection reports nothing.
+var netPrev struct {
+	sync.Mutex
+	valid      bool
+	rx, tx, at float64
+}
+
+// Feed one cumulative (rx, tx) reading in, get bytes-per-second since the
+// previous one out. Nil on the first sample, on a non-advancing clock, and on
+// counters that went backwards — which happens legitimately here: the sum
+// shrinks whenever an interface disappears (a container's veth being torn down
+// is routine), and that must read as "no reading", never as a negative rate.
+func netDelta(rx, tx, at float64) (rxBps, txBps *float64) {
+	netPrev.Lock()
+	defer netPrev.Unlock()
+
+	prevValid, prevRx, prevTx, prevAt := netPrev.valid, netPrev.rx, netPrev.tx, netPrev.at
+	netPrev.valid, netPrev.rx, netPrev.tx, netPrev.at = true, rx, tx, at
+
+	if !prevValid {
+		return nil, nil
+	}
+	dt := at - prevAt
+	if dt <= 0 {
+		return nil, nil
+	}
+	dRx, dTx := rx-prevRx, tx-prevTx
+	if dRx < 0 || dTx < 0 {
+		return nil, nil
+	}
+	return fp(round2(dRx / dt)), fp(round2(dTx / dt))
 }
 
 // Kernel release trimmed to major.minor: "6.8.0-1050-oracle" -> "6.8",
@@ -197,7 +253,7 @@ func collectSystem() (s System) {
 	defer func() {
 		if r := recover(); r != nil {
 			s = System{OK: false, Platform: runtime.GOOS, Arch: runtime.GOARCH,
-				Missing: []string{mCPU, mMemory, mSwap, mDisk, mLoad, mUptime}}
+				Missing: []string{mCPU, mMemory, mSwap, mDisk, mLoad, mUptime, mNetwork, mProcs}}
 		}
 	}()
 	return systemSnapshot()

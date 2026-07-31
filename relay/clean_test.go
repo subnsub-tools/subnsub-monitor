@@ -197,3 +197,38 @@ func TestDuplicateProvidersCollapse(t *testing.T) {
 		t.Fatalf("duplicate id not collapsed to the first: %+v", r.Providers)
 	}
 }
+
+func TestNewHealthFieldsSurviveWithBounds(t *testing.T) {
+	// The 2026-08 additions: network rates, process count, temperature, and
+	// their missing-vocabulary words. Mirrored from the hosted relay's rules;
+	// this test is what notices the two drifting apart again.
+	body := `{"providers":[{"id":"codex","ok":true,"limits":[{"used_percent":1}]}],
+	  "system":{"platform":"linux","net_rx_bps":784469.28,"net_tx_bps":5154497.76,
+	  "procs":1248.9,"temp_c":52.3,"missing":["network","procs","bogus"]}}`
+	_, r, ok := cleanReading([]byte(body))
+	if !ok || r.System == nil {
+		t.Fatal("frame refused")
+	}
+	s := r.System
+	if s.NetRxBps == nil || *s.NetRxBps != 784469.28 || s.NetTxBps == nil {
+		t.Fatalf("net rates: %+v", s)
+	}
+	if s.Procs == nil || *s.Procs != 1248 {
+		t.Fatalf("procs should floor to 1248: %+v", s.Procs)
+	}
+	if s.TempC == nil || *s.TempC != 52.3 {
+		t.Fatalf("temp: %+v", s.TempC)
+	}
+	if len(s.Missing) != 2 {
+		t.Fatalf("bogus missing word survived: %v", s.Missing)
+	}
+
+	// Out of bounds: a counter pushed as a rate, a fractional process, a
+	// temperature no machine that still boots reports.
+	body = `{"providers":[{"id":"codex","ok":true,"limits":[{"used_percent":1}]}],
+	  "system":{"platform":"linux","net_rx_bps":1e16,"procs":0.5,"temp_c":-200}}`
+	_, r, _ = cleanReading([]byte(body))
+	if r.System.NetRxBps != nil || r.System.Procs != nil || r.System.TempC != nil {
+		t.Fatalf("out-of-bounds values survived: %+v", r.System)
+	}
+}

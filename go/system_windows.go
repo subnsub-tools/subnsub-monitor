@@ -114,6 +114,10 @@ func systemSnapshot() System {
 	s.miss(mLoad)
 	// Nor a page-file figure worth the name — see the note at the top.
 	s.miss(mSwap)
+	// Interface counters (GetIfTable2) and the process count (an EnumProcesses
+	// walk) both live behind APIs this file has stayed out of; named, not faked.
+	s.miss(mNetwork)
+	s.miss(mProcs)
 
 	s.OK = s.CPUPercent != nil || s.MemUsedPercent != nil ||
 		s.UptimeSec != nil || s.DiskUsedPercent != nil

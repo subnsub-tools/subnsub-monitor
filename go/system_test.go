@@ -182,6 +182,7 @@ func TestSnapshotCarriesNoIdentity(t *testing.T) {
 		"load15": true, "mem_total": true, "mem_used_percent": true,
 		"swap_total": true, "swap_used_percent": true, "disk_total": true,
 		"disk_used": true, "disk_used_percent": true, "uptime_sec": true,
+		"net_rx_bps": true, "net_tx_bps": true, "procs": true, "temp_c": true,
 		"missing": true,
 	}
 	for _, k := range topLevelKeys(blob) {
@@ -207,9 +208,61 @@ func TestSnapshotReportsPlatform(t *testing.T) {
 	}
 	for _, m := range s.Missing {
 		switch m {
-		case mCPU, mMemory, mSwap, mDisk, mLoad, mUptime:
+		case mCPU, mMemory, mSwap, mDisk, mLoad, mUptime, mNetwork, mProcs:
 		default:
 			t.Errorf("unknown missing category %q", m)
 		}
+	}
+}
+
+func resetNet() {
+	netPrev.Lock()
+	netPrev.valid, netPrev.rx, netPrev.tx, netPrev.at = false, 0, 0, 0
+	netPrev.Unlock()
+}
+
+func TestNetDeltaNeedsTwoSamples(t *testing.T) {
+	resetNet()
+	rx, tx := netDelta(1000, 2000, 100)
+	if rx != nil || tx != nil {
+		t.Fatal("first sample should report nothing")
+	}
+	rx, tx = netDelta(11000, 4000, 110)
+	if rx == nil || tx == nil {
+		t.Fatal("second sample should report rates")
+	}
+	if *rx != 1000 || *tx != 200 {
+		t.Fatalf("want 1000/200 B/s, got %v/%v", *rx, *tx)
+	}
+}
+
+func TestNetDeltaRejectsShrinkingSumAndFrozenClock(t *testing.T) {
+	resetNet()
+	netDelta(50000, 50000, 100)
+	// An interface vanished: the sum went backwards. No reading — and the new
+	// (smaller) sample must become the baseline so the NEXT interval is real.
+	if rx, _ := netDelta(40000, 50000, 130); rx != nil {
+		t.Fatalf("shrinking rx must report nothing, got %v", *rx)
+	}
+	if rx, tx := netDelta(43000, 53000, 160); rx == nil || *rx != 100 || *tx != 100 {
+		t.Fatal("interval after a reset should report against the new baseline")
+	}
+	// Same wall-clock twice — a rate with dt=0 is not a number.
+	if rx, _ := netDelta(44000, 54000, 160); rx != nil {
+		t.Fatal("non-advancing clock must report nothing")
+	}
+}
+
+func TestNetDeltaIsSilentlyAbsentInMissingVocabulary(t *testing.T) {
+	// temp has no missing word on purpose; network and procs do. This pins the
+	// vocabulary so a rename in one place cannot silently orphan the page's
+	// rendering of the other.
+	for _, m := range []string{mNetwork, mProcs} {
+		if m == "" {
+			t.Fatal("missing vocabulary word is empty")
+		}
+	}
+	if mNetwork != "network" || mProcs != "procs" {
+		t.Fatalf("vocabulary drifted: %q %q", mNetwork, mProcs)
 	}
 }
