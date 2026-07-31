@@ -471,11 +471,16 @@ to touch anyone else's hardware.
 
 ```sh
 cd relay && go build -o subnsub-monitor-relay .
-./subnsub-monitor-relay -token "$(subnsub-monitor token)"
+
+subnsub-monitor token                      # mint one, and keep it — you need
+                                           # it in the browser and on every machine
+MON_RELAY_TOKEN=<TOKEN> ./subnsub-monitor-relay
 ```
 
-That prints a token and starts listening on `127.0.0.1:8788`. Open it in a
-browser, paste the token, and point machines at it:
+The token goes in the environment rather than in `-token` because arguments
+are readable by every other process on the machine. It starts listening on
+`127.0.0.1:8788`; open that in a browser, paste the token, and point machines
+at it:
 
 ```sh
 subnsub-monitor connect http://relay.example.org:8788 <TOKEN>
@@ -511,10 +516,25 @@ exactly one host, which is the one you started.
 ```
 
 `-op-token` is worth setting on anything bigger than a couple of machines. With
-one token, a machine that leaks it leaks *watching and the console* as well as
-pushing. With two, the secret sitting on every monitored box can only push
-readings — driving the console and reading the dashboard needs the one that
-never left your laptop.
+one token, anyone who gets it can watch every machine and type at every console
+that has one enabled. With two, the secret sitting on every monitored box
+cannot do either of those: reading the dashboard and driving the console need
+the one that never left your laptop.
+
+**Be precise about what the machine token still is, though.** It is the
+credential for the whole helper-facing protocol, not a push-only key, because
+that protocol has no per-machine identity in it — `agent` is a field in the
+request, and the released helper has exactly one token to present. So whoever
+holds it can also poll `/commands` for *another* machine's id, take the command
+queued for it, and post a plausible answer. It cannot make the relay send a
+command anywhere (only the operator side queues those) and it cannot make a
+machine run one (the helper obeys its own on-disk switch), but it can intercept
+one in flight and lie about the outcome.
+
+That is the same trust boundary the hosted relay has and it follows from the
+protocol rather than from this implementation: treat the machine token as
+shared by every box you put it on, and rotate it when one of them is
+compromised.
 
 ### Put TLS in front of it
 
@@ -566,9 +586,13 @@ There is a `relay/Dockerfile` too:
 
 ```sh
 docker build -t monitor-relay relay/
-docker run -p 8788:8788 -e MON_RELAY_TOKEN=... \
+docker run -p 127.0.0.1:8788:8788 -e MON_RELAY_TOKEN=... \
        -v monitor-state:/var/lib/monitor-relay monitor-relay
 ```
+
+`-p 127.0.0.1:8788:8788`, not `-p 8788:8788` — the short form publishes on
+every interface the host has, which for a plain-HTTP bearer-token service is
+the whole warning above undone by a default.
 
 ### Writing your own instead
 

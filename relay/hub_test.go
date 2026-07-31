@@ -20,9 +20,23 @@ func b(v bool) string {
 	return "false"
 }
 
+// A caller that has already hung up.
 func closed() <-chan struct{} {
 	c := make(chan struct{})
 	close(c)
+	return c
+}
+
+// A caller that is still there. A nil channel never becomes ready, which is
+// exactly "this request has not been cancelled".
+func live() <-chan struct{} { return nil }
+
+// A caller that hangs up shortly. For the polls that are expected to find
+// nothing: with a console open the hold is 25 seconds by design, and a test
+// that waits it out is a test nobody runs.
+func hangsUp(d time.Duration) <-chan struct{} {
+	c := make(chan struct{})
+	go func() { time.Sleep(d); close(c) }()
 	return c
 }
 
@@ -34,7 +48,7 @@ func TestPushThenCommandRoundTrip(t *testing.T) {
 	if e := h.enqueueExec("machineone", "cmd1", "uname -a"); e != enqOK {
 		t.Fatalf("enqueue: %v", e)
 	}
-	ans := h.commands("machineone", closed())
+	ans := h.commands("machineone", live())
 	if !ans.Open || len(ans.Commands) != 1 || ans.Commands[0].Cmd != "uname -a" {
 		t.Fatalf("poll answer = %+v", ans)
 	}
@@ -42,7 +56,9 @@ func TestPushThenCommandRoundTrip(t *testing.T) {
 		t.Fatalf("kind = %q", ans.Commands[0].Kind)
 	}
 	// Delivered once. A second poll must not hand the same command out again.
-	ans2 := h.commands("machineone", closed())
+	// Queuing a command also opened the console, so this one holds — it is
+	// cut short rather than waited out.
+	ans2 := h.commands("machineone", hangsUp(150*time.Millisecond))
 	if len(ans2.Commands) != 0 {
 		t.Fatalf("command delivered twice: %+v", ans2.Commands)
 	}
@@ -79,7 +95,7 @@ func TestOneUpdateAtATime(t *testing.T) {
 	if e := h.enqueueUpdate("machineone", "u2"); e != enqBusy {
 		t.Fatalf("second update while queued: %v", e)
 	}
-	h.commands("machineone", closed()) // moves u1 into issued
+	h.commands("machineone", live()) // moves u1 into issued
 	if e := h.enqueueUpdate("machineone", "u3"); e != enqBusy {
 		t.Fatalf("second update while issued: %v", e)
 	}
@@ -99,7 +115,7 @@ func TestResultMustAnswerAnIssuedCommand(t *testing.T) {
 
 	h.enqueueExec("machineone", "realcmd", "echo hi")
 	drain(ch) // the queued frame
-	h.commands("machineone", closed())
+	h.commands("machineone", live())
 	h.result([]byte(`{"agent":"machineone","id":"realcmd","code":0,"out":"hi"}`))
 	f := recv(ch, time.Second)
 	if f == nil || f["type"] != "result" || f["out"] != "hi" {
@@ -120,7 +136,7 @@ func TestExpiredCommandsAreNotDelivered(t *testing.T) {
 	h.mu.Lock()
 	h.machines["machineone"].queue[0].at = nowMS() - cmdTTL - 1000
 	h.mu.Unlock()
-	ans := h.commands("machineone", closed())
+	ans := h.commands("machineone", hangsUp(150*time.Millisecond))
 	if len(ans.Commands) != 0 {
 		t.Fatalf("a stale command was delivered: %+v", ans.Commands)
 	}
@@ -130,21 +146,128 @@ func TestPollDoesNotHoldWhenNobodyIsWatching(t *testing.T) {
 	h := newHub("")
 	h.push(pushBody("machineone", true, false))
 	start := time.Now()
-	ans := h.commands("machineone", closed())
+	ans := h.commands("machineone", live())
 	if d := time.Since(start); d > 2*time.Second {
 		t.Fatalf("held %v with no console open", d)
 	}
 	if ans.Open || ans.Next != pollCold {
 		t.Fatalf("answer = %+v, want a cold cadence", ans)
 	}
+
+	// With a console open it holds — until the caller goes away, which has to
+	// end the hold rather than run out the 25 seconds.
 	h.setTerm("machineone", true)
+	stop := make(chan struct{})
+	go func() { time.Sleep(200 * time.Millisecond); close(stop) }()
 	start = time.Now()
-	ans = h.commands("machineone", closed()) // cancelled context returns at once
-	if !ans.Open || ans.Next != pollWarm {
-		t.Fatalf("answer = %+v, want warm", ans)
+	h.commands("machineone", stop)
+	d := time.Since(start)
+	if d < 100*time.Millisecond {
+		t.Fatalf("returned in %v — it did not hold at all", d)
 	}
-	if d := time.Since(start); d > 2*time.Second {
-		t.Fatalf("a cancelled poll held %v", d)
+	if d > 3*time.Second {
+		t.Fatalf("held %v after the caller hung up", d)
+	}
+	// And the slot it took is back.
+	h.mu.Lock()
+	polls := h.polls
+	h.mu.Unlock()
+	if polls != 0 {
+		t.Fatalf("poll slots still held: %d", polls)
+	}
+}
+
+func TestACancelledPollDoesNotSpendACommand(t *testing.T) {
+	h := newHub("")
+	h.push(pushBody("machineone", true, false))
+	h.setTerm("machineone", true)
+	if e := h.enqueueExec("machineone", "cmd1", "echo hi"); e != enqOK {
+		t.Fatal(e)
+	}
+	// The helper hung up before this poll was answered. Taking the command
+	// here would move it to `issued`, where it waits out its TTL and reaches
+	// nobody — the operator's prompt just never answers.
+	if ans := h.commands("machineone", closed()); len(ans.Commands) != 0 {
+		t.Fatalf("a hung-up poll took a command: %+v", ans.Commands)
+	}
+	h.mu.Lock()
+	queued, issued := len(h.machines["machineone"].queue), len(h.machines["machineone"].issued)
+	h.mu.Unlock()
+	if queued != 1 || issued != 0 {
+		t.Fatalf("queued=%d issued=%d, want the command still waiting", queued, issued)
+	}
+	// The next real poll gets it.
+	ans := h.commands("machineone", live())
+	if len(ans.Commands) != 1 || ans.Commands[0].ID != "cmd1" {
+		t.Fatalf("the command did not survive for a live caller: %+v", ans)
+	}
+}
+
+func TestTheCapEvictsAQuietMachineButNotALiveOne(t *testing.T) {
+	h := newHub("")
+	for i := 0; i < maxMachines; i++ {
+		if st := h.push(pushBody("machine"+itoaTest(i)+"x", false, false)); st != pushOK {
+			t.Fatalf("push %d: %v", i, st)
+		}
+	}
+	// Every slot is live, so the cap holds and says so.
+	if st := h.push(pushBody("newcomerone", false, false)); st != pushFull {
+		t.Fatalf("evicted a live machine: %v", st)
+	}
+	// Age one past the offline threshold; now the newcomer takes its place.
+	h.mu.Lock()
+	h.machines["machine7x"].SeenAt = nowMS() - (offlineAfter+60)*1000
+	h.mu.Unlock()
+	h.setName("machine7x", "old box")
+	if st := h.push(pushBody("newcomerone", false, false)); st != pushOK {
+		t.Fatalf("a quiet slot was not reclaimed: %v", st)
+	}
+	if h.machines["machine7x"] != nil {
+		t.Fatal("the quiet machine kept its slot")
+	}
+	if _, ok := h.names["machine7x"]; ok {
+		t.Fatal("its name was left behind")
+	}
+	if len(h.machines) != maxMachines {
+		t.Fatalf("machines = %d, want %d", len(h.machines), maxMachines)
+	}
+}
+
+func TestAFailedSaveStaysDirtySoItIsRetried(t *testing.T) {
+	dir := t.TempDir()
+	// A directory where the state file should be: every write fails, and the
+	// question is whether the relay gives up quietly.
+	path := dir + "/state.json"
+	if err := os.Mkdir(path+".tmp", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	h := newHub(path)
+	h.push(pushBody("machineone", false, false))
+	h.saveState()
+	h.mu.Lock()
+	dirty := h.dirty
+	h.mu.Unlock()
+	if !dirty {
+		t.Fatal("a failed save cleared the dirty flag, so it would never be retried")
+	}
+	// Clear the obstruction; the retry now succeeds.
+	os.Remove(path + ".tmp")
+	h.saveState()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("the retry did not write the file: %v", err)
+	}
+}
+
+func TestTheStateDirectoryIsCreated(t *testing.T) {
+	dir := t.TempDir()
+	// The shape the README's systemd example uses: a directory nothing else
+	// creates.
+	path := dir + "/monitor-relay/state.json"
+	h := newHub(path)
+	h.push(pushBody("machineone", false, false))
+	h.saveState()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("state was not written into a directory that had to be made: %v", err)
 	}
 }
 

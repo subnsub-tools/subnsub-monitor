@@ -1,0 +1,18 @@
+# What must not be sent to the daemon as build context.
+#
+# .gitignore does not apply here, and the build context is not just "what ends
+# up in the image": it is uploaded to the builder and cached in intermediate
+# layers. A relay that has been run locally has a state file beside its source
+# describing real machines — that belongs in neither place.
+state.json
+state.json.tmp
+*.json.tmp
+
+# Locally built binaries. Large, unused by the build (it compiles from source),
+# and on the wrong architecture as often as not.
+subnsub-monitor-relay
+subnsubmonitorrelay
+
+# Nothing here is needed to compile.
+Dockerfile
+.dockerignore
