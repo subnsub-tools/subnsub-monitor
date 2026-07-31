@@ -137,10 +137,18 @@ func main() {
 		// Printed from the same reader the loop consults, so what you see is
 		// what the running helper will do — including the case where MON_CONSOLE
 		// in the environment overrides the file you just wrote.
-		if consoleEnabled() {
+		on := consoleEnabled()
+		if on {
 			fmt.Printf("on   (%s)\n", agentID())
 		} else {
 			fmt.Printf("off  (%s)\n", agentID())
+		}
+		// The unit's sandbox was decided at install time and this switch cannot
+		// change it. Saying so here is the difference between a console that
+		// obviously needs one more step and one that appears to work until the
+		// first command that writes something.
+		if note := consoleSandboxNote(on); note != "" {
+			fmt.Println(note)
 		}
 
 	case "selftest":

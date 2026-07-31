@@ -274,9 +274,15 @@ agent runs as, in that user's home directory:
 - 30 seconds, then the whole process group is killed, so a command that
   backgrounded something does not leave it running;
 - output is capped at 16 KB, combined stdout and stderr;
+- the command's process group is taken down when it finishes, so a
+  backgrounded process does not outlive the only thing that knew about it;
 - **every command is written to this machine's log before it runs**, so the box
   keeps its own record of what was done to it that does not pass through
   anyone else.
+
+Turning it off takes effect on a running agent within about ten seconds, and it
+is re-checked between commands — so `console off` stops a batch already in
+flight rather than being obeyed once that batch has finished.
 
 On Linux the systemd unit's filesystem confinement depends on this setting, and
 the installer prints which one it used. Without the console the service is

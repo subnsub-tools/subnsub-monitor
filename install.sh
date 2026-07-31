@@ -44,10 +44,10 @@ LABEL=com.subnsub.monitor   # shows up in `launchctl list`; brand domain there t
 # script that publishes the binaries. A binary that does not match is not installed, and a swapped binary
 # would otherwise be free to read ~/.claude/.credentials.json and post it
 # somewhere, which no amount of care in the Go source can prevent.
-SUM_linux_amd64=0b1b23eccae685023f98200a01c596dd15f7888ea02c22a90f2e39dd932eee23
-SUM_linux_arm64=fb1cdd3f7b058904cabf646956933a2b77b42a2f52d8cd75768e3d0d6643594c
-SUM_darwin_amd64=4e246d91be7caa43a2a1efca8e39d14e08e74d45f39e294a069da9401f27e5ac
-SUM_darwin_arm64=2683ae8f0aff898368373f673b31c0e634157e0d9d08b124932cb88bd30d77b6
+SUM_linux_amd64=a41af7d5d8d7be557dab619d63c95b2983fc9f3e040c8ec16e9ff60d848c8eee
+SUM_linux_arm64=25437d068afbdaf9078534dd14f185502f5a95584a04e89b34b66fc69d5efcaa
+SUM_darwin_amd64=e6eb227b00b4beaa7e48853c5d4ccd2a200bd507fcc5268095c59bfd3130ca5f
+SUM_darwin_arm64=e0877c735ba00fe3337a2a2b3ed763910fd701543783d06d08fcaf1eddb842a7
 
 say()  { printf '%s\n' "$*"; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -435,6 +435,13 @@ if [ -f "$conf/console" ]; then
     say "console:        ON — the dashboard can run commands here as $(id -un)."
     say "                off with:  $BINDIR/$NAME console off"
 else
+    # Deliberately does not say "turn it on and you are done". On Linux the
+    # unit written above is sandboxed read-only, and this switch cannot change
+    # that — a console turned on afterwards can look but not write until the
+    # installer runs again. `console on` says the same thing at the machine.
     say "console:        off. Turn it on with:  $BINDIR/$NAME console on"
+    case "$goos" in
+      linux) say "                (on Linux, re-run this installer with --console for a console that can write)" ;;
+    esac
 fi
 say "uninstall:      sh install.sh --uninstall"
