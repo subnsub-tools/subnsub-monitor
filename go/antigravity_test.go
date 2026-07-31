@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -115,8 +116,9 @@ func TestAgResetAcceptsEveryUnitItIsSentIn(t *testing.T) {
 func TestAgIsServerNeedsMoreThanTheWord(t *testing.T) {
 	yes := [][]string{
 		{"/opt/Antigravity/resources/app/extensions/language_server", "--app_data_dir", "/home/x/.antigravity", "--csrf_token", "abc123"},
-		{"/usr/local/bin/agy", "serve"},
+		{"/opt/Antigravity/language_server", "--app_data_dir=/home/x/.antigravity"},
 		{"/home/x/.antigravity-cli/bin/server", "--port", "0"},
+		{"/opt/antigravity/bin/agy", "serve"},
 	}
 	for _, argv := range yes {
 		if !agIsServer(argv) {
@@ -127,6 +129,13 @@ func TestAgIsServerNeedsMoreThanTheWord(t *testing.T) {
 		{"/usr/bin/grep", "-r", "antigravity", "."},
 		{"/opt/windsurf/language_server", "--app_data_dir", "/home/x/.windsurf"},
 		{"/usr/bin/vim", "antigravity_notes.md"},
+		// The marker has to be a FLAG VALUE. Another Codeium-derived editor
+		// with a project called "antigravity" open is the realistic version of
+		// this, and it used to match on the word alone.
+		{"/opt/windsurf/language_server", "--app_data_dir", "/home/x/.windsurf", "--folder", "/home/x/src/antigravity"},
+		// argv[0] is whatever a process says it is, so a two-letter name is
+		// not identity on its own.
+		{"/tmp/agy", "serve"},
 		{},
 		{""},
 	}
@@ -134,6 +143,43 @@ func TestAgIsServerNeedsMoreThanTheWord(t *testing.T) {
 		if agIsServer(argv) {
 			t.Fatalf("should NOT have matched: %v", argv)
 		}
+	}
+}
+
+// A fraction outside [0,1] is a protocol change or a bad reading, and clamping
+// it would dress both up as a confident number — -1 saturating to "100% used"
+// looks exactly like a genuinely exhausted quota.
+func TestAgLimitsRefusesFractionsOutsideTheRange(t *testing.T) {
+	var s agSummary
+	body := `{"groups":[{"displayName":"Gemini Models","buckets":[
+	  {"bucketId":"A","remaining":{"remainingFraction":-1}},
+	  {"bucketId":"B","remaining":{"remainingFraction":2}},
+	  {"bucketId":"C","remaining":{"remainingFraction":0.5}}]}]}`
+	if err := json.Unmarshal([]byte(body), &s); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	lims := agLimits(s.Groups)
+	if len(lims) != 1 || lims[0].Key != "c" || lims[0].UsedPercent != 50 {
+		t.Fatalf("out-of-range fractions were not dropped: %+v", lims)
+	}
+}
+
+// key and scope are rendered in every browser watching the account, and the
+// server they came from was authenticated in no way at all.
+func TestAgKeyAndScopeAreSafeToPublish(t *testing.T) {
+	if got := agKey("FIVE_HOUR"); got != "five_hour" {
+		t.Fatalf("ordinary id: %q", got)
+	}
+	for _, bad := range []string{"has space", "/home/someone/secret", "a\u202eb", strings.Repeat("x", 25)} {
+		if got := agKey(bad); got != "quota" {
+			t.Fatalf("%q should have become the generic word, got %q", bad, got)
+		}
+	}
+	// The scope is free text meant for a human, so it is repaired rather than
+	// refused — but the bidi override that can make a label render as
+	// something it does not spell has to go.
+	if got := agScope("Gemini\u202e Models\u0007"); got != "Gemini Models" {
+		t.Fatalf("scope not cleaned: %q", got)
 	}
 }
 

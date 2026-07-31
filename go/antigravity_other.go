@@ -44,7 +44,9 @@ func agCandidates() []agCandidate {
 	if ps == "" || lsof == "" {
 		return nil
 	}
-	out, err := agRun(ps, "-axo", "pid=,command=")
+	// -ww: without it `ps` truncates the command line at the terminal
+	// width, and the flag the match depends on is at the far end of it.
+	out, err := agRun(ps, "-axww", "-o", "pid=,command=")
 	if err != nil {
 		return nil
 	}
@@ -69,11 +71,11 @@ func agCandidates() []agCandidate {
 		if !agIsServer(argv) {
 			continue
 		}
-		ports := agLsofPorts(lsof, pid)
-		if len(ports) == 0 {
+		eps := agLsofEndpoints(lsof, pid)
+		if len(eps) == 0 {
 			continue
 		}
-		cands = append(cands, agCandidate{pid: pid, csrf: agCsrf(argv), ports: ports})
+		cands = append(cands, agCandidate{pid: pid, csrf: agCsrf(argv), eps: eps})
 		if len(cands) >= 4 {
 			break
 		}
@@ -81,33 +83,48 @@ func agCandidates() []agCandidate {
 	return cands
 }
 
-// lsof -nP -iTCP -sTCP:LISTEN -a -p <pid>, whose rows end in `*:PORT (LISTEN)`
-// or `127.0.0.1:PORT (LISTEN)`.
-func agLsofPorts(lsof string, pid int) []int {
+// lsof -nP -iTCP -sTCP:LISTEN -a -p <pid>, whose rows carry the address as
+// `127.0.0.1:PORT`, `[::1]:PORT` or `*:PORT`.
+//
+// Split on the LAST colon, not the first: an IPv6 address is mostly colons,
+// and cutting at the first one yields "" for the host and a port of ":1:8080".
+func agLsofEndpoints(lsof string, pid int) []agEndpoint {
 	out, err := agRun(lsof, "-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", strconv.Itoa(pid))
 	if err != nil {
 		return nil
 	}
-	var ports []int
-	seen := map[int]bool{}
+	var eps []agEndpoint
+	seen := map[string]bool{}
 	for _, line := range strings.Split(out, "\n") {
 		if !strings.Contains(line, "LISTEN") {
 			continue
 		}
 		for _, f := range strings.Fields(line) {
-			_, portStr, ok := strings.Cut(f, ":")
-			if !ok {
+			i := strings.LastIndex(f, ":")
+			if i < 0 {
 				continue
 			}
-			n, err := strconv.Atoi(portStr)
-			if err != nil || n <= 0 || n > 65535 || seen[n] {
+			n, err := strconv.Atoi(f[i+1:])
+			if err != nil || n <= 0 || n > 65535 {
 				continue
 			}
-			seen[n] = true
-			ports = append(ports, n)
+			host := strings.Trim(f[:i], "[]")
+			// A wildcard bind is reachable on loopback, which is the only
+			// address this collector will ever dial.
+			if host == "*" || host == "" || host == "0.0.0.0" {
+				host = "127.0.0.1"
+			} else if host == "::" {
+				host = "::1"
+			}
+			key := host + "/" + f[i+1:]
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			eps = append(eps, agEndpoint{host: host, port: n})
 		}
 	}
-	return ports
+	return eps
 }
 
 func agRun(bin string, args ...string) (string, error) {
@@ -115,7 +132,8 @@ func agRun(bin string, args ...string) (string, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, args...)
 	var buf bytes.Buffer
-	cmd.Stdout = &limitedWriter{w: &buf, n: 512 * 1024}
+	lw := &limitedWriter{w: &buf, n: 512 * 1024}
+	cmd.Stdout = lw
 	cmd.Stderr = nil
 	cmd.Stdin = nil
 	if err := cmd.Run(); err != nil {
@@ -125,5 +143,18 @@ func agRun(bin string, args ...string) (string, error) {
 			return "", err
 		}
 	}
+	// Truncated output is REFUSED, not parsed. The writer records that it
+	// overflowed and the whole point of recording it is to be looked at — a
+	// half-line at the cut can read as a complete one, and the process being
+	// searched for may be on the far side of it.
+	if lw.over {
+		return "", errAgTruncated
+	}
 	return buf.String(), nil
 }
+
+var errAgTruncated = &agErr{"output was truncated"}
+
+type agErr struct{ s string }
+
+func (e *agErr) Error() string { return e.s }

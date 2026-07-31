@@ -43,6 +43,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -59,6 +60,15 @@ const (
 	// yesterday's percentages as though they were current.
 	agStaleMax = 600.0
 	agTimeout  = 4 * time.Second
+	// A ceiling on the WHOLE collection, discovery included. One request is
+	// bounded at agTimeout, but a process may hold any number of listening
+	// sockets and they were being tried one after another while the cache
+	// mutex was held — so a single mis-matched process could stall this
+	// collector, every caller waiting on it, and the providers queued behind
+	// it. Two numbers rather than one: a hard deadline, and a cap on how many
+	// endpoints any one candidate is worth.
+	agBudget       = 8 * time.Second
+	agMaxEndpoints = 6
 	// The Connect endpoints, in the order they are tried. The first is the one
 	// that backs Antigravity's own Model Quota UI.
 	agQuotaPath  = "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
@@ -128,9 +138,17 @@ func fetchAntigravity() Provider {
 	}
 
 	var lastErr string
+	deadline := time.Now().Add(agBudget)
 	for _, c := range cands {
-		for _, port := range c.ports {
-			groups, err := agAsk(port, c.csrf)
+		for i, ep := range c.eps {
+			if i >= agMaxEndpoints {
+				break
+			}
+			if time.Now().After(deadline) {
+				lastErr = "gave up before every port was tried"
+				break
+			}
+			groups, err := agAsk(ep, c.csrf)
 			if err != nil {
 				lastErr = err.Error()
 				continue
@@ -162,10 +180,19 @@ func fetchAntigravity() Provider {
    /proc on Linux, ps + lsof everywhere else — but what counts as a match is
    not, so that lives here. */
 
+// One endpoint to try. The HOST travels with the port because the two are
+// not interchangeable: a server bound only to ::1 is unreachable at
+// 127.0.0.1, and keeping just the number silently turned every IPv6-only
+// install into "not running".
+type agEndpoint struct {
+	host string
+	port int
+}
+
 type agCandidate struct {
-	pid   int
-	csrf  string
-	ports []int
+	pid  int
+	csrf string
+	eps  []agEndpoint
 }
 
 // argv[0] basenames Antigravity's server ships under, across platforms and
@@ -182,29 +209,62 @@ var agServerNames = map[string]bool{
 
 // Is this argv an Antigravity language server?
 //
-// Two accepted shapes, and both need more than a name: the app/IDE server is a
-// `language_server*` binary that also names antigravity somewhere in its
-// arguments (`--app_data_dir .../antigravity`), and the CLI is the `agy` binary
-// or something under an antigravity-cli path. A bare `language_server` with no
-// Antigravity marker belongs to some other Codeium-derived editor and is not
-// ours to interrogate.
+// The bar is deliberately higher than "mentions the word". argv[0] is a string
+// a process chooses for itself and the rest of the command line is whatever
+// anyone typed, so a match here decides which local program this helper hands
+// a token to and believes about quota — the two failure modes being a Codeium
+// editor with a project called "antigravity" open, and a process that named
+// itself to be found.
+//
+// So the marker has to be the VALUE OF A FLAG we expect, not a substring of
+// the line: `--app_data_dir <path containing antigravity>` is what the real
+// server carries. The CLI shape stays path-anchored, and a bare `agy` is no
+// longer enough on its own — a two-letter argv[0] is the easiest thing in the
+// world to claim.
+//
+// This is one of two checks. The other is the caller's: the process must
+// belong to the same user this helper runs as.
 func agIsServer(argv []string) bool {
 	if len(argv) == 0 || argv[0] == "" {
 		return false
 	}
 	base := filepath.Base(argv[0])
-	joined := strings.ToLower(strings.Join(argv, " "))
+	exe := strings.ToLower(argv[0])
 
-	if agServerNames[base] && strings.Contains(joined, "antigravity") {
+	// The CLI, anchored to its own install path.
+	if strings.Contains(exe, "antigravity-cli") || strings.Contains(exe, "antigravity_cli") ||
+		(base == "agy" && strings.Contains(exe, "antigravity")) {
 		return true
 	}
-	if base == "agy" {
-		return true
+	if !agServerNames[base] {
+		return false
 	}
-	// Path-anchored, so a command that merely mentions the word in an argument
-	// (a grep, an editor opening this file) cannot match.
-	return strings.Contains(strings.ToLower(argv[0]), "antigravity-cli") ||
-		strings.Contains(strings.ToLower(argv[0]), "antigravity_cli")
+	return agFlagNames(argv, "antigravity")
+}
+
+// Does a flag VALUE — not the line as a whole — contain this marker?
+// Accepts both `--flag value` and `--flag=value`, and only for the flags whose
+// value legitimately names the product's data directory.
+func agFlagNames(argv []string, marker string) bool {
+	want := map[string]bool{"--app_data_dir": true, "--app-data-dir": true,
+		"--extension_dir": true, "--ide_name": true}
+	for i, a := range argv {
+		name, inline, hasEq := strings.Cut(a, "=")
+		if !want[name] {
+			continue
+		}
+		v := inline
+		if !hasEq {
+			if i+1 >= len(argv) {
+				continue
+			}
+			v = argv[i+1]
+		}
+		if strings.Contains(strings.ToLower(v), marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // `--csrf_token X` or `--csrf_token=X`. Absent for the CLI, which needs none.
@@ -290,12 +350,12 @@ func agClient() *http.Client {
 const agMeta = `{"metadata":{"ideName":"antigravity","extensionName":"antigravity",` +
 	`"locale":"en","ideVersion":"unknown"}}`
 
-func agAsk(port int, csrf string) ([]agGroup, error) {
+func agAsk(ep agEndpoint, csrf string) ([]agGroup, error) {
 	client := agClient()
 	// The summary endpoint first; GetUserStatus is the older shape and is only
 	// asked when the first is absent, not when it merely says nothing.
 	for _, path := range []string{agQuotaPath, agStatusPath} {
-		body, err := agPost(client, port, path, csrf)
+		body, err := agPost(client, ep, path, csrf)
 		if err != nil {
 			// A 404 means this build does not have that method; anything else
 			// means the server is there and unhappy, and trying the next path
@@ -319,8 +379,10 @@ func agAsk(port int, csrf string) ([]agGroup, error) {
 	return nil, fmt.Errorf("no quota in the reply")
 }
 
-func agPost(client *http.Client, port int, path, csrf string) ([]byte, error) {
-	url := fmt.Sprintf("https://127.0.0.1:%d%s", port, path)
+func agPost(client *http.Client, ep agEndpoint, path, csrf string) ([]byte, error) {
+	// JoinHostPort, so an IPv6 host is bracketed rather than producing an
+	// address that parses as something else entirely.
+	url := "https://" + net.JoinHostPort(ep.host, strconv.Itoa(ep.port)) + path
 	req, err := http.NewRequest("POST", url, bytes.NewReader([]byte(agMeta)))
 	if err != nil {
 		return nil, err
@@ -343,7 +405,18 @@ func agPost(client *http.Client, port int, path, csrf string) ([]byte, error) {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		return nil, fmt.Errorf("local server answered %d", resp.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, agMaxBody))
+	// One byte past the cap, so "too big" is DETECTED rather than silently
+	// becoming a shorter document. A prefix of a reply is not the reply, and a
+	// server that can make the first 512 KiB parse cleanly should not be able
+	// to hide the rest behind a truncation nobody noticed.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, agMaxBody+1))
+	if err != nil {
+		return nil, fmt.Errorf("could not read the reply")
+	}
+	if len(body) > agMaxBody {
+		return nil, fmt.Errorf("reply was too large")
+	}
+	return body, nil
 }
 
 /* ── the reading ──────────────────────────────────────────────────────── */
@@ -361,7 +434,13 @@ func agLimits(groups []agGroup) []Limit {
 			if b.Remaining != nil && b.Remaining.RemainingFraction != nil {
 				frac = b.Remaining.RemainingFraction
 			}
-			if frac == nil {
+			// A fraction is between nothing and everything. Anything else is
+			// a protocol change or a bad reading, and clamping it would turn
+			// both into a plausible number: -1 saturates to "100% used", which
+			// is indistinguishable from a genuinely exhausted quota. Dropped
+			// instead, on the same rule the empty bucket follows — a missing
+			// reading must never render as a confident one.
+			if frac == nil || *frac < -0.001 || *frac > 1.001 {
 				continue
 			}
 			// The server reports what is LEFT; every other provider here
@@ -378,7 +457,7 @@ func agLimits(groups []agGroup) []Limit {
 				lim.WindowLabel = sp(lbl)
 			}
 			if g.DisplayName != "" {
-				lim.Scope = sp(trimTo(g.DisplayName, 40))
+				lim.Scope = sp(agScope(g.DisplayName))
 			}
 			if e := agReset(b.ResetTime); e > 0 {
 				lim.ResetsAt = fp(e)
@@ -394,12 +473,44 @@ func agLimits(groups []agGroup) []Limit {
 	return out
 }
 
+// The bucket id becomes this row's key, and the key is rendered in every
+// browser watching this account. What answers on that loopback port is a
+// server this helper authenticated in no way at all, so the id is accepted
+// only in the shape a real one has — letters, digits and separators — and
+// anything else becomes the generic word rather than travelling.
 func agKey(bucketID string) string {
 	k := strings.ToLower(strings.TrimSpace(bucketID))
-	if k == "" {
+	if k == "" || len(k) > 24 {
 		return "quota"
 	}
-	return trimTo(k, 24)
+	for _, r := range k {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' || r == '-' || r == '.') {
+			return "quota"
+		}
+	}
+	return k
+}
+
+// The group name becomes the row's scope, and is free text from the same
+// unauthenticated source. Repaired rather than refused — it is the one field
+// here whose whole job is to be read by a human — but repaired against what
+// text can DO on a page rather than what it says: control characters, bidi
+// overrides that can make a label render as something it does not spell, and
+// invisible padding. Same rule, and the same list, the relay applies to a
+// machine's name.
+func agScope(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r < 0x20, r >= 0x7f && r <= 0x9f:
+		case r >= 0x202a && r <= 0x202e:
+		case r >= 0x2066 && r <= 0x2069:
+		case r == 0xfeff:
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return trimTo(b.String(), 40)
 }
 
 // The window this bucket covers, in the same vocabulary the other providers
