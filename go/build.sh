@@ -23,6 +23,12 @@ set -eu
 cd "$(dirname "$0")"
 out="${1:-dist}"
 mkdir -p "$out"
+# Clear what a PREVIOUS run left, because this list shrinks as well as grows.
+# Dropping a target otherwise leaves its binary sitting in the output directory,
+# where the checksum manifest below still finds it and (until it stopped
+# globbing) the upload step did too — a platform that was withdrawn republishing
+# itself out of a stale file is the exact accident this line prevents.
+rm -f "$out"/subnsub-monitor-* "$out/SHA256SUMS"
 
 go="${GO:-go}"
 command -v "$go" >/dev/null 2>&1 || go="$HOME/.local/go/bin/go"
@@ -40,9 +46,16 @@ command -v "$go" >/dev/null 2>&1 || { echo "no go toolchain found" >&2; exit 1; 
 # targets ARMv6, which runs on a Pi 1 and gives up the atomics and the barrier
 # instructions every later board has. Naming the version is also the only way to
 # be sure two people building this source get the same bytes.
+#
+# WINDOWS IS NOT IN THIS LIST, and the source for it still is. The port works
+# and was published for a few hours on 2026-08-01; the decision to stop offering
+# it is a product one, not a defect. Everything Windows-specific is behind a
+# `//go:build windows` tag, so it cannot reach any binary built here, and
+# `GOOS=windows go vet ./...` still passes — which is what keeps it from rotting
+# while it is switched off. Re-enabling is this line, release.sh's TARGETS, and
+# three names in functions/monitor/[asset].js.
 for target in linux/amd64 linux/arm64 linux/arm \
               darwin/amd64 darwin/arm64 \
-              windows/amd64 windows/arm64 \
               freebsd/amd64 freebsd/arm64; do
     os=${target%/*}
     arch=${target#*/}

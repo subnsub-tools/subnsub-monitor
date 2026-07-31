@@ -1,6 +1,26 @@
 <#
 subnsub-monitor installer for Windows.
 
+⚠ WINDOWS IS NOT CURRENTLY PUBLISHED, AND THIS SCRIPT WILL NOT INSTALL ANYTHING.
+
+The port works — it shipped on 2026-08-01 and was withdrawn the same day, for
+product reasons rather than because anything was broken. What that means for
+this file:
+
+  - no Windows binary is served, so the download below 404s;
+  - the checksums are back to placeholders, so even a binary obtained some other
+    way is refused rather than installed. That refusal is deliberate: an
+    installer carrying real hashes for a release nobody is publishing any more
+    is worse than one that plainly declines.
+
+It is kept here, rather than deleted, because withdrawing an offer and throwing
+away the work are different decisions. Turning it back on is: put windows back
+in helper/go/build.sh and release.sh's TARGETS, add the three names to
+functions/monitor/[asset].js, and re-run the release script — which re-stamps
+the two lines below.
+
+Everything past this notice describes how it works when it is switched on.
+
   & ([scriptblock]::Create((irm https://tools.subnsub.com/monitor/install.ps1))) -Token <TOKEN>
 
 Paste the same token on every machine you want to watch — each one gets its own
@@ -85,8 +105,8 @@ $ConfDir  = Join-Path $HOME '.config\subnsub-monitor'
 # installed, and a swapped binary would otherwise be free to read
 # ~/.claude/.credentials.json and post it somewhere, which no amount of care in
 # the Go source can prevent.
-$SUM_windows_amd64 = 'fd7d68e8fb10e0ecd9815699692e775a26d9ff7dda0c227cde8dfcf902c20743'
-$SUM_windows_arm64 = 'ce79f0314b1a81c495403b3fdd21271032e38c8ef070f00d63f87fddd1c056bf'
+$SUM_windows_amd64 = 'PLACEHOLDER_windows_amd64'
+$SUM_windows_arm64 = 'PLACEHOLDER_windows_arm64'
 
 function Say([string]$m) { Write-Host $m }
 function Die([string]$m) { Write-Host "error: $m" -ForegroundColor Red; exit 1 }
