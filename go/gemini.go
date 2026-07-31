@@ -53,10 +53,15 @@ var geminiCache provCache
 // last token an API answered 401 to: local expiry is a prediction, not the
 // vendor's opinion, and a token Google revoked early would otherwise be
 // re-selected — and re-refused — for the rest of its printed lifetime.
+// `from` names which refresh token minted the cached one, compared and never
+// published: the credential file can change hands (gemini logout/login as
+// someone else), and a cached access token must die with the refresh token
+// that made it rather than answer for the previous account's quota.
 var geminiTok struct {
 	sync.Mutex
 	token string
 	until float64
+	from  string
 	bad   string
 }
 
@@ -213,7 +218,7 @@ func geminiAccessToken(c geminiCreds) (string, string, string) {
 	if c.access != "" && c.access != geminiTok.bad && c.expiryMs/1000 > t+60 {
 		return c.access, "", ""
 	}
-	if geminiTok.token != "" && geminiTok.until > t+60 {
+	if geminiTok.token != "" && geminiTok.until > t+60 && geminiTok.from == c.refresh {
 		return geminiTok.token, "", ""
 	}
 	if c.refresh == "" {
@@ -261,7 +266,7 @@ func geminiAccessToken(c geminiCreds) (string, string, string) {
 	if v := asNum(tok.ExpiresIn); v != nil && *v > 60 {
 		ttl = *v
 	}
-	geminiTok.token, geminiTok.until = tok.AccessToken, t+ttl-60
+	geminiTok.token, geminiTok.until, geminiTok.from = tok.AccessToken, t+ttl-60, c.refresh
 	return tok.AccessToken, "", ""
 }
 
@@ -278,9 +283,16 @@ func fetchGemini() Provider {
 	}
 	switch at := geminiAuthType(); at {
 	case "", "oauth-personal":
-		// The quota below is the personal Code Assist quota.
-	case "api-key", "gemini-api-key", "vertex-ai":
-		return fail("not-supported", "这台机器的 gemini-cli 用 "+at+" 认证，额度不在个人配额接口上。")
+		// The quota below is the personal Code Assist quota. Empty means the
+		// settings file predates the field (or is absent), which oauth_creds
+		// existing already argues is the personal flow.
+	default:
+		// FAIL-CLOSED on modes we do not recognise, not just the ones we do:
+		// a future auth type meters somewhere this collector has never seen,
+		// and querying the personal-quota endpoint for it would publish a
+		// confident number about the wrong meter. api-key, vertex-ai and
+		// whatever the CLI grows next all land here, named in the message.
+		return fail("not-supported", "这台机器的 gemini-cli 用 "+tame(at, 24)+" 认证，额度不在个人配额接口上。")
 	}
 
 	token, errSlug, detail := geminiAccessToken(creds)
