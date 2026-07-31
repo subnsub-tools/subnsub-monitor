@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -119,5 +120,32 @@ func TestRunConsoleCommandSurvivesABackgroundedChild(t *testing.T) {
 		}
 	case <-time.After(20 * time.Second):
 		t.Fatal("a backgrounded grandchild held the command open")
+	}
+}
+
+// …and the process it left behind has to be GONE, which returning promptly
+// does not prove on its own. This is the check the first version of these
+// tests was missing: `sleep 300 >/dev/null 2>&1 &` lets the shell exit
+// immediately and successfully, so the context deadline never fires and
+// nothing kills the sleep unless the process group is taken down after Run.
+func TestRunConsoleCommandLeavesNoStrayProcess(t *testing.T) {
+	// A marker the pgrep below can find and no other test can collide with.
+	marker := "subnsub-console-stray-probe"
+	r := runConsoleCommand("c3", "sleep 300 "+marker+" >/dev/null 2>&1 & echo spawned")
+	if !strings.Contains(r.Out, "spawned") {
+		t.Fatalf("command did not run: %q %v", r.Out, r.Error)
+	}
+	// The kill is a signal, not a synchronous reap; give the scheduler a beat.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		out, _ := exec.Command("pgrep", "-f", marker).Output()
+		if len(strings.TrimSpace(string(out))) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("a backgrounded process outlived its command: pids %s",
+				strings.TrimSpace(string(out)))
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }

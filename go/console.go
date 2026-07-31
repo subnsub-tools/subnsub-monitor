@@ -35,6 +35,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -44,6 +45,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -67,6 +69,12 @@ const (
 	// Output relayed back. The relay caps it again at the same size; this one
 	// is what stops a `yes` from being sent at all.
 	consoleMaxOutput = 16 * 1024
+	// And the ceiling on the SERIALISED report, which is the number the relay
+	// actually enforces. JSON escaping expands the output — every newline
+	// costs two bytes instead of one — so a payload sized only by
+	// consoleMaxOutput can still be refused. Kept under the relay's own
+	// MAX_RESULT_BODY (24 KiB) with room for the rest of the document.
+	consoleMaxBody = 20 * 1024
 
 	// The relay holds a poll for ~25s when a console is open, so the client
 	// deadline has to clear that with room for a slow link.
@@ -164,6 +172,40 @@ func setConsole(on bool) error {
 	return os.WriteFile(path, []byte("on\n"), 0o600)
 }
 
+// Whether the installed systemd unit's sandbox matches the console setting.
+//
+// The unit is written once, at install time, and its filesystem confinement
+// depends on whether the console was on THEN — see install.sh. So flipping the
+// switch afterwards leaves the two disagreeing, and the disagreement is silent
+// in the direction that matters: `console on` succeeds, the dashboard offers a
+// prompt, and every command that writes anything fails with a permission error
+// that names nothing to do with any of this.
+//
+// Returns the advice to print, or "" when there is nothing to say — no unit, a
+// unit that already agrees, or a platform where none of this applies.
+func consoleSandboxNote(on bool) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	unit := filepath.Join(home, ".config", "systemd", "user", "subnsub-monitor.service")
+	b, err := os.ReadFile(unit)
+	if err != nil {
+		return "" // not a systemd install; launchd imposes none of this
+	}
+	strict := strings.Contains(string(b), "ProtectSystem=strict")
+	if on && strict {
+		return "note: this machine's service is sandboxed read-only, so commands can look\n" +
+			"      but not write. Reinstall with --console to lift that:\n" +
+			"        curl -fsSL https://tools.subnsub.com/monitor/install.sh | sh -s -- <TOKEN> --console"
+	}
+	if !on && !strict {
+		return "note: the service is still running under the relaxed sandbox the console\n" +
+			"      needed. Reinstall without --console to put the strict one back."
+	}
+	return ""
+}
+
 type consoleCmd struct {
 	ID  string `json:"id"`
 	Cmd string `json:"cmd"`
@@ -234,6 +276,17 @@ func consoleLoop(base string, tok *tokenBox) {
 			if c.ID == "" || c.Cmd == "" {
 				continue
 			}
+			// Re-read the switch between the poll and the command, and again
+			// between commands. The poll can be held for 25 seconds and a
+			// batch can take a minute to work through, so `console off` typed
+			// during either would otherwise be obeyed only after everything
+			// already in flight had run — which is the opposite of what
+			// somebody typing it in a hurry means by it.
+			if !consoleEnabled() {
+				consoleReport(client, resultURL, id, tok,
+					consoleResult{ID: c.ID, Code: -1, Error: "console-off"})
+				continue
+			}
 			consoleReport(client, resultURL, id, tok, runConsoleCommand(c.ID, c.Cmd))
 		}
 		// Straight back round with no sleep: a console that is open should feel
@@ -287,7 +340,29 @@ type consoleResult struct {
 
 func consoleReport(client *http.Client, resultURL, id string, tok *tokenBox, r consoleResult) {
 	r.Agent = id
-	req, err := http.NewRequest("POST", resultURL, bytes.NewReader(dump(r)))
+
+	// Size the ENCODED body, not the raw output.
+	//
+	// consoleMaxOutput bounds what the command printed; JSON then escapes it,
+	// and a newline costs two bytes rather than one — 16 KiB of `ls -1` output
+	// serialises to about 32 KiB, sails past the relay's limit, and comes back
+	// 413. The result of that is the worst outcome this feature has: the
+	// command RAN, and the operator is told nothing about what it did. So the
+	// output is trimmed until the document fits, and the trim is marked.
+	body := dump(r)
+	for len(body) > consoleMaxBody && len(r.Out) > 0 {
+		// Halve, then step back to a rune boundary — cutting mid-sequence
+		// would put a replacement glyph in somebody's terminal.
+		cut := len(r.Out) / 2
+		for cut > 0 && !utf8.RuneStart(r.Out[cut]) {
+			cut--
+		}
+		r.Out = r.Out[:cut]
+		r.Truncated = true
+		body = dump(r)
+	}
+
+	req, err := http.NewRequest("POST", resultURL, bytes.NewReader(body))
 	if err != nil {
 		return
 	}
@@ -296,11 +371,19 @@ func consoleReport(client *http.Client, resultURL, id string, tok *tokenBox, r c
 	req.Header.Set("User-Agent", "subnsub-monitor")
 	resp, err := client.Do(req)
 	if err != nil {
-		warnf("console: could not report a result")
+		warnf("console: could not report the result of a command that ran")
 		return
 	}
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	resp.Body.Close()
+	// Said out loud rather than swallowed. A non-2xx here means a command ran
+	// on this machine and its output reached nobody — the one failure in this
+	// whole path that leaves the operator with a wrong picture rather than no
+	// picture, so it belongs in the machine's own log even though there is
+	// nothing useful to retry.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		warnf("console: the relay refused a result (%d); the command still ran", resp.StatusCode)
+	}
 }
 
 // A writer that stops at a cap and remembers that it did.
@@ -366,6 +449,21 @@ func runConsoleCommand(id, line string) consoleResult {
 	res.Out = out.buf.String()
 	res.Truncated = out.over
 
+	// Take the process group down UNCONDITIONALLY, including after a command
+	// that succeeded. The deadline only fires while the foreground shell is
+	// still running, and `sleep 999 &` makes the shell exit immediately — so
+	// without this line the timeout bounds the command and not the tree it
+	// leaves behind, and a console session could accumulate stray processes on
+	// a machine nobody is watching.
+	//
+	// This does mean a deliberately backgrounded process does not survive its
+	// command. That is the honest reading of what this console is: each
+	// command is its own shell and nothing carries over, so a daemon started
+	// here would have outlived the only thing that knew about it. Anyone who
+	// wants a process to persist has systemd, tmux, and every other tool
+	// designed for it — none of which need this one to leak.
+	consoleKill(cmd)
+
 	switch {
 	case ctx.Err() == context.DeadlineExceeded:
 		res.Error = "timeout"
@@ -373,9 +471,18 @@ func runConsoleCommand(id, line string) consoleResult {
 	case err == nil:
 		res.Code = 0
 	default:
-		if ee, ok := err.(*exec.ExitError); ok {
+		var ee *exec.ExitError
+		switch {
+		case errors.As(err, &ee):
 			res.Code = ee.ExitCode()
-		} else {
+		case cmd.ProcessState != nil:
+			// WaitDelay elapsed: the command itself finished and its status is
+			// real, we simply stopped waiting for output pipes something it
+			// spawned was still holding open. Reporting this as "spawn" — the
+			// could-not-start case — would have been exactly backwards.
+			res.Code = cmd.ProcessState.ExitCode()
+			res.Error = "detached"
+		default:
 			// Could not start it at all — no /bin/sh, no fork, no permission.
 			// Distinct from "it ran and failed", which has an exit code.
 			res.Error = "spawn"
