@@ -180,6 +180,11 @@ login — a systemd **user** unit on Linux, a LaunchAgent on macOS. No sudo,
 nothing written outside your home directory. `sh install.sh --uninstall`
 removes both.
 
+Then open **[tools.subnsub.com/#monitor](https://tools.subnsub.com/#monitor)**
+and sign in with the account the token came from. The machine appears within
+about half a minute of the first push. Paste the same token on as many machines
+as you like — each one gets its own card.
+
 The installer carries the expected SHA-256 of every published binary **inline**.
 That is the whole reason it is worth reading before piping into a shell: a
 checksum fetched at install time from the same host as the binary
