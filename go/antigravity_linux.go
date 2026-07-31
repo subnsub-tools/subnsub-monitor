@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 func agCandidates() []agCandidate {
@@ -48,11 +49,18 @@ func agCandidates() []agCandidate {
 		if !agIsServer(argv) {
 			continue
 		}
-		ports := agListeningPorts(pid)
-		if len(ports) == 0 {
+		// It has to be OUR process. On an ordinary install /proc/<pid>/fd is
+		// unreadable for anyone else's and this is belt-and-braces — but "the
+		// permissions will stop it" is not a check, and shared accounts and
+		// root-run servers are exactly where it would not.
+		if !agSameUser(e.Name()) {
+			continue
+		}
+		eps := agListening(pid)
+		if len(eps) == 0 {
 			continue // running but not (yet) listening
 		}
-		out = append(out, agCandidate{pid: pid, csrf: agCsrf(argv), ports: ports})
+		out = append(out, agCandidate{pid: pid, csrf: agCsrf(argv), eps: eps})
 		if len(out) >= 4 {
 			break // more than this is not a fleet of IDEs, it is a loop
 		}
@@ -60,23 +68,41 @@ func agCandidates() []agCandidate {
 	return out
 }
 
-// Every TCP port this pid is listening on.
-func agListeningPorts(pid int) []int {
+// Does this /proc entry belong to the user this helper runs as?
+func agSameUser(pid string) bool {
+	st, err := os.Stat("/proc/" + pid)
+	if err != nil {
+		return false
+	}
+	sys, ok := st.Sys().(*syscall.Stat_t)
+	return ok && int(sys.Uid) == os.Geteuid()
+}
+
+// Every TCP endpoint this pid is listening on, address family included.
+//
+// Keyed on host AND port rather than port alone: the same number on ::1 and on
+// 127.0.0.1 are two different places to knock, and collapsing them threw away
+// the one that answered on an IPv6-only install.
+func agListening(pid int) []agEndpoint {
 	inodes := agSocketInodes(pid)
 	if len(inodes) == 0 {
 		return nil
 	}
-	var ports []int
-	seen := map[int]bool{}
-	for _, f := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
-		for _, p := range agListenPortsFor(f, inodes) {
-			if !seen[p] {
-				seen[p] = true
-				ports = append(ports, p)
+	var eps []agEndpoint
+	seen := map[string]bool{}
+	for _, f := range []struct {
+		path string
+		host string
+	}{{"/proc/net/tcp", "127.0.0.1"}, {"/proc/net/tcp6", "::1"}} {
+		for _, p := range agListenPortsFor(f.path, inodes) {
+			key := f.host + "/" + strconv.Itoa(p)
+			if !seen[key] {
+				seen[key] = true
+				eps = append(eps, agEndpoint{host: f.host, port: p})
 			}
 		}
 	}
-	return ports
+	return eps
 }
 
 func agSocketInodes(pid int) map[string]bool {
