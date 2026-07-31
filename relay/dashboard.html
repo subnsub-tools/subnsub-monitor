@@ -307,7 +307,10 @@ const fmt = {
      1024 above, and on purpose: each rendering is compared against a
      different reference tool. */
   rate(n) {
-    if (!(n >= 0) || !isFinite(n)) return '';
+    /* Strict type check first: `null >= 0` is true under coercion, and the
+       hosted panel renders an unknown rate as a dash — this one must not
+       render it as a confident zero. */
+    if (typeof n !== 'number' || !isFinite(n) || n < 0) return '—';
     const u = ['B/s', 'kB/s', 'MB/s', 'GB/s'];
     let i = 0;
     while (n >= 1000 && i < u.length - 1) { n /= 1000; i++; }
@@ -598,9 +601,11 @@ function patchCard(m) {
       ui.chips.append(el('span', 'chip num',
         'load ' + sys.load1.toFixed(2) + ' ' + (sys.load5 ?? 0).toFixed(2) + ' ' + (sys.load15 ?? 0).toFixed(2)));
     }
-    if (sys.net_rx_bps != null) {
+    if (typeof sys.net_rx_bps === 'number' || typeof sys.net_tx_bps === 'number') {
+      /* Each side stands alone: the cleaners allow rx without tx, and a
+         missing side reads as a dash, never as zero traffic. */
       ui.chips.append(el('span', 'chip num',
-        '↓ ' + fmt.rate(sys.net_rx_bps) + '  ↑ ' + fmt.rate(sys.net_tx_bps ?? 0)));
+        '↓ ' + fmt.rate(sys.net_rx_bps) + '  ↑ ' + fmt.rate(sys.net_tx_bps)));
     }
     if (sys.procs != null) ui.chips.append(el('span', 'chip num', Math.round(sys.procs) + ' procs'));
     if (sys.temp_c != null) ui.chips.append(el('span', 'chip num', Math.round(sys.temp_c) + '°C'));

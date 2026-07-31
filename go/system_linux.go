@@ -7,6 +7,7 @@ package main
 // and the kernel release alone answers the question this field is for).
 
 import (
+	"os"
 	"strconv"
 	"strings"
 	"syscall"
@@ -207,31 +208,44 @@ func linuxNet(s *System) {
 	s.NetRxBps, s.NetTxBps = rxBps, txBps
 }
 
-// Fourth field of /proc/loadavg is "runnable/total"; total is the process
-// count, already maintained by the kernel — no walk of /proc, which would be
-// both the slow way and the way that reads other people's cmdlines.
+// PROCESSES, counted as the numeric directories under /proc. An earlier
+// version read /proc/loadavg's "runnable/total" — cheaper, but total there is
+// scheduling ENTITIES, i.e. threads, and one busy JVM inflates it by
+// thousands. The card says "procs", so it counts processes: names only, no
+// entry is opened, and directory names carry none of the identity this file
+// refuses (see the header — cmdlines are exactly what this walk does NOT
+// read).
 func linuxProcs(s *System) {
-	raw, ok := readSmall("/proc/loadavg")
-	if !ok {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
 		s.miss(mProcs)
 		return
 	}
-	f := strings.Fields(raw)
-	if len(f) < 4 {
+	n := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if name == "" || name[0] < '1' || name[0] > '9' {
+			continue // PIDs never start with 0
+		}
+		digits := true
+		for i := 1; i < len(name); i++ {
+			if name[i] < '0' || name[i] > '9' {
+				digits = false
+				break
+			}
+		}
+		if digits {
+			n++
+		}
+	}
+	if n == 0 {
 		s.miss(mProcs)
 		return
 	}
-	_, totalStr, found := strings.Cut(f[3], "/")
-	if !found {
-		s.miss(mProcs)
-		return
-	}
-	n, err := strconv.ParseFloat(totalStr, 64)
-	if err != nil || n <= 0 || !finite(n) {
-		s.miss(mProcs)
-		return
-	}
-	s.Procs = fp(n)
+	s.Procs = fp(float64(n))
 }
 
 // Hottest thermal zone. Millidegrees in, °C out; a zone that reads absurd

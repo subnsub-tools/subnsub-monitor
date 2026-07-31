@@ -143,14 +143,14 @@ type system struct {
 // off — float64 is what every consumer here wants — and every field optional,
 // because the whole point is to decide what survives.
 type rawReading struct {
-	CapturedAt    *float64         `json:"captured_at"`
+	CapturedAt    *float64          `json:"captured_at"`
 	Providers     []json.RawMessage `json:"providers"`
-	AgentID       *string          `json:"agent_id"`
-	AgentName     *string          `json:"agent_name"`
-	HelperVersion *string          `json:"helper_version"`
-	Exec          *bool            `json:"exec"`
-	Upd           *bool            `json:"upd"`
-	System        json.RawMessage  `json:"system"`
+	AgentID       *string           `json:"agent_id"`
+	AgentName     *string           `json:"agent_name"`
+	HelperVersion *string           `json:"helper_version"`
+	Exec          *bool             `json:"exec"`
+	Upd           *bool             `json:"upd"`
+	System        json.RawMessage   `json:"system"`
 }
 
 // Strip what must never reach a page: control characters, and the invisible
@@ -195,6 +195,24 @@ func clampPct(v float64, ceiling float64) float64 {
 		return ceiling
 	}
 	return v
+}
+
+// A finite float64 out of a raw JSON value, or nil for anything else — a
+// string, a bool, an absent key, a number too large for float64. Field-local
+// tolerance for the fields that need it; see the rawReading note.
+func looseNum(raw json.RawMessage) *float64 {
+	if len(raw) == 0 {
+		return nil
+	}
+	var v any
+	if json.Unmarshal(raw, &v) != nil {
+		return nil
+	}
+	f, ok := v.(float64)
+	if !ok {
+		return nil
+	}
+	return &f
 }
 
 func cleanNonNeg(v *float64, ceiling float64) *float64 {
@@ -284,20 +302,20 @@ func cleanReading(body []byte) (string, *reading, bool) {
 
 func cleanProvider(body json.RawMessage) *provider {
 	var raw struct {
-		ID            *string          `json:"id"`
-		Name          *string          `json:"name"`
-		Source        *string          `json:"source"`
-		OK            *bool            `json:"ok"`
-		Error         *string          `json:"error"`
-		Detail        *string          `json:"detail"`
-		RecordedAt    *float64         `json:"recorded_at"`
-		PlanType      *string          `json:"plan_type"`
-		RateLimitTier *string          `json:"rate_limit_tier"`
+		ID            *string           `json:"id"`
+		Name          *string           `json:"name"`
+		Source        *string           `json:"source"`
+		OK            *bool             `json:"ok"`
+		Error         *string           `json:"error"`
+		Detail        *string           `json:"detail"`
+		RecordedAt    *float64          `json:"recorded_at"`
+		PlanType      *string           `json:"plan_type"`
+		RateLimitTier *string           `json:"rate_limit_tier"`
 		Limits        []json.RawMessage `json:"limits"`
-		Credits       json.RawMessage  `json:"credits"`
-		SourceFile    *string          `json:"source_file"`
-		Truncated     *bool            `json:"truncated"`
-		Capped        *bool            `json:"capped"`
+		Credits       json.RawMessage   `json:"credits"`
+		SourceFile    *string           `json:"source_file"`
+		Truncated     *bool             `json:"truncated"`
+		Capped        *bool             `json:"capped"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil || raw.ID == nil {
 		return nil
@@ -452,11 +470,18 @@ func cleanSystem(body json.RawMessage) *system {
 		DiskUsed  *float64 `json:"disk_used"`
 		DiskPct   *float64 `json:"disk_used_percent"`
 		UptimeSec *float64 `json:"uptime_sec"`
-		NetRxBps  *float64 `json:"net_rx_bps"`
-		NetTxBps  *float64 `json:"net_tx_bps"`
-		Procs     *float64 `json:"procs"`
-		TempC     *float64 `json:"temp_c"`
-		Missing   []string `json:"missing"`
+		// RawMessage, not *float64, and the difference is a compatibility
+		// promise: these keys were UNKNOWN to every deployed relay until
+		// 2026-08, so any third-party agent already pushing them — as a
+		// string, say — had them ignored. Typed decoding would turn that
+		// same push into an Unmarshal error and throw away the WHOLE system
+		// block; per-field decoding keeps rejection field-local, which is
+		// also what the hosted relay's cleaner does.
+		NetRxBps json.RawMessage `json:"net_rx_bps"`
+		NetTxBps json.RawMessage `json:"net_tx_bps"`
+		Procs    json.RawMessage `json:"procs"`
+		TempC    json.RawMessage `json:"temp_c"`
+		Missing  []string        `json:"missing"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil
@@ -490,17 +515,17 @@ func cleanSystem(body json.RawMessage) *system {
 	s.UptimeSec = cleanNonNeg(raw.UptimeSec, 3.2e9)
 	// Rates in bytes/second: a petabyte a second is already past any link, and
 	// the tighter ceiling catches a cumulative counter pushed as a rate.
-	s.NetRxBps = cleanNonNeg(raw.NetRxBps, 1e15)
-	s.NetTxBps = cleanNonNeg(raw.NetTxBps, 1e15)
-	if raw.Procs != nil && *raw.Procs >= 1 && *raw.Procs <= 1e7 {
-		v := float64(int64(*raw.Procs))
-		s.Procs = &v
+	s.NetRxBps = cleanNonNeg(looseNum(raw.NetRxBps), 1e15)
+	s.NetTxBps = cleanNonNeg(looseNum(raw.NetTxBps), 1e15)
+	if v := looseNum(raw.Procs); v != nil && *v >= 1 && *v <= 1e7 {
+		n := float64(int64(*v))
+		s.Procs = &n
 	}
 	// Celsius; wider than the helper's own 0–150 band on purpose, for
 	// third-party agents that are honest but colder.
-	if raw.TempC != nil && *raw.TempC >= -100 && *raw.TempC <= 300 {
-		v := *raw.TempC
-		s.TempC = &v
+	if v := looseNum(raw.TempC); v != nil && *v >= -100 && *v <= 300 {
+		n := *v
+		s.TempC = &n
 	}
 	seen := map[string]bool{}
 	for _, m := range raw.Missing {

@@ -231,4 +231,19 @@ func TestNewHealthFieldsSurviveWithBounds(t *testing.T) {
 	if r.System.NetRxBps != nil || r.System.Procs != nil || r.System.TempC != nil {
 		t.Fatalf("out-of-bounds values survived: %+v", r.System)
 	}
+
+	// Wrong TYPE in a new field must cost that field, not the block. These
+	// keys were unknown — and therefore ignored — on every relay before they
+	// existed, so an agent already pushing `temp_c` as a string used to get
+	// its cpu reading through; typed decoding would have turned that into a
+	// silent full-block regression (review finding, 2026-08-01).
+	body = `{"providers":[{"id":"codex","ok":true,"limits":[{"used_percent":1}]}],
+	  "system":{"platform":"linux","cpu_percent":40,"temp_c":"52","procs":true,"net_rx_bps":"fast"}}`
+	_, r, _ = cleanReading([]byte(body))
+	if r.System == nil || r.System.CPUPct == nil {
+		t.Fatalf("a malformed new field must not sink the system block: %+v", r.System)
+	}
+	if r.System.TempC != nil || r.System.Procs != nil || r.System.NetRxBps != nil {
+		t.Fatalf("malformed new fields survived: %+v", r.System)
+	}
 }

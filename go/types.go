@@ -15,7 +15,10 @@
 // anyway. Anything a consumer actually reads matches.
 package main
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 // A quota window. Providers name their windows differently (Codex says
 // primary/secondary, Claude says session/weekly/weekly_scoped) so Key is
@@ -120,14 +123,13 @@ func sp(s string) *string {
 func fp(f float64) *float64 { return &f }
 func bp(b bool) *bool       { return &b }
 
-// Every provider this build ships, cheapest first so the expensive ones
-// cannot delay the free one. Codex is a local file — no credential, no
-// network. Antigravity is a request to a server already running on this
-// machine, so no credential and nothing off the box. Amp is a subprocess that
-// talks to Amp on our behalf, so we hold no key. The rest are the credential
-// rung: each reads the credential its own CLI left on disk and calls that
-// vendor and nobody else. Claude was the first; provhttp.go carries the rules
-// they all inherit.
+// Every provider this build ships, in display order. Codex is a local file —
+// no credential, no network. Antigravity is a request to a server already
+// running on this machine, so no credential and nothing off the box. Amp is a
+// subprocess that talks to Amp on our behalf, so we hold no key. The rest are
+// the credential rung: each reads the credential its own CLI left on disk and
+// calls that vendor and nobody else. Claude was the first; provhttp.go
+// carries the rules they all inherit.
 //
 // Ids match CodexBar's registry on purpose — the site's coverage endpoint
 // diffs the two lists by these exact strings, and a test holds this table and
@@ -152,9 +154,23 @@ var collectors = []struct {
 func collectAll() Snapshot {
 	snap := Snapshot{CapturedAt: now(), AgentID: agentID(), AgentLabel: agentLabel(),
 		HelperVersion: helperVersion, Console: consoleEnabled(), Update: updateAllowed()}
-	for _, c := range collectors {
-		snap.Providers = append(snap.Providers, safeCollect(c.id, c.fn))
+	// Concurrently, holding the registry's order for the output. Serial was
+	// fine at four collectors; at eight, five of them making real requests
+	// with ten-second deadlines, a bad network day could stack past the
+	// relay's 90-second offline threshold — a machine marked dead for being
+	// thorough. Each collector still serialises against ITSELF (every one has
+	// a mutex over its cache), so two pushes racing costs nothing extra.
+	results := make([]Provider, len(collectors))
+	var wg sync.WaitGroup
+	for i, c := range collectors {
+		wg.Add(1)
+		go func(i int, id string, fn func() Provider) {
+			defer wg.Done()
+			results[i] = safeCollect(id, fn)
+		}(i, c.id, c.fn)
 	}
+	wg.Wait()
+	snap.Providers = results
 	// Machine health rides along with the quota. Deliberately NOT part of
 	// snap.OK: a box with no AI tooling installed still reports its own health,
 	// but "ok" has always meant "at least one provider answered", and widening
