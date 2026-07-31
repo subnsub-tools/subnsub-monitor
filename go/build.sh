@@ -1,7 +1,7 @@
 #!/bin/sh
 # Cross-compile subnsub-monitor for every target install.sh knows how to fetch.
 #
-#   sh build.sh [OUTDIR]               (default: ./dist)
+#   sh helper/go/build.sh [OUTDIR]     (default: helper/go/dist)
 #
 # Binaries are not committed — this is what regenerates them.
 #
@@ -28,13 +28,34 @@ go="${GO:-go}"
 command -v "$go" >/dev/null 2>&1 || go="$HOME/.local/go/bin/go"
 command -v "$go" >/dev/null 2>&1 || { echo "no go toolchain found" >&2; exit 1; }
 
-for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+# Every target install.sh and install.ps1 know how to fetch.
+#
+# The NAMES matter as much as the list: a helper asked to update itself builds
+# the asset name from its own runtime.GOOS and runtime.GOARCH, so
+# `subnsub-monitor-<goos>-<goarch>` is not a convention here, it is the protocol.
+# Windows carries .exe on top of that, because Windows will not execute a file
+# without an extension it recognises and neither will Go's own exec resolution.
+#
+# linux/arm is built for ARMv7 explicitly. Left to the default the toolchain
+# targets ARMv6, which runs on a Pi 1 and gives up the atomics and the barrier
+# instructions every later board has. Naming the version is also the only way to
+# be sure two people building this source get the same bytes.
+for target in linux/amd64 linux/arm64 linux/arm \
+              darwin/amd64 darwin/arm64 \
+              windows/amd64 windows/arm64 \
+              freebsd/amd64 freebsd/arm64; do
     os=${target%/*}
     arch=${target#*/}
-    bin="$out/subnsub-monitor-$os-$arch"
+    ext=""
+    [ "$os" = windows ] && ext=".exe"
+    bin="$out/subnsub-monitor-$os-$arch$ext"
+    goarm=""
+    [ "$arch" = arm ] && goarm=7
     # CGO off so the Linux builds are genuinely static — a helper that needs a
-    # matching glibc is a helper that fails on someone's older VPS.
-    CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+    # matching glibc is a helper that fails on someone's older VPS. It is also
+    # what keeps the Windows build free of a toolchain nobody cross-compiling
+    # from Linux has.
+    CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" GOARM="$goarm" \
       "$go" build -trimpath -buildvcs=false -ldflags="-s -w" -o "$bin" .
     printf '%-24s %6s KiB\n' "$target" "$(( $(wc -c < "$bin") / 1024 ))"
 done

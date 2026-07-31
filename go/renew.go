@@ -52,6 +52,7 @@ const (
 	officialRelay = "https://monitor.subnsub.com"
 	defaultSite   = "https://tools.subnsub.com"
 	siteEnv       = "SUBNSUB_MONITOR_SITE"
+	tokenEnv      = "SUBNSUB_MONITOR_TOKEN"
 	renewPath     = "/api/monitor-token/renew"
 
 	// Start trying with a week left. The server refuses renewals until a token
@@ -181,7 +182,7 @@ func sameHost(a, b string) bool {
 // present anywhere, and sending it to our site because their relay answered 403
 // would be handing a third party's bearer secret to a server they never chose.
 func renewalSite(relay string) (string, bool) {
-	if v := strings.TrimSpace(os.Getenv(siteEnv)); v != "" {
+	if v := siteOverride(); v != "" {
 		if strings.HasPrefix(v, "https://") {
 			return strings.TrimRight(v, "/"), true
 		}
@@ -197,13 +198,87 @@ func renewalSite(relay string) (string, bool) {
 	return "", false
 }
 
+// The site the operator named, wherever they were able to name it.
+//
+// Kept separate from renewalSite so the two decisions stay legible: this one is
+// "did anyone say", that one is "may we renew at all". A custom relay that only
+// worked on the platforms whose service manager carries an environment would be
+// an install that looked fine and stopped reporting a month later, when the
+// token it could not renew expired.
+func siteOverride() string {
+	if v := strings.TrimSpace(os.Getenv(siteEnv)); v != "" {
+		return v
+	}
+	return strings.TrimSpace(installedEnv()[siteEnv])
+}
+
+// ── the token the installer wrote ──────────────────────────────────────────
+//
+// A last resort, consulted only when neither the environment nor the command
+// line named one — which is exactly the state a Windows install is in, and the
+// reason this exists.
+//
+// The other two platforms get the token from their service manager: systemd
+// reads this same file as an EnvironmentFile, launchd carries it inside the
+// plist. Task Scheduler has no equivalent. It runs a program with arguments and
+// nothing else, so the only two places a token could go there are the command
+// line — visible to every other process on the machine, which is the thing the
+// installer's comment about `ps` is about — or the user's persistent
+// environment, which would hand it to every program that user ever starts.
+// Neither is acceptable for a bearer secret, so the helper reads the file
+// itself and the task carries no secret at all.
+//
+// Parsed as KEY=VALUE lines because that is the format systemd requires of it.
+// Nothing is executed and nothing is exported: two names are recognised and
+// every other line is skipped.
+const (
+	tokenEnvFile = "token"
+	// The installer writes about a hundred bytes. Anything remotely near this
+	// is not the file it wrote.
+	maxTokenFile = 8 << 10
+)
+
+func installedEnv() map[string]string {
+	dir := configDir()
+	if dir == "" {
+		return nil
+	}
+	f, err := os.Open(filepath.Join(dir, tokenEnvFile))
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	buf := make([]byte, maxTokenFile)
+	n, err := f.Read(buf)
+	if n <= 0 || (err != nil && n == 0) {
+		return nil
+	}
+	out := map[string]string{}
+	// A byte-order mark, if a text editor put one there. Notepad adds one to
+	// every UTF-8 file it saves, and the installer that writes this file is a
+	// PowerShell script — whose own default encoding added one until PowerShell
+	// 6. Left in place it prefixes the first key, the name no longer matches,
+	// and the machine installs perfectly and never appears on the board.
+	body := strings.TrimPrefix(string(buf[:n]), "\ufeff")
+	for _, line := range strings.Split(body, "\n") {
+		k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok {
+			continue
+		}
+		switch k {
+		case tokenEnv, siteEnv:
+			out[k] = strings.TrimSpace(v)
+		}
+	}
+	return out
+}
+
 // ── where a renewed token lives ────────────────────────────────────────────
 //
-// NOT the file the installer wrote. That one is a systemd EnvironmentFile on
-// Linux and is not read at all on macOS, where the token is inlined in the
-// plist — so writing a renewal there would take effect on one platform, after a
-// restart, and never on the other. A file the HELPER reads works the same
-// everywhere and leaves the installer's formats alone.
+// NOT the file above. That one is written once by the installer and is a
+// systemd EnvironmentFile besides — writing a renewal into it would take effect
+// on one platform, after a restart, and never on the others. A file the HELPER
+// owns works the same everywhere and leaves the installer's formats alone.
 //
 // It records the RELAY the token belongs to. There is one such file per
 // install, and `connect` takes an arbitrary URL, so without that field a

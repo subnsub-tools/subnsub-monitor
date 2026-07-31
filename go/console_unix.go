@@ -2,7 +2,7 @@
 
 package main
 
-// Killing a console command means killing what it started, not just the shell.
+// Running a console command, and killing what it started.
 //
 // `sh -c 'sleep 999'` replaces nothing: the shell forks, and signalling only
 // the shell leaves the child running with the output pipe still open. Putting
@@ -14,13 +14,27 @@ package main
 // the package still has to compile for the ones this helper is never built for.
 
 import (
+	"context"
 	"os/exec"
 	"syscall"
 )
 
-func consoleProcAttr() *syscall.SysProcAttr {
-	return &syscall.SysProcAttr{Setpgid: true}
+// One command, ready to start. `/bin/sh -c LINE` — an absolute path rather
+// than a PATH lookup, because what runs here is decided by this file and not by
+// the environment the service manager happened to hand us.
+func consoleCommand(ctx context.Context, line string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", line)
+	// Own process group, so the deadline can take the whole tree down rather
+	// than the shell only.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	return cmd
 }
+
+// Nothing to do once it is running: Setpgid took effect at fork, and a process
+// group outlives the process that led it — which is what lets consoleKill work
+// even after the shell itself has been reaped. Windows has no such thing and
+// has to do its arranging here instead.
+func consoleAdopt(_ *exec.Cmd) {}
 
 // Negative pid = the process group. SIGKILL rather than SIGTERM: this fires
 // only after the command already had its full timeout, so it is the deadline

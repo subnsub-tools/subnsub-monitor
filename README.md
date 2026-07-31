@@ -47,7 +47,7 @@ server it already runs will answer the question over `127.0.0.1`. That is the
 cheapest live reading of the four — nothing is launched, no credential is
 opened, and the request cannot leave the machine. The agent finds the server
 the way any process finds another one it owns (on Linux by reading `/proc`, so
-no `lsof` and no subprocess at all; elsewhere with `ps` and `lsof`), reads the
+no `lsof` and no subprocess at all; on macOS with `ps` and `lsof`), reads the
 `--csrf_token` the server was started with, and asks it
 `RetrieveUserQuotaSummary`. The reply carries the two groups Antigravity's own
 Model Quota UI shows — Gemini models and Claude/GPT models — each with a weekly
@@ -60,6 +60,19 @@ literal loopback IP the connection cannot escape. The Google OAuth path — the
 one that would read a credential and call `cloudcode-pa.googleapis.com` — is
 deliberately **not** implemented, for the same reason the Amp bearer path is
 not.
+
+**Antigravity is not discovered on Windows**, and that is a refusal rather than
+a gap left open. Finding the server is easy there — one call maps a listening
+port to a pid — but the `--csrf_token` lives in another process's *command
+line*, and reading one on Windows means either WMI (COM, or a PowerShell
+subprocess costing a second or two inside a 30-second loop) or
+`NtQueryInformationProcess` plus `ReadProcessMemory` to walk the target's PEB.
+The first is too expensive for the loop it would run in. The second would put
+"reads other processes' memory" into an agent whose whole claim is that it
+reads files and makes one outbound request — and it would be there for every
+user, whether or not they have ever opened Antigravity. Codex, Amp and Claude
+Code all work on Windows: their quota is in a file or behind a CLI, and neither
+needs anybody's process table.
 
 Amp writes no balance to disk either, but it ships a CLI that will answer the
 question itself, so this program runs `amp usage` and parses four lines of text.
@@ -135,18 +148,18 @@ also tells anyone who reads it which cloud to aim at and which CVEs to try.
 
 Coverage is honest rather than uniform:
 
-| | Linux | macOS |
-|---|---|---|
-| CPU % | yes (differential, `/proc/stat`) | — |
-| Memory | yes (`MemAvailable`) | — |
-| Swap | yes | — |
-| Disk (root fs) | yes | yes |
-| Load average | yes | — |
-| Uptime | yes | — |
-| Cores / arch / kernel | yes | yes |
+| | Linux | Windows | macOS | FreeBSD |
+|---|---|---|---|---|
+| CPU % | yes (differential, `/proc/stat`) | yes (`GetSystemTimes`) | — | — |
+| Memory | yes (`MemAvailable`) | yes (`GlobalMemoryStatusEx`) | — | — |
+| Swap | yes | **cannot** | — | — |
+| Disk (root fs) | yes | yes (system volume) | yes | — |
+| Load average | yes | **does not exist** | — | — |
+| Uptime | yes | yes (`GetTickCount64`) | — | — |
+| Cores / arch / kernel | yes | yes | yes | yes |
 
-macOS reports far less, and the reason is structural rather than lazy. Without
-cgo the Go standard library offers exactly two ways to read a sysctl:
+**macOS** reports far less, and the reason is structural rather than lazy.
+Without cgo the Go standard library offers exactly two ways to read a sysctl:
 `syscall.Sysctl`, which returns a string cut at the first NUL byte, and
 `syscall.SysctlUint32`, which refuses anything that is not exactly four bytes
 wide. Between them that rules out `hw.memsize` (64-bit, leading zero bytes),
@@ -157,14 +170,48 @@ answer these are out of reach too.
 There is a byte-layout trick that would usually recover the boot time. It is
 deliberately **not** taken: it depends on a layout the author cannot test on
 real hardware, and a silently wrong boot time reads as a machine that just
-crashed. Anything a platform cannot measure is named in a `missing` list so the
-display can say so, rather than rendering a zero that looks like an idle
-machine.
+crashed.
+
+**FreeBSD** is the same story with the same cause, plus one more: the read that
+*would* work — `statfs` for the root filesystem — is written against the Linux
+and Darwin field names, and the BSDs spell them `F_bsize` and `F_blocks`. A
+version of it typed against a header nobody here can run is exactly the kind of
+guess the rest of this list refuses.
+
+**Windows** has two entries that are not "not yet" but "no":
+
+- **Load average does not exist on Windows.** It is a Unix idea — a decaying
+  average of the run queue — and the NT kernel has never kept one. "Processor
+  Queue Length" is an instantaneous depth with different units, and putting it
+  in a field labelled `load1` would put a number that means something else
+  under a heading people read at a glance.
+- **Swap has no honest reading.** `GlobalMemoryStatusEx` reports the *commit
+  limit* and the commit charge, which is not the page file. The limit is
+  roughly RAM plus the page file, so the usual move is to subtract — and it is
+  a trick: non-paged pools and a page file Windows is free to grow both move
+  it. A machine that reads 60% swapped when nothing has been paged out is worse
+  than one that says it does not know.
+
+The kernel version on Windows is `10.0` on both Windows 10 and Windows 11,
+which is the true NT version and is deliberately as coarse as the Linux one.
+The build number — the part that would tell you 23H2 from 24H2 — is also the
+part that tells anyone reading it which patch level to try things against.
+
+Anything a platform cannot measure is named in a `missing` list so the display
+can say so, rather than rendering a zero that looks like an idle machine.
 
 ## Install
 
+**Linux, macOS, FreeBSD**
+
 ```sh
 curl -fsSL https://tools.subnsub.com/monitor/install.sh | sh -s -- <TOKEN>
+```
+
+**Windows** (PowerShell — not the older Command Prompt)
+
+```powershell
+& ([scriptblock]::Create((irm https://tools.subnsub.com/monitor/install.ps1))) -Token <TOKEN>
 ```
 
 …and if you would rather look first, which is the reasonable instinct for
@@ -175,10 +222,37 @@ curl -fsSL https://tools.subnsub.com/monitor/install.sh -o install.sh
 less install.sh && sh install.sh <TOKEN>
 ```
 
-It installs one static binary to `~/.local/bin` and registers it to run at
-login — a systemd **user** unit on Linux, a LaunchAgent on macOS. No sudo,
-nothing written outside your home directory. `sh install.sh --uninstall`
-removes both.
+```powershell
+irm https://tools.subnsub.com/monitor/install.ps1 -OutFile install.ps1
+notepad install.ps1 ; .\install.ps1 -Token <TOKEN>
+```
+
+It installs one binary to `~/.local/bin` and registers it to run at login — a
+systemd **user** unit on Linux, a LaunchAgent on macOS, a **scheduled task** on
+Windows. No sudo, no administrator rights, nothing written outside your home
+directory. `sh install.sh --uninstall` (or `.\install.ps1 -Uninstall`) removes
+both.
+
+**Why a scheduled task and not a Windows service.** A service has to answer the
+service control manager, which means either a second executable or a Go
+dependency this project does not carry — and registering one needs
+administrator rights nothing else about this install needs. The costs are named
+rather than hidden: a task starts at logon rather than at boot unless it can be
+registered to run whether or not you are signed in, which needs a privilege a
+standard user usually lacks. The installer tries for that, falls back, and
+prints which one your machine got.
+
+A task also carries no environment, so on Windows the agent reads the token out
+of the file the installer wrote. The two alternatives there were the task's
+command line and the user's persistent environment, and both are readable by
+every other program that user runs.
+
+**FreeBSD registers nothing**, and says so. There is no per-user service
+manager: the two ways to start something at boot are an `rc.d` script, which
+needs root, and your crontab, which is outside this installer's promise to
+write nothing outside your home directory. Quietly doing neither would be the
+worst of the three, so the binary and the token are installed and the installer
+prints the `daemon(8)` line and a ready-to-paste `rc.d` script.
 
 Then open **[tools.subnsub.com/#monitor](https://tools.subnsub.com/#monitor)**
 and sign in with the account the token came from. The machine appears within
@@ -199,7 +273,7 @@ the file you were invited to read.
 ## Build it yourself
 
 ```sh
-cd go && sh build.sh          # → dist/subnsub-monitor-{linux,darwin}-{amd64,arm64}
+cd go && sh build.sh          # → dist/subnsub-monitor-<goos>-<goarch>[.exe]
 go test ./...
 ```
 
@@ -304,7 +378,17 @@ agent runs as, in that user's home directory:
   backgrounded process does not outlive the only thing that knew about it;
 - **every command is written to this machine's log before it runs**, so the box
   keeps its own record of what was done to it that does not pass through
-  anyone else.
+  anyone else. That log is the systemd journal on Linux and the launchd log on
+  macOS; on Windows a scheduled task's output is discarded, so the agent writes
+  its own file beside the config rather than letting the promise hold on two
+  platforms out of three.
+
+The shell is the platform's own — `/bin/sh -c` on Unix, `cmd.exe /s /c` on
+Windows — and nothing translates between them. A Windows machine answers `dir`
+and not `ls`. The alternative is an agent that quietly rewrites what somebody
+typed, and there is no version of that which does not eventually run something
+other than what was asked for. On Windows the tree is bounded with a **job
+object** rather than a process group, which there is no such thing as.
 
 Turning it off takes effect on a running agent within about ten seconds, and it
 is re-checked between commands — so `console off` stops a batch already in
@@ -371,7 +455,15 @@ What happens when it runs, in order, and it stops at the first thing that fails:
    rename**. The backup is a link and not a move on purpose: renaming the old
    one out of the way first would leave the service path empty for an instant,
    and a power cut inside that instant leaves a machine whose `ExecStart` names
-   a file that is not there;
+   a file that is not there.
+
+   **Windows cannot do this**, and inverts the order instead. The loader keeps
+   the running image open, so the file may be renamed but not replaced in
+   place — the old binary is moved aside first and the new one moved in, which
+   leaves exactly the instant described above. It is one rename wide and there
+   is no way to close it on that platform. What *is* closed is the ordinary
+   failure: if the second rename fails for any reason short of the machine
+   stopping, the first is undone before the agent reports anything;
 6. **report the result, then exit.** This is the one command whose success kills
    the thing that would have reported it, so the report goes first — losing the
    message in exactly the case where the swap worked would be indistinguishable

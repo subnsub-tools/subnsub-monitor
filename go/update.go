@@ -273,11 +273,30 @@ func copyFile(src, dst string) error {
 	return nil
 }
 
-// Force this file's contents out to the device. fsync works on a read-only
-// descriptor, so there is no need to reopen for writing something already
-// closed.
+// The extension this platform needs on an executable.
+//
+// Windows will not run a file without one, and neither will Go's own exec
+// resolution — a staged binary named `.subnsub-monitor-1234` downloads,
+// verifies, and then cannot be probed, which would fail the update at the last
+// check before the swap for a reason that has nothing to do with the release.
+// The published asset carries the same suffix for the same reason: the file a
+// browser downloads has to be one Windows will let the user run.
+func exeSuffix() string {
+	if runtime.GOOS == "windows" {
+		return ".exe"
+	}
+	return ""
+}
+
+// Force this file's contents out to the device.
+//
+// Opened for WRITING although nothing is written: fsync on a read-only
+// descriptor is fine on Unix, and the Windows equivalent — FlushFileBuffers —
+// requires write access and fails with access denied without it. The file is
+// this process's own temporary one, so asking for the stronger mode costs
+// nothing anywhere.
 func syncFile(path string) error {
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
 	if err != nil {
 		return err
 	}
@@ -449,7 +468,7 @@ func updateFrom(id, self, base string) (consoleResult, bool) {
 		return done(0, "update-none")
 	}
 
-	asset := "subnsub-monitor-" + runtime.GOOS + "-" + runtime.GOARCH
+	asset := "subnsub-monitor-" + runtime.GOOS + "-" + runtime.GOARCH + exeSuffix()
 
 	manifest, err := fetchText(ctx, client, base+"/SHA256SUMS")
 	if err != nil {
@@ -468,7 +487,7 @@ func updateFrom(id, self, base string) (consoleResult, bool) {
 	// swap below is a rename and a rename does not cross filesystems. /tmp is
 	// its own mount often enough that using it would work everywhere it was
 	// tested and fail on somebody's server.
-	tmp, err := os.CreateTemp(filepath.Dir(self), ".subnsub-monitor-*")
+	tmp, err := os.CreateTemp(filepath.Dir(self), ".subnsub-monitor-*"+exeSuffix())
 	if err != nil {
 		say("cannot write next to %s: %v", self, err)
 		// The overwhelmingly likely cause on Linux, and worth naming rather
@@ -557,30 +576,6 @@ func updateFrom(id, self, base string) (consoleResult, bool) {
 	say("the new binary runs and reports %s", target)
 
 	// ── from here it is real ────────────────────────────────────────────────
-	// Keep the outgoing one under a name that is not on anyone's PATH. It costs
-	// a few megabytes and it is the difference between "restore the previous
-	// helper" being a move and being another download on a machine whose helper
-	// is the thing that just broke.
-	//
-	// A HARD LINK, not a move, and that is the whole difference between one
-	// step and two. Renaming self aside first leaves NOTHING at the service
-	// path until the second rename lands, and a kill or a power cut inside that
-	// window leaves a machine whose ExecStart does not exist — a helper that is
-	// not merely un-updated but gone, on a box nobody has a route to. Linking
-	// means self is never absent for an instant: the old inode simply gains a
-	// second name, and the single rename below swaps the directory entry
-	// atomically with no window at all.
-	prev := self + ".prev"
-	os.Remove(prev)
-	if err := os.Link(self, prev); err != nil {
-		// A filesystem without hard links, or one that allows writing here but
-		// not linking. A copy buys the same guarantee for the price of the
-		// bytes, and the guarantee is the part that matters.
-		if cerr := copyFile(self, prev); cerr != nil {
-			say("could not keep a copy of the running binary: %v", cerr)
-			return fail()
-		}
-	}
 	// The bytes, before the entry that will point at them.
 	//
 	// A rename is atomic with respect to other processes, not with respect to
@@ -592,11 +587,20 @@ func updateFrom(id, self, base string) (consoleResult, bool) {
 		say("could not flush the new binary to disk: %v", err)
 		return fail()
 	}
-	if err := os.Rename(tmpName, self); err != nil {
-		// Nothing was replaced: self still names the old inode, which is still
-		// running. The link is the only thing to undo.
-		os.Remove(prev)
-		say("could not install the new binary: %v — the previous one is still in place", err)
+	// The outgoing binary is kept under a name that is not on anyone's PATH. It
+	// costs a few megabytes and it is the difference between "restore the
+	// previous helper" being a move and being another download on a machine
+	// whose helper is the thing that just broke.
+	//
+	// HOW the swap is done is the one genuinely platform-shaped step in this
+	// file — a running program's file can be replaced in place on Unix and
+	// cannot on Windows — so it lives in update_unix.go and update_windows.go,
+	// where each can explain the guarantee it does and does not offer. Both
+	// promise the same thing on failure: nothing was replaced, and the helper
+	// the service starts is the one that is running now.
+	prev := self + ".prev"
+	if err := installOver(tmpName, self, prev); err != nil {
+		say("%v", err)
 		return fail()
 	}
 	// And the directory entry itself. Best effort: not every platform allows
@@ -604,7 +608,7 @@ func updateFrom(id, self, base string) (consoleResult, bool) {
 	// already happened.
 	syncDir(filepath.Dir(self))
 	say("installed %s over %s", target, helperVersion)
-	say("restarting; the service manager starts the new one within about half a minute")
+	say("restarting; the service manager starts the new one within about a minute")
 
 	res.Code = 0
 	res.Ms = time.Since(started).Milliseconds()

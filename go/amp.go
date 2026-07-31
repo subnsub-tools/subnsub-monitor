@@ -189,6 +189,17 @@ func ampBinary() string {
 			filepath.Join(home, ".amp", "bin", "amp"))
 	}
 	cands = append(cands, "/usr/local/bin/amp", "/opt/homebrew/bin/amp")
+	// Where npm puts a global CLI on Windows. Guarded on the variable being an
+	// ABSOLUTE path, not merely set: APPDATA is a Windows thing and empty
+	// everywhere else, and joining an empty root would turn these into
+	// `npm/amp.cmd` — a RELATIVE path, resolved against whatever directory the
+	// service happened to start in. That is the one shape a list of trusted
+	// binaries must never contain.
+	if appdata := os.Getenv("APPDATA"); filepath.IsAbs(appdata) {
+		cands = append(cands,
+			filepath.Join(appdata, "npm", "amp.cmd"),
+			filepath.Join(appdata, "npm", "amp.exe"))
+	}
 	for _, c := range cands {
 		if usableBinary(c) {
 			return c
@@ -197,24 +208,11 @@ func ampBinary() string {
 	return ""
 }
 
-// Stat follows symlinks on purpose — ~/.local/bin/amp is a symlink into
-// ~/.amp/bin on a normal install, and the thing whose permissions matter is
-// the file that actually runs.
-//
-// World-writable is refused; group-writable is not. The line is where it is
-// because a file anyone on the box may rewrite is never legitimate, while
-// group-writable is the ordinary state of a Homebrew prefix on a shared admin
-// account, and refusing those would break real installs to defend against an
-// attacker who, by construction, can already rewrite the user's own copy of
-// the same binary and take their Amp session with it.
-func usableBinary(path string) bool {
-	st, err := os.Stat(path)
-	if err != nil || !st.Mode().IsRegular() {
-		return false
-	}
-	perm := st.Mode().Perm()
-	return perm&0o111 != 0 && perm&0o002 == 0
-}
+// usableBinary — "a regular file this process should be willing to run" — is
+// in fs_unix.go and fs_windows.go. It moved there when Windows arrived: the
+// Unix test is a permission-bit test, Windows has no permission bits in a mode,
+// and the honest Windows answer is a different and weaker check that deserved
+// to say so in its own comment rather than hide behind this one.
 
 var errAmpTimeout = &ampErr{"timeout"}
 

@@ -149,3 +149,27 @@ func TestRunConsoleCommandLeavesNoStrayProcess(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 }
+
+// The relay paces this loop, so what it may ask for is bounded here rather
+// than trusted. A hostile or broken relay must not be able to make a fleet
+// hammer anything, nor to park a console far enough out that it looks dead.
+func TestConsoleWaitClampsWhateverTheRelaySays(t *testing.T) {
+	fb := 10 * time.Second
+	cases := []struct {
+		next int
+		want time.Duration
+	}{
+		{0, fb},                // absent: an older relay, unchanged behaviour
+		{-5, fb},               // nonsense: same
+		{10, 10 * time.Second}, // the warm cadence
+		{60, 60 * time.Second}, // the cold one
+		{1, consoleMinWait},    // floor: no hammering
+		{4, consoleMinWait},
+		{999999, consoleMaxWait}, // ceiling: slow, never silent
+	}
+	for _, c := range cases {
+		if got := consoleWait(c.next, fb); got != c.want {
+			t.Fatalf("consoleWait(%d) = %v, want %v", c.next, got, c.want)
+		}
+	}
+}

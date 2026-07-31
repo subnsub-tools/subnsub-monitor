@@ -20,16 +20,25 @@ package main
 // the relay answers. A machine behind NAT with no inbound port and no public
 // address works unchanged, and unplugging the console is deleting a file.
 //
-// What runs is `/bin/sh -c <line>`, as the user the helper runs as, in that
-// user's home directory. It is not a shell session: each command is its own
-// process with its own environment, so `cd` does not persist and neither does
-// anything else. That is a real limitation and it is deliberate — a persistent
-// PTY is a much larger thing to get right, and the question this tab exists to
-// answer ("what is that box doing?") is answered by one-shot commands.
+// What runs is `/bin/sh -c <line>` — `cmd.exe /s /c <line>` on Windows; see
+// console_unix.go and console_windows.go — as the user the helper runs as, in
+// that user's home directory. It is not a shell session: each command is its
+// own process with its own environment, so `cd` does not persist and neither
+// does anything else. That is a real limitation and it is deliberate — a
+// persistent PTY is a much larger thing to get right, and the question this tab
+// exists to answer ("what is that box doing?") is answered by one-shot
+// commands.
+//
+// THE SHELL IS THE PLATFORM'S OWN, and nothing above this line translates
+// between them. A machine running Windows answers `dir` and not `ls`, which is
+// the honest arrangement: the alternative is a helper that quietly rewrites
+// what somebody typed, and there is no version of that which does not
+// eventually run something other than what was asked for.
 //
 // Every command is written to stderr before it runs. On a normal install that
-// is the systemd journal or the launchd log, which means the machine keeps its
-// own record of what was done to it that does not pass through us.
+// is the systemd journal, the launchd log, or the scheduled task's own output,
+// which means the machine keeps its own record of what was done to it that does
+// not pass through us.
 
 import (
 	"bytes"
@@ -231,6 +240,44 @@ type consoleCmd struct {
 type consolePoll struct {
 	Open     bool         `json:"open"`
 	Commands []consoleCmd `json:"commands"`
+	// How many seconds the relay suggests waiting before asking again.
+	//
+	// It is the only side that knows whether anybody has had a console open
+	// lately, and asking every ten seconds for ever — on a machine nobody has
+	// ever typed at — was three quarters of this feature's entire running
+	// cost. So the pacing decision is made where the information is.
+	//
+	// A HINT and nothing more. It selects a sleep, it cannot select work, and
+	// it is clamped below: the worst a hostile relay can do with this field is
+	// make consoles feel slow, which it could already do by not answering.
+	// Absent or out of range falls back to this build's own interval, so an
+	// older relay that never sends it behaves exactly as before.
+	Next int `json:"next,omitempty"`
+}
+
+// Bounds on what the relay may ask for. The floor stops a relay from talking a
+// fleet into hammering it (or into hammering us on somebody's metered link);
+// the ceiling stops one from parking a console far enough out that the feature
+// looks broken rather than slow.
+const (
+	consoleMinWait = 5 * time.Second
+	consoleMaxWait = 300 * time.Second
+)
+
+// The sleep to use after a poll that found nothing, given what the relay
+// suggested and what this build would have done on its own.
+func consoleWait(next int, fallback time.Duration) time.Duration {
+	if next <= 0 {
+		return fallback
+	}
+	d := time.Duration(next) * time.Second
+	if d < consoleMinWait {
+		return consoleMinWait
+	}
+	if d > consoleMaxWait {
+		return consoleMaxWait
+	}
+	return d
 }
 
 // Ask the relay for work, run it, report back. Runs forever, alongside the
@@ -302,8 +349,11 @@ func consoleLoop(base string, tok *tokenBox) {
 		fails = 0
 		if !poll.Open {
 			// Nobody is looking. The relay answered immediately, so this sleep
-			// is the whole idle cost.
-			time.Sleep(idle)
+			// is the whole idle cost — and the relay, which knows whether
+			// anyone has had a console open lately, gets to say how long it
+			// should be. Falls back to this build's own interval when it says
+			// nothing, which is what every older relay does.
+			time.Sleep(consoleWait(poll.Next, idle))
 			continue
 		}
 		for _, c := range poll.Commands {
@@ -348,10 +398,12 @@ func consoleLoop(base string, tok *tokenBox) {
 				if swap {
 					// The new binary is already on disk under our own name.
 					// Everything after this line belongs to the next process,
-					// which systemd (Restart=always) or launchd (KeepAlive)
-					// starts for us. A helper running under neither ends here,
-					// which is the honest outcome for a foreground process
-					// that was asked to replace itself.
+					// which systemd (Restart=always), launchd (KeepAlive) or
+					// the Windows task (a one-minute repetition trigger that
+					// starts nothing while an instance is already running)
+					// starts for us. A helper running under none of them ends
+					// here, which is the honest outcome for a foreground
+					// process that was asked to replace itself.
 					os.Exit(0)
 				}
 			case "", "sh":
@@ -515,17 +567,16 @@ func runConsoleCommand(id, line string) consoleResult {
 	ctx, cancel := context.WithTimeout(context.Background(), consoleTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", line)
+	// The platform's shell, arranged so the deadline can take the whole tree
+	// down rather than the shell only — `sh -c 'sleep 999'` leaves the sleep
+	// behind otherwise, holding the output pipe open.
+	cmd := consoleCommand(ctx, line)
 	// The user's own home. Not the working directory the service manager
 	// happened to start us in, which is `/` under systemd and would make every
 	// relative path in a typed command mean something surprising.
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		cmd.Dir = home
 	}
-	// Own process group, so the deadline can take the whole tree down rather
-	// than the shell only — `sh -c 'sleep 999'` leaves the sleep behind
-	// otherwise, holding the output pipe open.
-	cmd.SysProcAttr = consoleProcAttr()
 	cmd.Cancel = func() error { return consoleKill(cmd) }
 	// The backstop for output pipes a killed process left open anyway.
 	cmd.WaitDelay = consoleWaitDelay
@@ -535,7 +586,16 @@ func runConsoleCommand(id, line string) consoleResult {
 	cmd.Stderr = out
 
 	started := time.Now()
-	err := cmd.Run()
+	// Start and Wait rather than Run, which is the same two calls with no room
+	// between them — and the room is the point. Windows can only put a running
+	// process in the job object that bounds its children AFTER it exists, so
+	// there has to be a line here to do it on. On Unix consoleAdopt is empty:
+	// the process group was arranged at fork.
+	err := cmd.Start()
+	if err == nil {
+		consoleAdopt(cmd)
+		err = cmd.Wait()
+	}
 	res.Ms = time.Since(started).Milliseconds()
 	res.Out = out.buf.String()
 	res.Truncated = out.over

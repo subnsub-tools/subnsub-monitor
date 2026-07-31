@@ -1,3 +1,16 @@
+//go:build unix
+
+// The end-to-end update tests, and they are Unix-only for two reasons that are
+// both about the thing being tested rather than about convenience.
+//
+// The fake releases here are `#!/bin/sh` scripts standing in for a binary, so
+// the probe step ("run it and ask its version") has something to run without a
+// compiler in the test. And the central invariant below — that the service path
+// is never empty for an instant — is one only this platform can offer: Windows
+// cannot replace a running image in place and has to move it aside first. See
+// update_windows.go, which says so at length and guarantees the weaker property
+// it can actually keep.
+
 package main
 
 import (

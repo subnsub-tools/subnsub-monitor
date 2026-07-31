@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 )
 
 func selftest() {
@@ -80,14 +79,10 @@ func hardlinkProbe(r *os.Root, root string) {
 
 	rec, _ := codexScanFile(r, filepath.Base(link))
 	refused := rec == nil
-	// Confirm the probe actually built the shape it claims to test.
-	var n uint64
-	if fi, err := os.Stat(link); err == nil {
-		if sys, ok := fi.Sys().(*syscall.Stat_t); ok {
-			n = uint64(sys.Nlink)
-		}
-	}
-	fmt.Printf("  hardlink probe    : nlink=%d refused=%v\n", n, refused)
+	// Confirm the probe actually built the shape it claims to test. 0 means the
+	// platform would not say, which is worth printing rather than hiding: it is
+	// also the reading that makes the guard above refuse everything.
+	fmt.Printf("  hardlink probe    : nlink=%d refused=%v\n", linkCount(link), refused)
 }
 
 // The case an O_NOFOLLOW on the final component misses: the last component is
