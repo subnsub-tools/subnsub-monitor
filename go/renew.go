@@ -243,14 +243,37 @@ func installedEnv() map[string]string {
 	if dir == "" {
 		return nil
 	}
-	f, err := os.Open(filepath.Join(dir, tokenEnvFile))
+	path := filepath.Join(dir, tokenEnvFile)
+	// Lstat BEFORE opening, and refuse anything that is not a plain file.
+	//
+	// Not tidiness. Opening a FIFO blocks in open(2) until somebody writes to
+	// it, which would hang `connect` at startup — before the push loop, before
+	// the console, with no output — and the only way back is a kill. A symlink
+	// is refused for its own reason: this path is where a credential is read
+	// from, and the installers only ever write a regular file here.
+	if fi, err := os.Lstat(path); err != nil || !fi.Mode().IsRegular() {
+		return nil
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		return nil
 	}
 	defer f.Close()
-	buf := make([]byte, maxTokenFile)
-	n, err := f.Read(buf)
-	if n <= 0 || (err != nil && n == 0) {
+	// And again on the OPEN HANDLE, which is the check that cannot be raced:
+	// the Lstat above describes the path as it was a moment ago.
+	if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() {
+		return nil
+	}
+	// One byte more than the cap, so a file AT the limit is distinguishable
+	// from one cut off at it — and an oversized file is refused WHOLE rather
+	// than parsed from its prefix. A valid-looking first line in front of a
+	// megabyte of something else is not a config file this program wrote.
+	buf := make([]byte, maxTokenFile+1)
+	n, err := io.ReadFull(f, buf)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return nil
+	}
+	if n <= 0 || n > maxTokenFile {
 		return nil
 	}
 	out := map[string]string{}

@@ -6,7 +6,10 @@ package main
 // weaker than its Unix counterpart in a way worth stating rather than hiding.
 
 import (
+	"context"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 )
@@ -77,4 +80,45 @@ func usableBinary(path string) bool {
 		}
 	}
 	return false
+}
+
+// Which extensions are SCRIPTS for the command interpreter rather than programs
+// the kernel can load. Windows has no shebang: a .cmd is a text file, and
+// CreateProcess — which is the only thing Go's os/exec calls, with no
+// batch-file special case anywhere in the path — refuses it outright.
+//
+// This is not a hypothetical. npm installs a global CLI on Windows as
+// `<name>.cmd`, so the Amp collector's own candidate list ends in one on a
+// normal machine. Found-then-cannot-start is the worst of the three possible
+// outcomes: it looks like support and behaves like an outage.
+var scriptExts = map[string]bool{".cmd": true, ".bat": true}
+
+// How to run a tool this helper found on disk. Through the command interpreter
+// when it is a script, directly otherwise.
+//
+// The command line is built by hand for the same reason console_windows.go
+// builds its own: cmd.exe parses one string with its own rules, os/exec would
+// assemble that string with the C runtime's, and the two disagree about
+// quoting. `/s` makes cmd's rule a single sentence — strip the first and last
+// character if both are quotes, run the rest verbatim — which is what makes the
+// nested quoting below predictable rather than a guess. `/d` skips the user's
+// AutoRun registry command, which would otherwise run before every invocation.
+func toolCommand(ctx context.Context, bin string, args ...string) *exec.Cmd {
+	if !scriptExts[strings.ToLower(filepath.Ext(bin))] {
+		return exec.CommandContext(ctx, bin, args...)
+	}
+	shell := winShell()
+	// Inner: the script's own quoted path and its arguments. Outer: the wrapper
+	// /s strips. Arguments here are this program's own literals, never anything
+	// that came off the network.
+	inner := `"` + bin + `"`
+	for _, a := range args {
+		inner += " " + a
+	}
+	cmd := exec.CommandContext(ctx, shell)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CmdLine:       `"` + shell + `" /d /s /c "` + inner + `"`,
+		CreationFlags: createNoWindow,
+	}
+	return cmd
 }

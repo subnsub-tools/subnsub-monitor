@@ -11,10 +11,21 @@ package main
 // an exotic platform is the cheap failure; running an unvetted binary or
 // reading a planted hard link is not.
 
-import "os"
+import (
+	"context"
+	"os"
+	"os/exec"
+)
 
 func singleLink(_ *os.File, _ os.FileInfo) bool { return false }
 
 func linkCount(_ string) uint64 { return 0 }
 
 func usableBinary(_ string) bool { return false }
+
+// Never reached — usableBinary above refuses everything, so nothing gets this
+// far — and defined anyway so the package compiles. Directly, which is the
+// answer everywhere that is not Windows.
+func toolCommand(ctx context.Context, bin string, args ...string) *exec.Cmd {
+	return exec.CommandContext(ctx, bin, args...)
+}

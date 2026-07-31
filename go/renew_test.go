@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -684,6 +685,36 @@ func TestInstalledEnvSurvivesTheAbsentAndTheOdd(t *testing.T) {
 	writeTokenFile(t, "\ufeffSUBNSUB_MONITOR_TOKEN=abcdefghijklmnopqrstuvwxyz012345\n")
 	if got := installedEnv()[tokenEnv]; got != "abcdefghijklmnopqrstuvwxyz012345" {
 		t.Fatalf("★ a BOM hid the token from the parser: %q", got)
+	}
+}
+
+// A file this program did not write is refused WHOLE, not parsed as far as it
+// looks plausible. This one holds a credential and lives in a directory a local
+// user may be able to reach, so every uncertainty here is a no.
+func TestInstalledEnvRefusesWhatItCannotVouchFor(t *testing.T) {
+	// Oversized: a valid-looking first line in front of a megabyte of anything
+	// else. Reading the prefix and stopping would accept it.
+	writeTokenFile(t, "SUBNSUB_MONITOR_TOKEN=abcdefghijklmnopqrstuvwxyz012345\n"+
+		strings.Repeat("x", 9<<10))
+	if env := installedEnv(); len(env) != 0 {
+		t.Fatalf("★ read a token out of an oversized file: %v", env)
+	}
+
+	// Exactly at the cap still works — the limit is a limit, not an off-by-one.
+	line := "SUBNSUB_MONITOR_TOKEN=abcdefghijklmnopqrstuvwxyz012345\n"
+	writeTokenFile(t, line+strings.Repeat("#", maxTokenFile-len(line)))
+	if got := installedEnv()[tokenEnv]; got != "abcdefghijklmnopqrstuvwxyz012345" {
+		t.Fatalf("a file exactly at the cap should be read: %q", got)
+	}
+
+	// A directory where the file should be.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".config", "subnsub-monitor", "token"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if env := installedEnv(); len(env) != 0 {
+		t.Fatalf("★ a directory was read as a config file: %v", env)
 	}
 }
 
