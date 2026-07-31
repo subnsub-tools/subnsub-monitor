@@ -88,6 +88,12 @@ type Snapshot struct {
 	// says nothing about the machine, and is the one piece of self-description
 	// here that the user can act on.
 	HelperVersion string `json:"helper_version,omitempty"`
+	// Whether this machine will run a command the dashboard sends it. Always
+	// present, never omitted: the page has to be able to tell "this helper
+	// says no" from "this helper is too old to have an opinion", and an
+	// omitted key reads as the first when it means the second. See console.go
+	// for what turns it on — which is a file on this machine and nothing else.
+	Console bool `json:"exec"`
 	// Machine health. A pointer so a platform that can measure nothing at all
 	// omits the key rather than shipping a shell of nulls — see system.go for
 	// what each platform can actually read, and why.
@@ -110,7 +116,7 @@ func bp(b bool) *bool       { return &b }
 // control, and one bad rollout should not take the helper down.
 func collectAll() Snapshot {
 	snap := Snapshot{CapturedAt: now(), AgentID: agentID(), AgentLabel: agentLabel(),
-		HelperVersion: helperVersion}
+		HelperVersion: helperVersion, Console: consoleEnabled()}
 	for _, c := range []struct {
 		id string
 		fn func() Provider

@@ -146,6 +146,13 @@ func connect(base, token string, every float64) {
 	// relay we do not issue for, and why the relay's own responses are still
 	// never parsed.
 	renew := newRenewer(base)
+	// The console runs beside this loop, not inside it: a held poll must never
+	// delay a reading, and a command that takes 30 seconds must not make the
+	// machine look silent for 30 seconds. It shares the token through a box
+	// rather than a copy, because renewal rotates that string underneath it.
+	tok := &tokenBox{}
+	tok.set(token)
+	go consoleLoop(base, tok)
 	client := &http.Client{
 		Timeout: 15 * time.Second,
 		// Refuse redirects here too. The relay token is a bearer secret — it
@@ -166,6 +173,7 @@ func connect(base, token string, every float64) {
 		// an interval, for a renewal that was already due.
 		if renew.due(token, time.Now(), false) {
 			token = renew.attempt(token, time.Now())
+			tok.set(token)
 		}
 
 		req, err := http.NewRequest("POST", url, bytes.NewReader(dump(collectAll())))
@@ -219,6 +227,10 @@ func connect(base, token string, every float64) {
 			token = renew.afterPush(code, token, time.Now())
 			wait = every * math.Min(math.Pow(2, float64(fails)), 10)
 		}
+		// Whatever the branch above did to the token, the console loop is
+		// holding the old one until told. One line here rather than three
+		// inside the switch: every path leaves through it.
+		tok.set(token)
 		// Spread the steady-state cadence too, by a few percent. Machines
 		// installed in one sitting otherwise stay in lockstep for as long as
 		// they run, and the collision that costs one of them a push is the same

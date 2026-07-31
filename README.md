@@ -205,6 +205,7 @@ subnsub-monitor serve [PORT]      # serve /quota + /events on 127.0.0.1 only
 subnsub-monitor selftest          # show what the collectors can and cannot open
 subnsub-monitor token             # mint a relay token
 subnsub-monitor name [LABEL]      # show or set this machine's dashboard name
+subnsub-monitor console [on|off]  # may the dashboard run commands here?
 subnsub-monitor connect URL [TOKEN]
 ```
 
@@ -243,6 +244,49 @@ subnsub-monitor name                             # show what it will report
 Control characters, bidi overrides and invisible padding are stripped before it
 travels, and it is cut to 24 characters. A relay should re-do all of that on
 arrival anyway — see the warning below.
+
+## The console, and why it is off
+
+The dashboard can run a command on a machine and show you the output. **This is
+off unless you turn it on here, on the machine**, and that is the whole design
+rather than a default someone might get around to changing:
+
+```sh
+sh install.sh <TOKEN> --console     # at install time
+subnsub-monitor console on          # any time after
+subnsub-monitor console off         # and back off
+subnsub-monitor console             # show which it is
+```
+
+The switch is the existence of `~/.config/subnsub-monitor/console`, written by
+someone who already had a shell here. With it absent, the agent never asks the
+relay whether there is anything to run — so there is no channel to attack
+rather than merely no permission to use one. `MON_CONSOLE=1` (or `0`) overrides
+the file for one run, which is what a container wants.
+
+The transport is the same outbound-only shape as the push: the agent asks, the
+relay answers. Nothing listens on this machine, no port opens, and a machine
+behind NAT works unchanged. What runs is `/bin/sh -c <line>` as the user this
+agent runs as, in that user's home directory:
+
+- each command is its own process — `cd` does not persist and neither does
+  anything else. This is not a shell session, and it is not trying to be one;
+- 30 seconds, then the whole process group is killed, so a command that
+  backgrounded something does not leave it running;
+- output is capped at 16 KB, combined stdout and stderr;
+- **every command is written to this machine's log before it runs**, so the box
+  keeps its own record of what was done to it that does not pass through
+  anyone else.
+
+On Linux the systemd unit's filesystem confinement depends on this setting, and
+the installer prints which one it used. Without the console the service is
+locked down to almost nothing (`ProtectSystem=strict`, `ProtectHome=read-only`);
+with it on, the confinement is the ordinary one for a user service — a console
+that could not write anything would not be security, it would be a console that
+does not work. `NoNewPrivileges` holds either way.
+
+An agent with the console off reports that fact in its snapshot, so a dashboard
+can offer the feature only where it can be honoured.
 
 ## Pointing it at your own relay
 

@@ -9,6 +9,11 @@
 #
 #   curl -fsSL .../install.sh | sh -s -- <TOKEN> --name "tokyo build box"
 #
+# The dashboard can also run commands on a machine, and that is OFF unless you
+# ask for it right here — add --console, or turn it on later with
+# `subnsub-monitor console on`. With it on, this machine runs what you type on
+# the dashboard, as this user, and writes every command to its own log first.
+#
 # Source: https://github.com/subnsub-tools/subnsub-monitor (Apache-2.0)
 #
 # …and if you would rather look first, which is the reasonable instinct for
@@ -39,10 +44,10 @@ LABEL=com.subnsub.monitor   # shows up in `launchctl list`; brand domain there t
 # script that publishes the binaries. A binary that does not match is not installed, and a swapped binary
 # would otherwise be free to read ~/.claude/.credentials.json and post it
 # somewhere, which no amount of care in the Go source can prevent.
-SUM_linux_amd64=4e3b488f7fc39348e09b4c3c259e5044b2f84a0a5bea7a4d599e55647ea6b17c
-SUM_linux_arm64=06036572b5435a3c56431e3201bb3896b9891aca765e8cfe484c735f7471cbb6
-SUM_darwin_amd64=64c6e6ad2c43de13d900cf7cb93341afa9d03b233a7385dfdf345714c56b9cf7
-SUM_darwin_arm64=bda4779717479a413d6eb28125ba0d4822de4f4cea071994e5044cfe27d62f17
+SUM_linux_amd64=0b1b23eccae685023f98200a01c596dd15f7888ea02c22a90f2e39dd932eee23
+SUM_linux_arm64=fb1cdd3f7b058904cabf646956933a2b77b42a2f52d8cd75768e3d0d6643594c
+SUM_darwin_amd64=4e246d91be7caa43a2a1efca8e39d14e08e74d45f39e294a069da9401f27e5ac
+SUM_darwin_arm64=2683ae8f0aff898368373f673b31c0e634157e0d9d08b124932cb88bd30d77b6
 
 say()  { printf '%s\n' "$*"; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -83,7 +88,8 @@ uninstall() {
     # nothing else would ever clean up.
     rm -f "${INSTALLED_BIN:-$BINDIR/$NAME}" "$HOME/.config/$NAME/token" \
           "$HOME/.config/$NAME/token.current" "$HOME/.config/$NAME/token.current.new" \
-          "$HOME/.config/$NAME/agent-id" "$HOME/.config/$NAME/name" "$manifest"
+          "$HOME/.config/$NAME/agent-id" "$HOME/.config/$NAME/name" \
+          "$HOME/.config/$NAME/console" "$manifest"
     rmdir "$HOME/.config/$NAME" 2>/dev/null || true
     say "removed $NAME"
     exit 0
@@ -100,16 +106,23 @@ case "${1:-}" in
   ''|-*) TOKEN="${SUBNSUB_MONITOR_TOKEN:-}" ;;
   *)     TOKEN=$1; shift ;;
 esac
-[ -n "$TOKEN" ] || die "no token. Usage: sh install.sh <TOKEN> [--name LABEL]"
+[ -n "$TOKEN" ] || die "no token. Usage: sh install.sh <TOKEN> [--name LABEL] [--console]"
 
 # What this machine is called on the dashboard. Optional, and deliberately not
 # guessed: the helper never reads the hostname, so an unnamed machine shows up
 # under its own random id rather than under whatever the box calls itself.
 NAME_ARG="${MON_NAME:-}"
+# Whether the dashboard may run commands on this machine. OFF unless asked for
+# here, on the machine, by whoever is running this script — see console.go for
+# why that is the only place the decision can honestly be made.
+CONSOLE_ARG=""
 while [ $# -gt 0 ]; do
     case "$1" in
       --name) [ $# -ge 2 ] || die "--name needs a value"; NAME_ARG=$2; shift 2 ;;
       --name=*) NAME_ARG=${1#--name=}; shift ;;
+      --console) CONSOLE_ARG=on; shift ;;
+      --console=on|--console=yes|--console=1) CONSOLE_ARG=on; shift ;;
+      --console=off|--console=no|--console=0) CONSOLE_ARG=off; shift ;;
       *) die "unexpected argument: $1" ;;
     esac
 done
@@ -283,6 +296,17 @@ if [ -n "$NAME_ARG" ]; then
     mv -f "$conf/name.new" "$conf/name"
 fi
 
+# --------------------------------------------------------------- console file
+# The switch that lets the dashboard run commands here. Its EXISTENCE is the
+# setting; nothing reads what is in it. Written only when asked for, and
+# removed only when explicitly turned off — a reinstall without --console
+# leaves an operator's earlier decision alone rather than silently reversing it
+# in either direction.
+case "$CONSOLE_ARG" in
+  on)  : > "$conf/console"; chmod 0600 "$conf/console" ;;
+  off) rm -f "$conf/console" ;;
+esac
+
 # Materialise this machine's dashboard id now, out here, rather than leaving it
 # to the first run of the service. The service is sandboxed (see the unit
 # below) and on a host where that sandbox is actually enforced it cannot write
@@ -296,18 +320,31 @@ case "$goos" in
   linux)
     unitdir="$HOME/.config/systemd/user"
     mkdir -p "$unitdir"
-    cat > "$unitdir/$NAME.service" <<EOF
-[Unit]
-Description=subnsub-monitor — pushes AI coding quota to $RELAY
-After=network-online.target
-
-[Service]
-Type=simple
-EnvironmentFile=$conf/token
-ExecStart=$BINDIR/$NAME connect $RELAY
-Restart=always
-RestartSec=30
-# It reads two files and makes one outbound request; it needs nothing else.
+    # How much of the machine this service can touch, and it depends on whether
+    # the console is on — because those are two different programs in every way
+    # that matters to a sandbox.
+    #
+    # Without the console it reads two files and makes one outbound request, so
+    # it is confined to almost nothing. With the console it runs commands the
+    # operator types, and a confinement that made `mkdir` fail would not be
+    # security, it would be a console that does not work. The operator asked
+    # for a shell on this box; giving them one that cannot write anything and
+    # not saying so is the dishonest option.
+    #
+    # ProtectHome/ProtectSystem apply to the WHOLE cgroup, children included,
+    # so there is no version of this where the helper stays confined and the
+    # commands it spawns do not. Hence the either/or.
+    if [ -f "$conf/console" ]; then
+        SANDBOX="# The console is on: commands you type on the dashboard run in this
+# service's cgroup, so the filesystem confinement below is deliberately the
+# ordinary one for a user service. NoNewPrivileges still holds — nothing here
+# can gain privileges this user does not already have — and turning the console
+# off (subnsub-monitor console off, then reinstall) puts the strict sandbox back.
+NoNewPrivileges=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true"
+    else
+        SANDBOX="# It reads two files and makes one outbound request; it needs nothing else.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
@@ -321,8 +358,20 @@ ProtectHome=read-only
 ReadWritePaths=-$conf
 ProtectKernelTunables=true
 ProtectControlGroups=true
-RestrictSUIDSGID=true
+RestrictSUIDSGID=true"
+    fi
+    cat > "$unitdir/$NAME.service" <<EOF
+[Unit]
+Description=subnsub-monitor — pushes AI coding quota to $RELAY
+After=network-online.target
 
+[Service]
+Type=simple
+EnvironmentFile=$conf/token
+ExecStart=$BINDIR/$NAME connect $RELAY
+Restart=always
+RestartSec=30
+$SANDBOX
 [Install]
 WantedBy=default.target
 EOF
@@ -378,4 +427,14 @@ esac
 say ""
 say "pushing to $RELAY every 30s."
 say "check locally:  $BINDIR/$NAME"
+# Stated on every install, not only when it was just switched on: a machine
+# that can be typed at from a web page is something the person standing here
+# should be told about, including when they inherited the setting from whoever
+# installed it last.
+if [ -f "$conf/console" ]; then
+    say "console:        ON — the dashboard can run commands here as $(id -un)."
+    say "                off with:  $BINDIR/$NAME console off"
+else
+    say "console:        off. Turn it on with:  $BINDIR/$NAME console on"
+fi
 say "uninstall:      sh install.sh --uninstall"
