@@ -6,3 +6,6 @@ go/dist/
 # Python bytecode from the reference implementation.
 __pycache__/
 *.pyc
+
+# The bare module-name binary `go build` drops in go/ — same rule as dist/.
+go/subnsubmonitor

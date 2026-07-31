@@ -14,6 +14,13 @@
 # `subnsub-monitor console on`. With it on, this machine runs what you type on
 # the dashboard, as this user, and writes every command to its own log first.
 #
+# And it can update the helper for you, so a new release does not mean logging
+# into every box. Also off by default: add --remote-update, or turn it on later
+# with `subnsub-monitor update on`. --console implies it — a console can
+# already run this installer. Nothing is downloaded until you press the button:
+# there is no timer, and what gets installed comes from the release bucket and
+# is checked against its published checksum, so the dashboard chooses only WHEN.
+#
 # Source: https://github.com/subnsub-tools/subnsub-monitor (Apache-2.0)
 #
 # …and if you would rather look first, which is the reasonable instinct for
@@ -44,10 +51,10 @@ LABEL=com.subnsub.monitor   # shows up in `launchctl list`; brand domain there t
 # script that publishes the binaries. A binary that does not match is not installed, and a swapped binary
 # would otherwise be free to read ~/.claude/.credentials.json and post it
 # somewhere, which no amount of care in the Go source can prevent.
-SUM_linux_amd64=3d8bc481c2dd5865925c92f2d4c180044fb50a06c074008adfeb3c07884c75f2
-SUM_linux_arm64=915968be7ff494b1273b37102ab105e8ab8dc361db2dc86050d36a79d4e6c6ee
-SUM_darwin_amd64=cfa6ef767ded6013235ed85683594f583f76def47bf17d4348206e88897ee22a
-SUM_darwin_arm64=6a6ddff0105067291c30b11ced2a7b3420272a2981693904315e8394e15b87d5
+SUM_linux_amd64=98e90f42c76f630fdf1615dc606643333e216947533b88536ecbc916c2e73bdd
+SUM_linux_arm64=c13249bc5f8d6c229979451c1ea7b881309859aa76836bbad428f865d2eb2119
+SUM_darwin_amd64=94fd39d30d8b5e291df11fa821dcf3c141b93ab9b90fa1e70cf846631f2f08e7
+SUM_darwin_arm64=9646d6e5622808761c75a77452d2f65ab554237e3734b6688c0b30e68da8e610
 
 say()  { printf '%s\n' "$*"; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -89,7 +96,10 @@ uninstall() {
     rm -f "${INSTALLED_BIN:-$BINDIR/$NAME}" "$HOME/.config/$NAME/token" \
           "$HOME/.config/$NAME/token.current" "$HOME/.config/$NAME/token.current.new" \
           "$HOME/.config/$NAME/agent-id" "$HOME/.config/$NAME/name" \
-          "$HOME/.config/$NAME/console" "$manifest"
+          "$HOME/.config/$NAME/console" "$HOME/.config/$NAME/update" "$manifest"
+    # The binary the last self-update moved aside. Left behind it would be an
+    # unreferenced few megabytes under a name nothing else will ever clean up.
+    rm -f "${INSTALLED_BIN:-$BINDIR/$NAME}.prev"
     rmdir "$HOME/.config/$NAME" 2>/dev/null || true
     say "removed $NAME"
     exit 0
@@ -106,7 +116,7 @@ case "${1:-}" in
   ''|-*) TOKEN="${SUBNSUB_MONITOR_TOKEN:-}" ;;
   *)     TOKEN=$1; shift ;;
 esac
-[ -n "$TOKEN" ] || die "no token. Usage: sh install.sh <TOKEN> [--name LABEL] [--console]"
+[ -n "$TOKEN" ] || die "no token. Usage: sh install.sh <TOKEN> [--name LABEL] [--console] [--remote-update]"
 
 # What this machine is called on the dashboard. Optional, and deliberately not
 # guessed: the helper never reads the hostname, so an unnamed machine shows up
@@ -116,6 +126,11 @@ NAME_ARG="${MON_NAME:-}"
 # here, on the machine, by whoever is running this script — see console.go for
 # why that is the only place the decision can honestly be made.
 CONSOLE_ARG=""
+# Whether the dashboard may replace this helper's binary. Same rule, same
+# place, and a separate switch from the console even though the console implies
+# it — see helper/go/update.go. A machine that wants the button and no shell is
+# the case this exists for.
+UPDATE_ARG=""
 while [ $# -gt 0 ]; do
     case "$1" in
       --name) [ $# -ge 2 ] || die "--name needs a value"; NAME_ARG=$2; shift 2 ;;
@@ -123,6 +138,9 @@ while [ $# -gt 0 ]; do
       --console) CONSOLE_ARG=on; shift ;;
       --console=on|--console=yes|--console=1) CONSOLE_ARG=on; shift ;;
       --console=off|--console=no|--console=0) CONSOLE_ARG=off; shift ;;
+      --remote-update) UPDATE_ARG=on; shift ;;
+      --remote-update=on|--remote-update=yes|--remote-update=1) UPDATE_ARG=on; shift ;;
+      --remote-update=off|--remote-update=no|--remote-update=0) UPDATE_ARG=off; shift ;;
       *) die "unexpected argument: $1" ;;
     esac
 done
@@ -307,6 +325,15 @@ case "$CONSOLE_ARG" in
   off) rm -f "$conf/console" ;;
 esac
 
+# ---------------------------------------------------------------- update file
+# The same shape for the same reasons. Note it is NOT written when --console is
+# given: the console allows this on its own, and writing a second file would
+# mean `console off` later left behind a switch the operator never set.
+case "$UPDATE_ARG" in
+  on)  : > "$conf/update"; chmod 0600 "$conf/update" ;;
+  off) rm -f "$conf/update" ;;
+esac
+
 # Materialise this machine's dashboard id now, out here, rather than leaving it
 # to the first run of the service. The service is sandboxed (see the unit
 # below) and on a host where that sandbox is actually enforced it cannot write
@@ -344,6 +371,25 @@ NoNewPrivileges=true
 ProtectKernelTunables=true
 RestrictSUIDSGID=true"
     else
+        # The strict sandbox, with one hole — or two, when this machine is
+        # allowed to update itself.
+        #
+        # ProtectHome=read-only means the helper cannot write its own binary,
+        # which is the correct default and is also exactly what a self-update
+        # has to do. So the second hole is opened only for a machine whose
+        # operator asked for that, and it is opened as narrowly as the
+        # directory allows: $BINDIR, not \$HOME.
+        #
+        # This is a real widening and worth being clear-eyed about — it makes
+        # the one file the service executes writable by the service. What keeps
+        # that honest is on the other side: the payload comes from the release
+        # bucket over TLS and must match the published checksum, and nothing
+        # downloads until somebody presses a button. See helper/go/update.go.
+        UPD_HOLE=""
+        [ -f "$conf/update" ] && UPD_HOLE="
+# This machine may update itself, so the directory holding the binary it
+# replaces has to be writable by it. Nothing else in \$HOME is.
+ReadWritePaths=-$BINDIR"
         SANDBOX="# It reads two files and makes one outbound request; it needs nothing else.
 NoNewPrivileges=true
 PrivateTmp=true
@@ -355,7 +401,7 @@ ProtectHome=read-only
 # restart shows up at the relay as a different machine. The leading '-' makes
 # it optional, so deleting the directory downgrades the helper rather than
 # leaving a unit that refuses to start.
-ReadWritePaths=-$conf
+ReadWritePaths=-$conf$UPD_HOLE
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true"
@@ -442,6 +488,24 @@ else
     say "console:        off. Turn it on with:  $BINDIR/$NAME console on"
     case "$goos" in
       linux) say "                (on Linux, re-run this installer with --console for a console that can write)" ;;
+    esac
+fi
+# Stated on every install too, and for the same reason: "the dashboard can
+# replace the program running here" is something the person standing at the
+# machine should be told, not only the person who asked for it.
+if [ -f "$conf/console" ]; then
+    say "update:         ON — implied by the console, which can already run this installer."
+elif [ -f "$conf/update" ]; then
+    say "update:         ON — the dashboard can replace this helper. Nothing downloads"
+    say "                until you press it, and only a checksummed release will install."
+    say "                off with:  $BINDIR/$NAME update off"
+else
+    say "update:         off. Turn it on with:  $BINDIR/$NAME update on"
+    case "$goos" in
+      linux) say "                (on Linux, re-run this installer with --remote-update — the strict" ;;
+    esac
+    case "$goos" in
+      linux) say "                 sandbox will not let the helper write its own binary otherwise)" ;;
     esac
 fi
 say "uninstall:      sh install.sh --uninstall"

@@ -225,6 +225,8 @@ subnsub-monitor selftest          # show what the collectors can and cannot open
 subnsub-monitor token             # mint a relay token
 subnsub-monitor name [LABEL]      # show or set this machine's dashboard name
 subnsub-monitor console [on|off]  # may the dashboard run commands here?
+subnsub-monitor update [on|off]   # may the dashboard replace this binary?
+subnsub-monitor version           # print this build's version and exit
 subnsub-monitor connect URL [TOKEN]
 ```
 
@@ -312,6 +314,69 @@ does not work. `NoNewPrivileges` holds either way.
 
 An agent with the console off reports that fact in its snapshot, so a dashboard
 can offer the feature only where it can be honoured.
+
+## Updating itself, and who decides what that means
+
+A new release should not mean logging into every machine. The dashboard can ask
+an agent to replace its own binary — and the shape of that is one sentence:
+
+> **The dashboard decides WHEN. The release bucket decides WHAT.**
+
+Those are deliberately not the same authority. The message the dashboard sends
+carries a machine id and a correlation id, and **nothing else** — there is no
+field on it that could name a version, a URL, or a binary. So a relay that has
+been taken over can make a machine update, and the only thing that machine will
+do about it is fetch what was genuinely published, check it against the
+published checksum, and run that. The base URL is a constant in
+[`go/update.go`](go/update.go); no input moves it.
+
+Which is also why **there is no timer**. An agent that went looking for releases
+by itself would be a permanent, unattended download-and-execute channel on every
+machine that ran it — including every machine whose operator never turned the
+console on. That is strictly more authority than the console grants, acquired by
+accident. Nothing is downloaded until somebody presses the button.
+
+```sh
+sh install.sh <TOKEN> --remote-update   # at install time
+subnsub-monitor update on               # any time after
+subnsub-monitor update off              # and back off
+subnsub-monitor update                  # show which it is
+```
+
+`--console` implies it. A machine with the console on has already handed the
+dashboard an arbitrary `/bin/sh`, and `curl …/install.sh | sh` typed at that
+prompt is this same operation with fewer checks and no audit line — refusing the
+narrow version of something already permitted in its broadest form would be
+theatre. The separate switch is for the other machine: no console, but willing
+to be upgraded. That one is a genuinely new grant, so it is its own file and it
+is off until you set it.
+
+What happens when it runs, in order, and it stops at the first thing that fails:
+
+1. read the published version; refuse anything that is not `YYYY.MM.DD.N`;
+2. refuse to go **backwards** — a bucket serving an older build is either a
+   rollback somebody should perform deliberately or an attempt to walk a fleet
+   onto a build with a known hole;
+3. download, and check the SHA-256 against the published manifest;
+4. **run the new binary** and require it to agree about its own version — a
+   build for the wrong architecture passes every check above and fails here,
+   which is much better than failing after the swap as a service that no longer
+   starts on a machine you cannot reach;
+5. hard-link the running binary aside, then replace it with **one atomic
+   rename**. The backup is a link and not a move on purpose: renaming the old
+   one out of the way first would leave the service path empty for an instant,
+   and a power cut inside that instant leaves a machine whose `ExecStart` names
+   a file that is not there;
+6. **report the result, then exit.** This is the one command whose success kills
+   the thing that would have reported it, so the report goes first — losing the
+   message in exactly the case where the swap worked would be indistinguishable
+   from an agent that died. `systemd`/`launchd` starts the new one.
+
+The previous binary stays as `<binary>.prev`. On Linux the systemd confinement
+depends on this switch too, because the strict sandbox correctly makes the
+agent's own binary unwritable by it: `--remote-update` opens `ReadWritePaths`
+for the install directory and nothing else, and `subnsub-monitor update` tells
+you when the switch and the unit disagree.
 
 ## Pointing it at your own relay
 

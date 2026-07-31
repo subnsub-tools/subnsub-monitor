@@ -20,6 +20,8 @@ const usage = `subnsub-monitor — AI coding quota for machines you can't reach
   subnsub-monitor connect URL [TOKEN]    dial out and push to the relay
   subnsub-monitor name [LABEL]           show or set this machine's dashboard name
   subnsub-monitor console [on|off]       show or set whether the dashboard may run commands here
+  subnsub-monitor update [on|off]        show or set whether the dashboard may replace this helper
+  subnsub-monitor version                print this build's version and exit
   subnsub-monitor selftest               show what the collectors can and cannot open
 
 serve only ever shows you THIS machine. connect is the real shape:
@@ -35,6 +37,13 @@ dashboard can run a command as this user and show you the output; each command
 is its own /bin/sh -c, so nothing persists between them, and every one of them
 is written to this machine's own log before it runs. Turn it off with
 'console off' and the helper stops asking the relay for work at all.
+
+update is how a helper gets replaced without a shell here. The dashboard says
+WHEN; what gets installed comes from the release bucket and is checked against
+the published checksum, so the relay cannot point this machine at anything else.
+Turning the console on implies it — a console can already run the installer —
+and 'update on' is for a machine that wants the button and no console. There is
+no timer: nothing is downloaded until somebody presses it.
 `
 
 func main() {
@@ -150,6 +159,50 @@ func main() {
 		if note := consoleSandboxNote(on); note != "" {
 			fmt.Println(note)
 		}
+
+	case "update":
+		if len(args) > 1 {
+			on := args[1] == "on" || args[1] == "1" || args[1] == "true" || args[1] == "yes"
+			off := args[1] == "off" || args[1] == "0" || args[1] == "false" || args[1] == "no"
+			if !on && !off {
+				// Not guessed, for the same reason `console` does not guess.
+				warnf("say 'update on' or 'update off'")
+				os.Exit(2)
+			}
+			if err := setRemoteUpdate(on); err != nil {
+				warnf("could not change the update setting")
+				os.Exit(1)
+			}
+		}
+		// From the same reader the loop consults, so what is printed is what
+		// the running helper will do — including the two cases where the answer
+		// does not come from the file just written: MON_UPDATE in the
+		// environment, and a console that is on and therefore already grants
+		// this.
+		on := updateAllowed()
+		if on {
+			fmt.Printf("on   (%s)\n", agentID())
+			if consoleEnabled() {
+				fmt.Println("note: the console is on, which allows this on its own —\n" +
+					"      a console can already run the installer. 'update off' will not\n" +
+					"      take that away; 'console off' is what does.")
+			}
+		} else {
+			fmt.Printf("off  (%s)\n", agentID())
+		}
+		// The unit's sandbox was decided at install time and this switch cannot
+		// change it, exactly as with the console.
+		if note := updateSandboxNote(on); note != "" {
+			fmt.Println(note)
+		}
+
+	case "version":
+		// Deliberately nothing but the version, on one line. The update path
+		// runs this on a freshly downloaded binary and compares the output
+		// against what the release claimed to be — a banner, a warning, or a
+		// trailing note would all have to be parsed around, and every one of
+		// those is a way for the check to start passing by accident.
+		fmt.Println(helperVersion)
 
 	case "selftest":
 		selftest()
