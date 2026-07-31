@@ -49,11 +49,26 @@ const (
 var geminiCache provCache
 
 // The refreshed access token, held for its lifetime so the 2-minute provider
-// floor does not turn into thirty refresh calls an hour.
+// floor does not turn into thirty refresh calls an hour. `bad` records the
+// last token an API answered 401 to: local expiry is a prediction, not the
+// vendor's opinion, and a token Google revoked early would otherwise be
+// re-selected — and re-refused — for the rest of its printed lifetime.
 var geminiTok struct {
 	sync.Mutex
 	token string
 	until float64
+	bad   string
+}
+
+// An API said this token is no good, whatever its expiry claims. Invalidate
+// so the next collection refreshes instead of replaying the refusal.
+func geminiInvalidate(token string) {
+	geminiTok.Lock()
+	defer geminiTok.Unlock()
+	if geminiTok.token == token {
+		geminiTok.token, geminiTok.until = "", 0
+	}
+	geminiTok.bad = token
 }
 
 func collectGemini() Provider {
@@ -193,11 +208,11 @@ func geminiClient() (id, secret string) {
 // slug when none of the three can be had.
 func geminiAccessToken(c geminiCreds) (string, string, string) {
 	t := now()
-	if c.access != "" && c.expiryMs/1000 > t+60 {
-		return c.access, "", ""
-	}
 	geminiTok.Lock()
 	defer geminiTok.Unlock()
+	if c.access != "" && c.access != geminiTok.bad && c.expiryMs/1000 > t+60 {
+		return c.access, "", ""
+	}
 	if geminiTok.token != "" && geminiTok.until > t+60 {
 		return geminiTok.token, "", ""
 	}
@@ -221,7 +236,16 @@ func geminiAccessToken(c geminiCreds) (string, string, string) {
 		return "", "unreachable", "刷新令牌失败"
 	}
 	if status == 400 || status == 401 {
-		return "", "token-expired", "refresh token 已失效；跑一次 gemini 重新登录。"
+		// Only invalid_grant means the refresh token itself is dead. A 400 can
+		// also be invalid_client (our extracted client id has rotated) or a
+		// malformed request — telling the user to re-login cannot fix either.
+		var oe struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(body, &oe) == nil && oe.Error == "invalid_grant" {
+			return "", "token-expired", "refresh token 已失效；跑一次 gemini 重新登录。"
+		}
+		return "", "api-error", "令牌接口拒绝了刷新请求（" + itoa(status) + "）"
 	}
 	if status != 200 {
 		return "", "api-error", "令牌接口返回 " + itoa(status)
@@ -295,8 +319,12 @@ func fetchGemini() Provider {
 				planID = la.CurrentTier.ID
 			}
 		}
-	} else if err == nil && (status == 401 || status == 403) {
-		return fail("token-expired", "Code Assist 接口返回 "+itoa(status))
+	} else if err == nil && status == 401 {
+		// The vendor's opinion of this token beats its printed expiry. Mark it
+		// so the NEXT collection refreshes instead of replaying the refusal
+		// for the rest of the hour.
+		geminiInvalidate(token)
+		return fail("token-expired", "Code Assist 接口返回 401")
 	}
 
 	quotaBody := []byte(`{}`)
@@ -310,8 +338,14 @@ func fetchGemini() Provider {
 		return fail("unreachable", "请求失败")
 	}
 	switch {
-	case status == 401 || status == 403:
-		return fail("token-expired", "配额接口返回 "+itoa(status))
+	case status == 401:
+		geminiInvalidate(token)
+		return fail("token-expired", "配额接口返回 401")
+	case status == 403:
+		// Not conflated with 401: a 403 is "this account may not", which no
+		// amount of refreshing changes, and burning the refresh token's
+		// goodwill on it would be pure noise.
+		return fail("api-error", "配额接口拒绝访问（403）")
 	case status == 429:
 		return fail("rate-limited", "配额接口限流（429）")
 	case status != 200:

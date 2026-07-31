@@ -73,7 +73,7 @@ const (
 	// under its own name is worth more here than the few kilobytes. The name
 	// goes with the record — keeping names for machines nobody can see would
 	// be the one thing here that grows without a bound.
-	machineTTL = 7 * 24 * time.Hour
+	machineTTL  = 7 * 24 * time.Hour
 	queueMax    = 8
 	maxWatchers = 8
 	maxPolls    = 16
