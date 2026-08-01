@@ -141,11 +141,19 @@ var collectors = []struct {
 	{"codex", collectCodex},
 	{"antigravity", collectAntigravity},
 	{"amp", collectAmp},
+	{"wayfinder", collectWayfinder}, // loopback, no credential
 	{"claude", collectClaude},
 	{"gemini", collectGemini},
 	{"copilot", collectCopilot},
 	{"factory", collectFactory},
 	{"kimi", collectKimi},
+	{"grok", collectGrok},
+	{"kilo", collectKilo},
+	// CLI subprocesses last: they are the heaviest, and concurrency means
+	// their cost is hidden behind the network collectors rather than added.
+	{"kiro", collectKiro},
+	{"augment", collectAugment},
+	{"doubao", collectDoubao},
 }
 
 // Collect every provider. A collector that panics is contained and reported —
