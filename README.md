@@ -28,9 +28,9 @@ code — but the idea got here from there, and that is the part worth crediting.
 
 ## What it can read, and what each reading costs
 
-Eight providers, and what each one *costs to read* is the single most
-important fact about this program. There are four cost rungs, and the first
-four providers are one of each:
+Fourteen providers, and what each one *costs to read* is the single most
+important fact about this program. There are four cost rungs, and these four
+are one of each:
 
 | | Codex | Antigravity | Amp | Claude Code |
 |---|---|---|---|---|
@@ -40,19 +40,36 @@ four providers are one of each:
 | Freshness | only as current as your last actual Codex call | live at the moment of reading | live at the moment of reading | live at the moment of reading |
 | Reported as | `local log` | `local probe` | `via CLI` | `live query` |
 
-The other four — **Gemini CLI, GitHub Copilot, Droid (Factory), and Kimi
-Code** — all sit on Claude Code's rung, and inherit its rules unchanged: each
-one reads the credential *that tool's own CLI* left on disk
-(`~/.gemini/oauth_creds.json`, `~/.config/github-copilot/apps.json`,
-`~/.factory/.env`, `~/.kimi-code/credentials/kimi-code.json`), asks the vendor
-that issued it and nobody else, and never writes anything back. Gemini is the
-one of the four whose token expires hourly, so it is also the one place this
-program performs an OAuth refresh — held in memory for its hour, never written
-to the credential file, using the OAuth client id extracted from the installed
-gemini-cli itself (`GEMINI_OAUTH_CLIENT_ID`/`GEMINI_OAUTH_CLIENT_SECRET`
-override it). A machine without a given tool reports that provider as `not
-signed in`, and the dashboard folds those into one quiet line instead of a
-column of empty tiles.
+The other ten fall onto those same four rungs:
+
+- **Loopback, no credential** (Antigravity's rung): **Wayfinder** — a
+  self-hosted LLM router that answers unauthenticated read-only endpoints on
+  `127.0.0.1`, so its 30-day savings are read without a key and without
+  anything leaving the box.
+- **The vendor's own CLI** (Amp's rung): **Kiro**, **Augment** and **Doubao**
+  each run their tool's CLI (`kiro-cli … /usage`, `auggie account status`,
+  `arkcli usage plan --format json`) and parse what it prints — the key stays
+  inside the tool, only its output crosses into this process.
+- **A credential the tool left on disk** (Claude Code's rung): **Gemini CLI**,
+  **GitHub Copilot**, **Droid (Factory)**, **Kimi Code**, **Grok** and
+  **Kilo** each read the credential *that tool's own CLI* stored
+  (`~/.gemini/oauth_creds.json`, `~/.config/github-copilot/apps.json`,
+  `~/.factory/.env`, `~/.kimi-code/credentials/kimi-code.json`,
+  `~/.grok/auth.json`, `~/.local/share/kilo/auth.json`), ask the vendor that
+  issued it and nobody else, and never write anything back. Gemini is the one
+  whose token expires hourly, so it is the one place this program performs an
+  OAuth refresh — held in memory, never written to the credential file, using
+  the client id extracted from the installed gemini-cli itself
+  (`GEMINI_OAUTH_CLIENT_ID`/`GEMINI_OAUTH_CLIENT_SECRET` override it). Grok's
+  usage lives behind a grpc-web endpoint with no schema we own, so its reply is
+  scanned heuristically and errs toward reporting nothing over a wrong number.
+
+Every one of these was chosen by walking CodexBar's provider registry and
+porting what cleared the bar; the ones left out (browser-session logins,
+pasted API keys, desktop-app state, self-hosted gateways with their own
+dashboards) are listed, with reasons, on the dashboard's coverage card. A
+machine without a given tool reports that provider as `not signed in`, and the
+dashboard folds those into one quiet line instead of a column of empty tiles.
 
 Codex writes the rate-limit object the server hands it straight into
 `~/.codex/sessions/**/rollout-*.jsonl`, so reading a file is enough.
