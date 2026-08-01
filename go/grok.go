@@ -158,22 +158,37 @@ func grokParseBilling(body []byte) (used *float64, resets *float64, err error) {
 		payloads = [][]byte{body}
 	}
 
-	var bestPct *float64
-	var bestPctDepth = math.MaxInt32
+	// Collect EVERY plausible percent candidate rather than greedily taking
+	// the shallowest. The heuristic's failure mode (review finding): an
+	// integer field carrying 1 is, read as float32, the subnormal 1.4e-45 —
+	// which is "in [0,100]", is shallower than the real 37.5% nested deeper,
+	// and rounds to 0. Two defences: reject values that are clearly not a
+	// percentage a server would send (non-zero subnormals, i.e. a raw integer
+	// misread as float), and require the surviving candidates to AGREE — if
+	// two distinct percentages remain, the wire is ambiguous and we publish
+	// nothing rather than guess.
+	var pctCands []float64
 	var resetCands []float64
 	for _, pl := range payloads {
 		grokScan(pl, 0, func(depth int, lastField int, f float32) {
-			// used% is a fixed32 whose innermost field number is 1.
-			if lastField == 1 && f >= 0 && f <= 100 && depth < bestPctDepth {
-				v := float64(f)
-				bestPct, bestPctDepth = &v, depth
+			if lastField != 1 || f < 0 || f > 100 {
+				return
 			}
+			// A non-zero subnormal is an integer field misread as float, never
+			// a percentage. Exact zero is allowed (a genuine 0% is 0x00000000).
+			if f != 0 && math.Abs(float64(f)) < 1e-6 {
+				return
+			}
+			pctCands = append(pctCands, round2(float64(f)))
 		}, func(v uint64) {
 			f := float64(v)
 			if f >= 1_700_000_000 && f <= 2_100_000_000 {
 				resetCands = append(resetCands, f)
 			}
 		})
+	}
+	if u := grokUnique(pctCands); u != nil {
+		used = u
 	}
 	if len(resetCands) > 0 {
 		t := now()
@@ -188,32 +203,65 @@ func grokParseBilling(body []byte) (used *float64, resets *float64, err error) {
 			resets = &min
 		}
 	}
-	return bestPct, resets, nil
+	return used, resets, nil
+}
+
+// The one value all candidates agree on (within rounding), or nil when they
+// disagree or there are none. "One clear answer or none" is the right bias
+// for a heuristic scan of an unlabelled wire.
+func grokUnique(cands []float64) *float64 {
+	if len(cands) == 0 {
+		return nil
+	}
+	first := cands[0]
+	for _, c := range cands[1:] {
+		if math.Abs(c-first) > 0.01 {
+			return nil
+		}
+	}
+	return &first
 }
 
 // grpc-web data frames: [1B flags][4B BE len][payload]. Frames with the
-// 0x80 bit set are trailers (a text block of key: value) and are skipped —
-// but a non-zero grpc-status in one is a failure.
+// 0x80 bit set are trailers (a text block of key: value); a non-zero
+// grpc-status in one is a failure.
+//
+// A MALFORMED stream is an error, not a shrug: a frame whose declared length
+// runs past the buffer, trailing bytes that are not a whole frame, or a flag
+// byte that is neither data (0x00) nor trailer (0x80) — the compressed and
+// reserved bits Grok does not use — all mean this is not the reply we think
+// it is, and "return what parsed so far" could publish a real reading sitting
+// in front of a truncated failure trailer.
 func grokDataFrames(body []byte) ([][]byte, error) {
 	var out [][]byte
 	i := 0
-	for i+5 <= len(body) {
-		flags := body[i]
-		n := int(binary.BigEndian.Uint32(body[i+1 : i+5]))
-		i += 5
-		if n < 0 || i+n > len(body) {
-			break // ran off the end; take what parsed
+	for i < len(body) {
+		if i+5 > len(body) {
+			return nil, errors.New("trailing bytes are not a whole frame")
 		}
-		frame := body[i : i+n]
-		i += n
-		if flags&0x80 != 0 {
+		flags := body[i]
+		// Length compared BEFORE any int conversion: a uint64→int cast of a
+		// huge value wraps negative and slips past a signed bound check.
+		n := uint64(binary.BigEndian.Uint32(body[i+1 : i+5]))
+		i += 5
+		if n > uint64(len(body)-i) {
+			return nil, errors.New("frame length overruns body")
+		}
+		frame := body[i : i+int(n)]
+		i += int(n)
+		switch flags {
+		case 0x00:
+			out = append(out, frame)
+		case 0x80:
 			// Trailer. A grpc-status other than 0 means the call failed.
 			if st := grokTrailerStatus(frame); st != "" && st != "0" {
 				return nil, errors.New("grpc-status " + st)
 			}
-			continue
+		default:
+			// Compressed (0x01) or any reserved bit: we cannot read it, so we
+			// must not pretend the numbers behind it are current.
+			return nil, errors.New("unsupported grpc-web frame flags")
 		}
-		out = append(out, frame)
 	}
 	return out, nil
 }
@@ -277,10 +325,16 @@ func grokScan(b []byte, depth int, onFixed32 func(depth, field int, f float32), 
 			i += 8
 		case 2: // length-delimited — recurse, it may hold nested messages
 			ln, m := binary.Uvarint(b[i:])
-			if m <= 0 || i+m+int(ln) > len(b) {
+			if m <= 0 {
 				return
 			}
 			i += m
+			// Compare as uint64 before converting: int(ln) on a huge varint
+			// wraps negative and slips past a signed bound check, the same
+			// trap grokDataFrames just closed.
+			if ln > uint64(len(b)-i) {
+				return
+			}
 			grokScan(b[i:i+int(ln)], depth+1, onFixed32, onVarint)
 			i += int(ln)
 		default:

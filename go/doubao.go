@@ -88,10 +88,14 @@ func fetchDoubao() Provider {
 		if err == errAmpTimeout {
 			return fail("unreachable", "arkcli 超时")
 		}
-		if exited && arkcliSignedOut(out) {
-			return fail("not-signed-in", "arkcli 未登录；跑一次 arkcli login。")
-		}
 		return fail("cli-failed", "arkcli 执行失败")
+	}
+	// A non-zero exit that still printed something reaches here with err=nil
+	// (runVendorCLI's contract), so the signed-out check has to sit on THIS
+	// path, before the JSON decode — otherwise a "not logged in" message on a
+	// failing exit is misreported as an api-error (review finding).
+	if exited && arkcliSignedOut(out) {
+		return fail("not-signed-in", "arkcli 未登录；跑一次 arkcli login。")
 	}
 
 	var doc struct {
