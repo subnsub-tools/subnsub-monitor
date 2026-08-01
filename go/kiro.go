@@ -40,10 +40,14 @@ var (
 	kiroHeadRE  = regexp.MustCompile(`(?im)^[ \t]*Estimated Usage[ \t]*\|[^\r\n|]*\|[ \t]*([A-Za-z][A-Za-z0-9 ]+?)[ \t]*$`)
 	// "Plan: Q Developer Pro" — the shape CodexBar records for paid seats.
 	kiroPlanRE = regexp.MustCompile(`(?im)^[ \t]*Plan:[ \t]*([^\r\n]+?)[ \t]*$`)
-	// "Credits (0.00 of 50 covered in plan)" — the real CLI's current shape.
-	kiroCreditsOfRE = regexp.MustCompile(`(?i)\([ \t]*` + amount + `[ \t]+of[ \t]+` + amount + `[ \t]+covered`)
-	// The gauge line: "████ 42%".
-	kiroPctRE = regexp.MustCompile(`(?i)[█▉▊▋▌▍▎▏][ \t]*(\d+)[ \t]*%`)
+	// "Credits (0.00 of 50 covered in plan)" — anchored to the Credits label
+	// (allowing the box-drawing/whitespace the CLI pads with) so a stray
+	// "(N of M …)" elsewhere in the output cannot be mistaken for it.
+	kiroCreditsOfRE = regexp.MustCompile(`(?im)^[ \t│┃]*Credits\b[^\r\n(]*\([ \t]*` + amount + `[ \t]+of[ \t]+` + amount + `[ \t]+covered`)
+	// The gauge line: a run of block characters followed by "N%". Requiring
+	// the bar to be a RUN (2+) and to sit at the line start keeps a lone
+	// glyph in a download/spinner from being read as a quota gauge.
+	kiroPctRE = regexp.MustCompile(`(?im)^[ \t│┃]*[█▉▊▋▌▍▎▏]{2,}[ \t]*(\d+)[ \t]*%`)
 	// "Credits used: 12.5" — the older shape CodexBar still parses; kept as a
 	// fallback so an older CLI loses nothing.
 	kiroCreditsUsedRE = regexp.MustCompile(`(?im)^[ \t]*Credits used:[ \t]*` + amount)
@@ -73,6 +77,11 @@ func kiroReset(s string) *float64 {
 	}
 	nowT := time.Now()
 	t := time.Date(nowT.Year(), time.Month(mo), d, 0, 0, 0, 0, time.Local)
+	// time.Date normalises 02/31 to March 3 rather than rejecting it; a date
+	// that changed under construction was never a real date.
+	if int(t.Month()) != mo || t.Day() != d {
+		return nil
+	}
 	if t.Before(nowT) {
 		t = t.AddDate(1, 0, 0)
 	}

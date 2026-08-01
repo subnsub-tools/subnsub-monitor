@@ -153,6 +153,46 @@ func TestGrokParsesUsedPercentFromFrame(t *testing.T) {
 	}
 }
 
+func TestGrokRejectsAmbiguousAndSubnormalPercent(t *testing.T) {
+	// An integer field 1 = 1 reads as the subnormal 1.4e-45; it must be
+	// rejected, not rounded to 0% and published over a real deeper value.
+	subnormal := protoFixed32(1, math.Float32frombits(1))
+	inner := protoFixed32(1, 37.5)
+	nested := append([]byte{byte(1<<3 | 2), byte(len(inner))}, inner...)
+	used, _, err := grokParseBilling(grokFrame(append(subnormal, nested...)))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if used == nil || math.Abs(*used-37.5) > 0.01 {
+		t.Fatalf("subnormal should be ignored, real 37.5 kept; got %v", used)
+	}
+	// Two DISTINCT real percentages at field 1 is an ambiguous wire — publish
+	// nothing rather than guess which is the quota.
+	a := protoFixed32(1, 20)
+	b := protoFixed32(1, 80)
+	used, _, err = grokParseBilling(grokFrame(append(a, b...)))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if used != nil {
+		t.Fatalf("ambiguous percents must yield nil, got %v", *used)
+	}
+}
+
+func TestGrokFramingRejectsOverrunAndBadFlags(t *testing.T) {
+	// A length that overruns the body is an error, not a partial success.
+	bad := []byte{0x00, 0xff, 0xff, 0xff, 0xff, 0x01}
+	if _, _, err := grokParseBilling(bad); err == nil {
+		t.Fatal("overrunning frame length must error")
+	}
+	// A compressed/reserved flag byte we cannot read must error, not scan.
+	comp := grokFrame(protoFixed32(1, 50))
+	comp[0] = 0x01
+	if _, _, err := grokParseBilling(comp); err == nil {
+		t.Fatal("unsupported frame flags must error")
+	}
+}
+
 func TestGrokTrailerStatusFails(t *testing.T) {
 	// A trailer frame (flag 0x80) carrying grpc-status 7 must surface as error.
 	trailer := []byte("grpc-status:7\r\ngrpc-message:denied\r\n")
@@ -206,5 +246,38 @@ func TestWayfinderBaseRejectsNonLoopback(t *testing.T) {
 	t.Setenv(wayfinderURLEnv, "https://gw.example.com")
 	if got := wayfinderBase(); got != "https://gw.example.com" {
 		t.Fatalf("HTTPS should pass, got %q", got)
+	}
+	// A query string (where a token could hide) or a path is refused — the
+	// value has endpoint paths appended, and Detail travels to the relay.
+	t.Setenv(wayfinderURLEnv, "https://gw.example.com/?token=secret")
+	if got := wayfinderBase(); got != "" {
+		t.Fatalf("query string must be refused, got %q", got)
+	}
+	t.Setenv(wayfinderURLEnv, "https://gw.example.com/some/path")
+	if got := wayfinderBase(); got != "" {
+		t.Fatalf("path must be refused, got %q", got)
+	}
+}
+
+func TestKiloFallbackTriesCentsAndMicro(t *testing.T) {
+	// The production fallback must actually reach the cents family — the bug
+	// was passing nil for it, so only plain keys were ever consulted.
+	ctx := map[string]any{"remainingCents": 500.0}
+	if v, ok := kiloMoney(ctx,
+		[]string{"remainingCents"}, []string{"remaining_mUsd"}, []string{"remaining"}); !ok || v != 5 {
+		t.Fatalf("cents family: want 5, got %v ok=%v", v, ok)
+	}
+	ctx = map[string]any{"balance_mUsd": 2_500_000.0}
+	if v, ok := kiloMoney(ctx, []string{"balanceCents"}, []string{"balance_mUsd"}, nil); !ok || v != 2.5 {
+		t.Fatalf("micro family: want 2.5, got %v ok=%v", v, ok)
+	}
+}
+
+func TestKiroMMDDRejectsImpossibleDates(t *testing.T) {
+	if kiroReset("02/31") != nil {
+		t.Fatal("02/31 normalises to March under time.Date and must be refused")
+	}
+	if kiroReset("13/01") != nil {
+		t.Fatal("month 13 must be refused")
 	}
 }

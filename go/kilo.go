@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -104,29 +105,44 @@ func kiloMoney(ctx map[string]any, cents, micro, plain []string) (float64, bool)
 	return 0, false
 }
 
-// Every object reachable within two levels of a payload, so a value under
-// `data.json.subscription` is found the same way as one at the root — the
-// BFS KiloUsageFetcher.dictionaryContexts performs.
+// Every object reachable within two levels of a payload, SHALLOWEST FIRST, so
+// an authoritative `total` near the root is consulted before a generic
+// `limit` buried in some other branch. A real breadth-first walk with an
+// explicit queue, not the recursion an earlier version used: DFS returned
+// objects in a branch-then-branch order that, combined with Go's randomised
+// map iteration, could pick different numbers for the same JSON on different
+// runs (review finding). Map keys are visited in sorted order at each node so
+// even siblings are deterministic.
 func kiloContexts(v any) []map[string]any {
 	var out []map[string]any
-	var walk func(x any, depth int)
-	walk = func(x any, depth int) {
-		if depth > 2 {
-			return
+	type item struct {
+		v     any
+		depth int
+	}
+	queue := []item{{v, 0}}
+	for len(queue) > 0 {
+		it := queue[0]
+		queue = queue[1:]
+		if it.depth > 2 {
+			continue
 		}
-		switch t := x.(type) {
+		switch t := it.v.(type) {
 		case map[string]any:
 			out = append(out, t)
-			for _, child := range t {
-				walk(child, depth+1)
+			keys := make([]string, 0, len(t))
+			for k := range t {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				queue = append(queue, item{t[k], it.depth + 1})
 			}
 		case []any:
 			for _, child := range t {
-				walk(child, depth+1)
+				queue = append(queue, item{child, it.depth + 1})
 			}
 		}
 	}
-	walk(v, 0)
 	return out
 }
 
@@ -231,16 +247,36 @@ func fetchKilo() Provider {
 				break
 			}
 		}
-		if total == nil && remaining == nil {
+		// Fallback runs whenever ANY of the three is still missing — not only
+		// when total and remaining are both absent — and it consults the full
+		// cents / micro-USD / plain key families the reference does, in that
+		// precedence. The earlier version passed nil for the cents and micro
+		// lists, so only the plain keys were ever tried in production.
+		if used == nil || total == nil || remaining == nil {
 			for _, ctx := range kiloContexts(pay) {
-				if v, ok := kiloMoney(ctx, nil, nil, []string{"used", "usedCredits", "creditsUsed", "consumed", "spent"}); ok && used == nil {
-					used = fp(v)
+				if used == nil {
+					if v, ok := kiloMoney(ctx,
+						[]string{"usedCents", "spentCents", "consumedCents", "usedAmountCents", "consumedAmountCents"},
+						[]string{"used_mUsd", "spent_mUsd", "consumed_mUsd", "usedAmount_mUsd"},
+						[]string{"used", "spent", "consumed", "usage", "creditsUsed", "usedAmount", "consumedAmount"}); ok {
+						used = fp(v)
+					}
 				}
-				if v, ok := kiloMoney(ctx, nil, nil, []string{"total", "totalCredits", "creditsTotal", "limit"}); ok && total == nil {
-					total = fp(v)
+				if total == nil {
+					if v, ok := kiloMoney(ctx,
+						[]string{"amountCents", "totalCents", "planAmountCents", "monthlyAmountCents", "limitCents", "includedCents", "valueCents"},
+						[]string{"amount_mUsd", "total_mUsd", "planAmount_mUsd", "limit_mUsd", "included_mUsd", "value_mUsd"},
+						[]string{"amount", "total", "limit", "included", "value", "creditsTotal", "totalCredits", "planAmount"}); ok {
+						total = fp(v)
+					}
 				}
-				if v, ok := kiloMoney(ctx, nil, nil, []string{"remaining", "remainingCredits", "creditsRemaining"}); ok && remaining == nil {
-					remaining = fp(v)
+				if remaining == nil {
+					if v, ok := kiloMoney(ctx,
+						[]string{"remainingCents", "remainingAmountCents", "availableCents", "leftCents", "balanceCents"},
+						[]string{"remaining_mUsd", "available_mUsd", "left_mUsd", "balance_mUsd"},
+						[]string{"remaining", "available", "left", "balance", "creditsRemaining", "remainingAmount", "availableAmount"}); ok {
+						remaining = fp(v)
+					}
 				}
 			}
 		}

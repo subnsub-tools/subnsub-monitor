@@ -51,14 +51,21 @@ func wayfinderBase() string {
 		v = strings.TrimSpace(v[1 : len(v)-1])
 	}
 	u, err := url.Parse(v)
-	if err != nil || u.Host == "" || u.User != nil {
+	// No embedded credentials, and no path/query/fragment: this value has
+	// endpoint paths appended to it, so anything past the host is both a
+	// correctness bug (the appended path lands in the wrong place) and a leak
+	// risk — a token in ?query= would otherwise ride into an error Detail that
+	// travels to the relay. A bare scheme://host[:port] only.
+	if err != nil || u.Host == "" || u.User != nil ||
+		strings.Trim(u.Path, "/") != "" || u.RawQuery != "" || u.Fragment != "" {
 		return ""
 	}
+	base := u.Scheme + "://" + u.Host
 	if u.Scheme == "https" {
-		return strings.TrimRight(v, "/")
+		return base
 	}
 	if u.Scheme == "http" && wayfinderLoopback(u.Hostname()) {
-		return strings.TrimRight(v, "/")
+		return base
 	}
 	return ""
 }
@@ -80,14 +87,17 @@ func fetchWayfinder() Provider {
 
 	base := wayfinderBase()
 	if base == "" {
+		// Deliberately does NOT echo the override value: Detail travels to the
+		// relay, and a misconfigured override could carry anything.
 		return fail("api-error", "MON_WAYFINDER_URL 不是合法的 loopback/HTTPS 地址")
 	}
 
 	// healthz first: it is how we tell "no gateway here" (unreachable) from
-	// "gateway up but idle". A failure here is the not-installed signal.
+	// "gateway up but idle". A failure here is the not-installed signal. The
+	// base is not published in the message for the same reason.
 	hstatus, hbody, err := provRequest("GET", base+"/healthz", nil, nil)
 	if err != nil || hstatus != 200 {
-		return fail("not-installed", "本机 "+base+" 上没有 Wayfinder 网关在应答")
+		return fail("not-installed", "没有 Wayfinder 网关在配置的地址上应答")
 	}
 	var health struct {
 		Status  string `json:"status"`
@@ -112,11 +122,17 @@ func fetchWayfinder() Provider {
 		return fail("api-error", "Wayfinder savings 响应无法解析")
 	}
 
-	// The saved percentage rides as a Limit only because it is the one number
-	// with a natural 0–100 range; it is labelled "savings", not a quota, and
-	// carries the 30-day window it was computed over. This is the single
-	// place this collector bends "no quota semantics" — a gauge of savings is
-	// legible where a raw dollar figure on a private gateway is not.
+	// NOT a Limit. used_percent is a quota gauge: the panel colours a high
+	// value red ("about to run out") and folds it into the worst-window and
+	// trend calculations. Savings is the opposite polarity — high is GOOD —
+	// so publishing 90% savings as 90% used would paint a healthy gateway as
+	// an emergency (review finding). It rides as a Credits balance instead,
+	// which the panel renders as a neutral figure, with the percentage and
+	// window in the text.
+	// Always a balance line, so a live-but-idle gateway is a visible card
+	// rather than a provider the relay drops for having nothing to show. The
+	// figure includes a digit either way, which is what the relay's balance
+	// check requires.
 	pct := sav.SavedPct
 	if pct < 0 {
 		pct = 0
@@ -124,13 +140,11 @@ func fetchWayfinder() Provider {
 	if pct > 100 {
 		pct = 100
 	}
-	p.Limits = append(p.Limits, Limit{
-		Key: "savings", UsedPercent: round2(pct),
-		WindowMinutes: fp(43200), WindowLabel: sp("30d"),
-	})
+	bal := trimAmount(round2(pct)) + "% saved (30d)"
 	if sav.Priced && sav.Saved > 0 {
-		p.Credits = &Credits{HasCredits: true, Balance: "$" + trimAmount(sav.Saved) + " saved"}
+		bal = "$" + trimAmount(sav.Saved) + " · " + bal
 	}
+	p.Credits = &Credits{HasCredits: true, Balance: bal}
 
 	// The plan chip carries the status and the model count — a local gateway's
 	// identity, not a subscription plan.
