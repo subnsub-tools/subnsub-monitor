@@ -163,7 +163,10 @@ main { padding: 20px; max-width: 1400px; margin: 0 auto; }
 .prov-err { color: var(--bad); font-size: 12px; margin-top: 6px; }
 .prov-err small { color: var(--mute); display: block; margin-top: 2px; }
 .lims { margin-top: 8px; display: grid; gap: 6px; }
-.lrow { display: grid; grid-template-columns: minmax(70px, 130px) 1fr 42px; gap: 8px; align-items: center; }
+/* The third column carries "12.3% left", not "12.3%": the vitals above read
+   as percentages USED, and a quota reading the other way needs the word or
+   the two are indistinguishable. */
+.lrow { display: grid; grid-template-columns: minmax(70px, 130px) 1fr 74px; gap: 8px; align-items: center; }
 .lrow .lab { font-size: 12px; color: var(--mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .lrow .pct { font-size: 12px; text-align: right; }
 .lsub { color: var(--mute); font-size: 11px; margin: -2px 0 0; grid-column: 1 / -1; }
@@ -561,9 +564,14 @@ function renderProviders(m) {
       const row = el('div', 'lrow');
       row.append(el('span', 'lab', l.window_label || l.key));
       const bar = el('div', 'bar ' + limitTone(l));
-      const fill = el('i'); fill.style.width = Math.min(100, l.used_percent) + '%';
+      /* Quotas are shown as what is LEFT, the direction every vendor's own
+         dashboard uses. used_percent stays the wire field — the tone
+         thresholds and the stored history are written in it — and the flip
+         happens here, at the last step before the screen. */
+      const left = Math.max(0, Math.min(100, 100 - l.used_percent));
+      const fill = el('i'); fill.style.width = left + '%';
       bar.append(fill);
-      row.append(bar, el('span', 'pct num', fmt.pct(l.used_percent)));
+      row.append(bar, el('span', 'pct num', fmt.pct(left) + ' left'));
       lims.append(row);
       const subBits = [];
       if (l.scope) subBits.push(l.scope);
