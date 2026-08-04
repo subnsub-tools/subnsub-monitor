@@ -452,7 +452,18 @@ func parseAmpUsage(p Provider, out string, t float64, exited bool) Provider {
 		remaining, ok1 := ampNum(m[1])
 		quota, ok2 := ampNum(m[2])
 		if ok1 && ok2 && quota > 0 {
-			lim := Limit{Key: "free", UsedPercent: ampUsed(remaining / quota * 100)}
+			used := quota - remaining
+			if used < 0 {
+				used = 0
+			}
+			if remaining < 0 {
+				remaining = 0
+			}
+			lim := Limit{
+				Key: "free", UsedPercent: ampUsed(remaining / quota * 100),
+				UsedAmount: fp(round2(used)), TotalAmount: fp(round2(quota)),
+				RemainingAmount: fp(round2(remaining)), Unit: "usd",
+			}
 			// A balance that refills at a fixed rate has an implied window: how
 			// long a full one takes to rebuild. That is the same quantity the
 			// percentage rows call a window length, so it is labelled the same.

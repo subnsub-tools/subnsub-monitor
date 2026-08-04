@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -135,6 +138,71 @@ func TestJitterIsBounded(t *testing.T) {
 	}
 	if len(seen) < 100 {
 		t.Fatalf("jitter() produced only %d distinct values in 200 draws", len(seen))
+	}
+}
+
+func TestRelayDialPrefersIPv4(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+
+	var networks []string
+	dial := func(_ context.Context, network, _ string) (net.Conn, error) {
+		networks = append(networks, network)
+		if network != "tcp4" {
+			return nil, errors.New("unexpected fallback")
+		}
+		return client, nil
+	}
+
+	conn, err := ipv4FirstDialContext(dial, relayIPv4Timeout)(context.Background(), "tcp", "relay.test:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if len(networks) != 1 || networks[0] != "tcp4" {
+		t.Fatalf("dialled %v, want one tcp4 attempt", networks)
+	}
+}
+
+func TestRelayDialFallsBackToDualStack(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+
+	var networks []string
+	dial := func(_ context.Context, network, _ string) (net.Conn, error) {
+		networks = append(networks, network)
+		if network == "tcp4" {
+			return nil, errors.New("no IPv4 route")
+		}
+		return client, nil
+	}
+
+	conn, err := ipv4FirstDialContext(dial, relayIPv4Timeout)(context.Background(), "tcp", "relay.test:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if len(networks) != 2 || networks[0] != "tcp4" || networks[1] != "tcp" {
+		t.Fatalf("dialled %v, want tcp4 then ordinary tcp fallback", networks)
+	}
+}
+
+func TestRelayDialDoesNotFallbackAfterCallerCancels(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var networks []string
+	dial := func(dialCtx context.Context, network, _ string) (net.Conn, error) {
+		networks = append(networks, network)
+		cancel()
+		<-dialCtx.Done()
+		return nil, dialCtx.Err()
+	}
+
+	_, err := ipv4FirstDialContext(dial, relayIPv4Timeout)(ctx, "tcp", "relay.test:443")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %v, want context cancellation", err)
+	}
+	if len(networks) != 1 || networks[0] != "tcp4" {
+		t.Fatalf("dialled %v after cancellation; fallback must not start", networks)
 	}
 }
 

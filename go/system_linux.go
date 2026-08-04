@@ -26,6 +26,7 @@ func systemSnapshot() System {
 	linuxUptime(&s)
 	statfsRoot(&s)
 	linuxNet(&s)
+	linuxTCP(&s)
 	linuxProcs(&s)
 	linuxTemp(&s)
 
@@ -34,7 +35,7 @@ func systemSnapshot() System {
 	// containers) still reports its platform and core count, and the page shows
 	// the gaps rather than an error card.
 	s.OK = s.CPUPercent != nil || s.MemUsedPercent != nil || s.Load1 != nil ||
-		s.UptimeSec != nil || s.DiskUsedPercent != nil
+		s.UptimeSec != nil || s.DiskUsedPercent != nil || s.TCPEstab != nil || s.TCPTimeWait != nil
 	return s
 }
 
@@ -206,6 +207,63 @@ func linuxNet(s *System) {
 		return
 	}
 	s.NetRxBps, s.NetTxBps = rxBps, txBps
+}
+
+// TCP MIB values are named by the preceding header line; their positions have
+// changed across kernels, so a positional parser can quietly turn MaxConn or
+// InSegs into a plausible-looking established count. MaxConn is legitimately
+// -1 and is ignored rather than making the whole line invalid.
+func parseLinuxTCPSNMP(raw string) (estab, retrans float64, ok bool) {
+	lines := strings.Split(raw, "\n")
+	for i := 0; i+1 < len(lines); i++ {
+		h := strings.Fields(lines[i])
+		v := strings.Fields(lines[i+1])
+		if len(h) < 2 || len(v) != len(h) || h[0] != "Tcp:" || v[0] != "Tcp:" {
+			continue
+		}
+		cols := make(map[string]string, len(h)-1)
+		for j := 1; j < len(h); j++ {
+			cols[h[j]] = v[j]
+		}
+		e, e1 := strconv.ParseFloat(cols["CurrEstab"], 64)
+		r, e2 := strconv.ParseFloat(cols["RetransSegs"], 64)
+		if e1 != nil || e2 != nil || e < 0 || r < 0 || !finite(e) || !finite(r) {
+			return 0, 0, false
+		}
+		return e, r, true
+	}
+	return 0, 0, false
+}
+
+func parseLinuxTCPTimeWait(raw string) (float64, bool) {
+	for _, line := range strings.Split(raw, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 3 || f[0] != "TCP:" {
+			continue
+		}
+		for i := 1; i+1 < len(f); i += 2 {
+			if f[i] != "tw" {
+				continue
+			}
+			n, err := strconv.ParseFloat(f[i+1], 64)
+			return n, err == nil && n >= 0 && finite(n)
+		}
+	}
+	return 0, false
+}
+
+func linuxTCP(s *System) {
+	if raw, read := readSmall("/proc/net/snmp"); read {
+		if estab, retrans, ok := parseLinuxTCPSNMP(raw); ok {
+			s.TCPEstab = fp(estab)
+			s.TCPRetransPS = tcpDelta(retrans, now())
+		}
+	}
+	if raw, read := readSmall("/proc/net/sockstat"); read {
+		if tw, ok := parseLinuxTCPTimeWait(raw); ok {
+			s.TCPTimeWait = fp(tw)
+		}
+	}
 }
 
 // PROCESSES, counted as the numeric directories under /proc. An earlier

@@ -5,9 +5,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"fmt"
 	"math"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -129,7 +131,52 @@ func cors(w http.ResponseWriter, origin string) {
 const (
 	minInterval = 5.0
 	maxInterval = 60.0
+	// A dual-stack machine ordinarily lets Go choose between A and AAAA. That
+	// is the right default for generic HTTP, but this particular connection is
+	// also how the relay observes the machine's egress address. Give IPv4 a
+	// short first attempt so the dashboard gets the useful NAT/public-v4
+	// address when the machine has one, then fall back to the ordinary dual-
+	// stack dial rather than taking an IPv6-only machine offline.
+	relayIPv4Timeout = 3 * time.Second
 )
+
+// Wrap a dial function with the relay's address-family preference. Kept at
+// the dial boundary — rather than asking a third-party "what is my IP" service
+// and putting its answer in the payload — so the address remains an observation
+// made by the relay, not a claim made by the helper.
+func ipv4FirstDialContext(
+	dial func(context.Context, string, string) (net.Conn, error),
+	timeout time.Duration,
+) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		// http.Transport asks for "tcp". Preserve an explicit tcp4/tcp6 (and
+		// any non-TCP caller) rather than changing a choice already made above
+		// this layer.
+		if network != "tcp" {
+			return dial(ctx, network, address)
+		}
+
+		v4ctx, cancel := context.WithTimeout(ctx, timeout)
+		conn, err := dial(v4ctx, "tcp4", address)
+		cancel()
+		if err == nil {
+			return conn, nil
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return dial(ctx, network, address)
+	}
+}
+
+func relayTransport() *http.Transport {
+	// Clone the standard transport instead of constructing a partial one: its
+	// proxy support, HTTP/2 settings, pooling and timeouts should stay exactly
+	// as Go ships them. Only address-family selection is special here.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = ipv4FirstDialContext(transport.DialContext, relayIPv4Timeout)
+	return transport
+}
 
 // Dial out and push readings, forever.
 //
@@ -153,8 +200,13 @@ func connect(base, token string, every float64) {
 	tok := &tokenBox{}
 	tok.set(token)
 	go consoleLoop(base, tok)
+	// Started before the first collection, so no push ever measures the system
+	// for itself — the first one to do that would take the baseline every
+	// subsequent sample's delta is measured against (see sampler.go).
+	startSysSampler()
 	client := &http.Client{
-		Timeout: 15 * time.Second,
+		Timeout:   15 * time.Second,
+		Transport: relayTransport(),
 		// Refuse redirects here too. The relay token is a bearer secret — it
 		// can push readings and read them — and Go's default client keeps
 		// Authorization across a redirect to the same domain or a subdomain,

@@ -94,6 +94,10 @@ const (
 	// press that already implies a minute of downloading. Paying the console's
 	// cadence for it would be six times the requests for none of the benefit.
 	updateIdleWait = 60 * time.Second
+	// Diagnostics are user-initiated but not an open interactive session. Poll
+	// faster than update-only so a details click does not routinely wait a full
+	// minute, without paying the open console's permanent ten-second cadence.
+	diagnosticsIdleWait = 30 * time.Second
 	// What it costs when nobody is watching: one small request this often,
 	// answered immediately. It is also the worst case for how long a console
 	// someone just opened waits before this machine notices — after which the
@@ -235,6 +239,8 @@ type consoleCmd struct {
 	// helper that only knew how to run strings.
 	Kind string `json:"kind,omitempty"`
 	Cmd  string `json:"cmd"`
+	// A closed typed diagnostic target. It is never copied into a shell line.
+	Target string `json:"target,omitempty"`
 }
 
 type consolePoll struct {
@@ -296,15 +302,17 @@ func consoleLoop(base string, tok *tokenBox) {
 	}
 	warnedConsole := false
 	warnedUpdate := false
+	warnedDiagnostics := false
 	fails := 0
 
 	for {
-		// Two switches, either of which is a reason to ask. Read every time
+		// Three independent permissions, any of which is a reason to ask. Read every time
 		// round for the same reason consoleEnabled is: turning one OFF has to
 		// be the fast direction.
 		shell := consoleEnabled()
 		update := updateAllowed()
-		if !shell && !update {
+		diagnostics := diagnosticsEnabled()
+		if !shell && !update && !diagnostics {
 			// Neither: no request is made at all. This is the state every
 			// existing install is in, and it has to cost nothing.
 			time.Sleep(consoleIdleWait)
@@ -323,9 +331,15 @@ func consoleLoop(base string, tok *tokenBox) {
 			warnf("remote update is ENABLED: the dashboard can replace this helper's binary")
 			warnedUpdate = true
 		}
+		if diagnostics && !warnedDiagnostics {
+			warnf("read-only diagnostics are ENABLED: the dashboard may request bounded process resource summaries")
+			warnedDiagnostics = true
+		}
 		// A machine that only takes updates is not waiting at a prompt.
 		idle := consoleIdleWait
-		if !shell {
+		if !shell && diagnostics {
+			idle = diagnosticsIdleWait
+		} else if !shell {
 			idle = updateIdleWait
 		}
 
@@ -353,7 +367,14 @@ func consoleLoop(base string, tok *tokenBox) {
 			// anyone has had a console open lately, gets to say how long it
 			// should be. Falls back to this build's own interval when it says
 			// nothing, which is what every older relay does.
-			time.Sleep(consoleWait(poll.Next, idle))
+			wait := consoleWait(poll.Next, idle)
+			// The relay's cold hint is fleet-wide. A diagnostics-only helper has
+			// a deliberately smaller local ceiling so a first details click waits
+			// at most 30 seconds; after it is collected, the relay marks it warm.
+			if !shell && diagnostics && wait > diagnosticsIdleWait {
+				wait = diagnosticsIdleWait
+			}
+			time.Sleep(wait)
 			continue
 		}
 		for _, c := range poll.Commands {
@@ -406,6 +427,14 @@ func consoleLoop(base string, tok *tokenBox) {
 					// process that was asked to replace itself.
 					os.Exit(0)
 				}
+			case "inspect":
+				if !diagnosticsEnabled() {
+					consoleReport(client, resultURL, id, tok,
+						consoleResult{ID: c.ID, Kind: "inspect", Target: c.Target,
+							Code: -1, Error: "diagnostics-off"})
+					continue
+				}
+				consoleReport(client, resultURL, id, tok, runInspect(c.ID, c.Target))
 			case "", "sh":
 				if c.Cmd == "" {
 					continue
@@ -466,11 +495,14 @@ func errStatus(code int) error      { return statusError(code) }
 type consoleResult struct {
 	Agent     string `json:"agent"`
 	ID        string `json:"id"`
+	Kind      string `json:"kind,omitempty"`
+	Target    string `json:"target,omitempty"`
 	Code      int    `json:"code"`
 	Ms        int64  `json:"ms"`
 	Out       string `json:"out"`
 	Truncated bool   `json:"truncated"`
 	Error     string `json:"error,omitempty"`
+	Data      any    `json:"data,omitempty"`
 }
 
 // Send a result back. Returns whether the relay took it.

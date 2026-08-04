@@ -145,6 +145,10 @@ Amp Free: $4.00 / $10.00 remaining (replenishes +$0.50/hour)
 	if free.WindowLabel == nil || *free.WindowLabel != "20h" {
 		t.Errorf("window label = %v, want 20h", free.WindowLabel)
 	}
+	if free.UsedAmount == nil || free.TotalAmount == nil || free.RemainingAmount == nil ||
+		*free.UsedAmount != 6 || *free.TotalAmount != 10 || *free.RemainingAmount != 4 || free.Unit != "usd" {
+		t.Errorf("absolute amounts = %+v, want $6 used / $10 total / $4 left", free)
+	}
 }
 
 // A paid account with no free tier and no subscription still has something
