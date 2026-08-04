@@ -7,7 +7,10 @@ package main
 // username, no path, no process list, no serial, no MAC, no public IP. "93% of
 // the disk is gone" is actionable; "93% of /home/alice on build-07 is gone" is
 // the same fact wearing an identity, and the relay has no business holding the
-// second one. The kernel version is deliberately cut to major.minor for the
+// second one. On-demand diagnostics are the explicit exception: when separately
+// enabled they return a bounded process resource summary to the requesting
+// dashboard only, and never enter this snapshot or its history. The kernel
+// version is deliberately cut to major.minor for the
 // same reason — "6.8" tells you whether a box is ancient, "6.8.0-1050-oracle"
 // also tells an attacker who reads the relay which cloud to look at and which
 // CVEs to try.
@@ -81,6 +84,13 @@ type System struct {
 	NetRxBps *float64 `json:"net_rx_bps,omitempty"`
 	NetTxBps *float64 `json:"net_tx_bps,omitempty"`
 
+	// Aggregate TCP health: counts and a retransmission rate, never endpoints,
+	// addresses, ports or interface names. Like network throughput, the counter
+	// rate needs two samples and is omitted on the first collection.
+	TCPEstab     *float64 `json:"tcp_estab,omitempty"`
+	TCPTimeWait  *float64 `json:"tcp_time_wait,omitempty"`
+	TCPRetransPS *float64 `json:"tcp_retrans_ps,omitempty"`
+
 	// How many processes exist, not what any of them is. The count answers
 	// "is something leaking processes"; a list would answer "what does this
 	// person run", which is the question this file refuses.
@@ -95,6 +105,36 @@ type System struct {
 	// here" rather than leaving a reader to guess whether the machine is idle
 	// or the collector is broken.
 	Missing []string `json:"missing,omitempty"`
+
+	// The fast-moving readings above, sampled every `step` seconds since the
+	// last push instead of once when it happened. Absent unless a sampler is
+	// running (see sampler.go) — one-shot and serve collections carry the
+	// snapshot alone, which is all a single collection can honestly claim.
+	Series *SysSeries `json:"series,omitempty"`
+}
+
+// One frame's worth of samples, oldest first, laid on a fixed grid.
+//
+// The last slot of every array is the snapshot this rides on — the same
+// measurement, rounded for the wire — so the gauges and the end of the line
+// can never disagree. Only the readings that visibly move are carried: disk, swap, load,
+// process count and temperature change on a scale where one point per push is
+// already more resolution than the eye asks for, and thirty copies of an
+// unchanged number would be most of the frame.
+type SysSeries struct {
+	// When the LAST slot was taken, on the machine's clock. The page anchors
+	// the series to the relay's clock through this: the frame's captured_at is
+	// the same clock, so (captured_at − at) is a lag the page can subtract
+	// from the relay's seen_at without ever trusting a machine's absolute time.
+	At   float64 `json:"at"`
+	Step float64 `json:"step"` // seconds per slot
+
+	// nil where the platform cannot read that metric at all; a nil ELEMENT is
+	// a slot with no sample in it.
+	CPU []*float64 `json:"cpu,omitempty"`
+	Mem []*float64 `json:"mem,omitempty"`
+	Rx  []*float64 `json:"rx,omitempty"`
+	Tx  []*float64 `json:"tx,omitempty"`
 }
 
 // Ordered so the page can render a stable list; also the vocabulary Missing
@@ -161,6 +201,24 @@ var netPrev struct {
 	sync.Mutex
 	valid      bool
 	rx, tx, at float64
+}
+
+var tcpPrev struct {
+	sync.Mutex
+	valid     bool
+	retransAt float64
+	at        float64
+}
+
+func tcpDelta(retrans, at float64) *float64 {
+	tcpPrev.Lock()
+	defer tcpPrev.Unlock()
+	valid, old, oldAt := tcpPrev.valid, tcpPrev.retransAt, tcpPrev.at
+	tcpPrev.valid, tcpPrev.retransAt, tcpPrev.at = true, retrans, at
+	if !valid || at <= oldAt || retrans < old {
+		return nil
+	}
+	return fp(round2((retrans - old) / (at - oldAt)))
 }
 
 // Feed one cumulative (rx, tx) reading in, get bytes-per-second since the

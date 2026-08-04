@@ -104,21 +104,9 @@ func kimiNum(v any) *float64 {
 }
 
 func kimiUsed(d *kimiDetail) *float64 {
-	if d == nil {
+	used, limit, _ := kimiAmounts(d)
+	if used == nil || limit == nil {
 		return nil
-	}
-	limit := kimiNum(d.Limit)
-	if limit == nil || *limit <= 0 {
-		return nil
-	}
-	used := kimiNum(d.Used)
-	if used == nil {
-		rem := kimiNum(d.Remaining)
-		if rem == nil {
-			return nil
-		}
-		u := *limit - *rem
-		used = &u
 	}
 	pct := *used / *limit * 100
 	if pct < 0 {
@@ -128,6 +116,52 @@ func kimiUsed(d *kimiDetail) *float64 {
 		pct = 100
 	}
 	return fp(round2(pct))
+}
+
+// The amount triplet behind a Kimi detail. The gateway sometimes omits used
+// and sometimes omits remaining, so derive only the missing side from the real
+// denominator. No unit is attached: the API names FEATURE_CODING but does not
+// promise whether the number represents requests, credits, or another counter.
+func kimiAmounts(d *kimiDetail) (used, total, remaining *float64) {
+	if d == nil {
+		return nil, nil, nil
+	}
+	total = kimiNum(d.Limit)
+	if total == nil || *total <= 0 {
+		return nil, nil, nil
+	}
+	used = kimiNum(d.Used)
+	remaining = kimiNum(d.Remaining)
+	if used != nil && *used < 0 {
+		used = fp(0)
+	}
+	if remaining != nil {
+		if *remaining < 0 {
+			remaining = fp(0)
+		} else if *remaining > *total {
+			remaining = fp(*total)
+		}
+	}
+	if used == nil && remaining != nil {
+		u := *total - *remaining
+		used = &u
+	}
+	if remaining == nil && used != nil {
+		r := *total - *used
+		remaining = &r
+	}
+	if remaining != nil && *remaining < 0 {
+		remaining = fp(0)
+	}
+	if used == nil {
+		return nil, nil, nil
+	}
+	used = fp(round2(*used))
+	total = fp(round2(*total))
+	if remaining != nil {
+		remaining = fp(round2(*remaining))
+	}
+	return used, total, remaining
 }
 
 func kimiReset(d *kimiDetail) *float64 {
@@ -204,10 +238,12 @@ func fetchKimi() Provider {
 			continue
 		}
 		if used := kimiUsed(u.Detail); used != nil {
-			p.Limits = append(p.Limits, Limit{
+			lim := Limit{
 				Key: "weekly", UsedPercent: *used,
 				WindowLabel: sp("7d"), ResetsAt: kimiReset(u.Detail),
-			})
+			}
+			lim.UsedAmount, lim.TotalAmount, lim.RemainingAmount = kimiAmounts(u.Detail)
+			p.Limits = append(p.Limits, lim)
 		}
 		// The short rate window rides in limits[]; only the first is the
 		// governing one, per Kimi's own client.
@@ -215,6 +251,7 @@ func fetchKimi() Provider {
 			l := u.Limits[0]
 			if used := kimiUsed(l.Detail); used != nil {
 				lim := Limit{Key: "rate", UsedPercent: *used, ResetsAt: kimiReset(l.Detail)}
+				lim.UsedAmount, lim.TotalAmount, lim.RemainingAmount = kimiAmounts(l.Detail)
 				if w := kimiNum(l.Window); w != nil && *w > 0 {
 					lim.WindowMinutes = w
 					lim.WindowLabel = windowLabel(*w)

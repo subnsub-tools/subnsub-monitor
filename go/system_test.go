@@ -183,6 +183,7 @@ func TestSnapshotCarriesNoIdentity(t *testing.T) {
 		"swap_total": true, "swap_used_percent": true, "disk_total": true,
 		"disk_used": true, "disk_used_percent": true, "uptime_sec": true,
 		"net_rx_bps": true, "net_tx_bps": true, "procs": true, "temp_c": true,
+		"tcp_estab": true, "tcp_time_wait": true, "tcp_retrans_ps": true,
 		"missing": true,
 	}
 	for _, k := range topLevelKeys(blob) {
@@ -264,5 +265,40 @@ func TestNetDeltaIsSilentlyAbsentInMissingVocabulary(t *testing.T) {
 	}
 	if mNetwork != "network" || mProcs != "procs" {
 		t.Fatalf("vocabulary drifted: %q %q", mNetwork, mProcs)
+	}
+}
+
+func resetTCP() {
+	tcpPrev.Lock()
+	tcpPrev.valid, tcpPrev.retransAt, tcpPrev.at = false, 0, 0
+	tcpPrev.Unlock()
+}
+
+func TestTCPDeltaNeedsTwoSamplesAndRecoversAfterReset(t *testing.T) {
+	resetTCP()
+	if got := tcpDelta(1000, 10); got != nil {
+		t.Fatal("first retransmission sample should report nothing")
+	}
+	if got := tcpDelta(1010, 15); got == nil || *got != 2 {
+		t.Fatalf("want 2 retransmissions/s, got %v", got)
+	}
+	if got := tcpDelta(3, 20); got != nil {
+		t.Fatalf("reset sample should report nothing, got %v", *got)
+	}
+	if got := tcpDelta(8, 25); got == nil || *got != 1 {
+		t.Fatalf("want recovery at 1/s, got %v", got)
+	}
+}
+
+func TestLinuxTCPParsersUseNamesNotPositions(t *testing.T) {
+	snmp := "Tcp: RtoAlgorithm CurrEstab MaxConn RetransSegs InSegs\n" +
+		"Tcp: 1 17 -1 42 999\n"
+	estab, retrans, ok := parseLinuxTCPSNMP(snmp)
+	if !ok || estab != 17 || retrans != 42 {
+		t.Fatalf("SNMP parsed %v/%v ok=%v", estab, retrans, ok)
+	}
+	tw, ok := parseLinuxTCPTimeWait("sockets: used 20\nTCP: inuse 5 orphan 0 tw 13 alloc 8 mem 2\n")
+	if !ok || tw != 13 {
+		t.Fatalf("sockstat tw=%v ok=%v", tw, ok)
 	}
 }

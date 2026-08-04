@@ -103,9 +103,15 @@ func fetchAugment() Provider {
 		if pct > 100 {
 			pct = 100
 		}
+		remaining := *total - *used
+		if remaining < 0 {
+			remaining = 0
+		}
 		p.Limits = append(p.Limits, Limit{
 			Key: "credits", UsedPercent: round2(pct),
 			WindowLabel: sp("month"), ResetsAt: resets,
+			UsedAmount: fp(round2(*used)), TotalAmount: fp(round2(*total)),
+			RemainingAmount: fp(round2(remaining)), Unit: "credits",
 		})
 	}
 

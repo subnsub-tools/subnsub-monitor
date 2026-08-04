@@ -145,6 +145,18 @@ func fetchWayfinder() Provider {
 		bal = "$" + trimAmount(sav.Saved) + " · " + bal
 	}
 	p.Credits = &Credits{HasCredits: true, Balance: bal}
+	// Activity is useful context for the saving figure, but it is not a quota
+	// and therefore never enters a red/amber gauge. Both counters are explicit
+	// zero-capable pointers so an idle gateway reports an honest 0 rather than a
+	// field that looks unsupported.
+	p.Activity = &Activity{
+		WindowLabel: sp("30d"),
+		Requests:    fp(sav.Requests),
+		Tokens:      fp(sav.Tokens),
+	}
+	if sav.Priced && sav.Saved >= 0 {
+		p.Activity.Saved = &Amount{Amount: round2(sav.Saved), Unit: "usd"}
+	}
 
 	// The plan chip carries the status and the model count — a local gateway's
 	// identity, not a subscription plan.

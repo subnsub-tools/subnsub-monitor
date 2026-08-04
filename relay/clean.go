@@ -137,6 +137,26 @@ type system struct {
 	Procs     *float64 `json:"procs,omitempty"`
 	TempC     *float64 `json:"temp_c,omitempty"`
 	Missing   []string `json:"missing,omitempty"`
+	Series    *series  `json:"series,omitempty"`
+}
+
+// One frame's worth of samples for the readings that move fast enough to draw
+// as a line. The helper samples every second and ships the lot with its push,
+// so this is thirty points arriving at once rather than a faster push — the
+// same cadence, the same write count, thirty times the resolution.
+//
+// The last slot of every lane is the snapshot this rides on, so a watcher's
+// gauges and the end of its line are one measurement. Slots with no sample are
+// null: on a CPU line "not measured" and "idle" are opposite claims.
+type series struct {
+	// When the last slot was taken, on the MACHINE's clock — meaningful only
+	// against the frame's own captured_at, which is the same clock.
+	At   float64    `json:"at"`
+	Step float64    `json:"step"`
+	CPU  []*float64 `json:"cpu,omitempty"`
+	Mem  []*float64 `json:"mem,omitempty"`
+	Rx   []*float64 `json:"rx,omitempty"`
+	Tx   []*float64 `json:"tx,omitempty"`
 }
 
 // The loosely-typed shapes the wire actually carries. Decoded with UseNumber
@@ -295,7 +315,7 @@ func cleanReading(body []byte) (string, *reading, bool) {
 	out.Exec = raw.Exec != nil && *raw.Exec
 	out.Upd = raw.Upd != nil && *raw.Upd
 	if len(raw.System) > 0 {
-		out.System = cleanSystem(raw.System)
+		out.System = cleanSystem(raw.System, raw.CapturedAt)
 	}
 	return id, out, true
 }
@@ -451,7 +471,80 @@ func cleanCredits(body json.RawMessage) *credits {
 	return c
 }
 
-func cleanSystem(body json.RawMessage) *system {
+// Slot and lag ceilings for a sampled series. The helper sends at most 72
+// slots; the extra room is for a third-party agent sampling finer, and the
+// ceiling is what keeps a hostile one from posting a megabyte of line.
+const (
+	seriesSlots  = 128
+	seriesMaxLag = 300.0 // seconds between the last slot and captured_at
+)
+
+// Rebuilt lane by lane, with two rules a series needs and a scalar does not.
+//
+// ONE GRID: every lane present must be the same length, because a watcher
+// places slot i at at−(n−1−i)·step and nothing else says when a sample was
+// taken. A lane whose length disagrees is dropped BY ITSELF — one malformed
+// field must never cost a machine its whole system block, the same promise the
+// json.RawMessage fields above make.
+//
+// A HOLE IS NOT A ZERO: an element that fails its guard stays nil.
+func cleanSeries(body json.RawMessage, capturedAt *float64) *series {
+	if len(body) == 0 || capturedAt == nil {
+		return nil
+	}
+	var raw struct {
+		At   json.RawMessage   `json:"at"`
+		Step json.RawMessage   `json:"step"`
+		CPU  []json.RawMessage `json:"cpu"`
+		Mem  []json.RawMessage `json:"mem"`
+		Rx   []json.RawMessage `json:"rx"`
+		Tx   []json.RawMessage `json:"tx"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil
+	}
+	at, step := looseNum(raw.At), looseNum(raw.Step)
+	if at == nil || step == nil || *step < 0.1 || *step > 60 {
+		return nil
+	}
+	// The machine's clock is checked against the machine's own captured_at,
+	// never against this relay's: a box an hour out still draws correctly,
+	// because a watcher anchors the series by the LAG between these two. What
+	// this rejects is a series that does not belong to the frame carrying it.
+	if lag := *capturedAt - *at; lag > seriesMaxLag || lag < -seriesMaxLag {
+		return nil
+	}
+	n := 0
+	lane := func(in []json.RawMessage, pct bool) []*float64 {
+		if len(in) == 0 || len(in) > seriesSlots {
+			return nil
+		}
+		if n != 0 && len(in) != n {
+			return nil
+		}
+		n = len(in)
+		out := make([]*float64, len(in))
+		for i, e := range in {
+			if pct {
+				out[i] = cleanPctPtr(looseNum(e))
+			} else {
+				out[i] = cleanNonNeg(looseNum(e), 1e15)
+			}
+		}
+		return out
+	}
+	s := &series{At: *at, Step: *step}
+	s.CPU = lane(raw.CPU, true)
+	s.Mem = lane(raw.Mem, true)
+	s.Rx = lane(raw.Rx, false)
+	s.Tx = lane(raw.Tx, false)
+	if s.CPU == nil && s.Mem == nil && s.Rx == nil && s.Tx == nil {
+		return nil
+	}
+	return s
+}
+
+func cleanSystem(body json.RawMessage, capturedAt *float64) *system {
 	var raw struct {
 		OK        *bool    `json:"ok"`
 		Platform  *string  `json:"platform"`
@@ -481,6 +574,7 @@ func cleanSystem(body json.RawMessage) *system {
 		NetTxBps json.RawMessage `json:"net_tx_bps"`
 		Procs    json.RawMessage `json:"procs"`
 		TempC    json.RawMessage `json:"temp_c"`
+		Series   json.RawMessage `json:"series"`
 		Missing  []string        `json:"missing"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
@@ -527,6 +621,7 @@ func cleanSystem(body json.RawMessage) *system {
 		n := *v
 		s.TempC = &n
 	}
+	s.Series = cleanSeries(raw.Series, capturedAt)
 	seen := map[string]bool{}
 	for _, m := range raw.Missing {
 		if len(s.Missing) >= maxMissing {

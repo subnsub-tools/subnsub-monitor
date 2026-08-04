@@ -8,6 +8,8 @@ package main
 import (
 	"encoding/binary"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -256,6 +258,34 @@ func TestWayfinderBaseRejectsNonLoopback(t *testing.T) {
 	t.Setenv(wayfinderURLEnv, "https://gw.example.com/some/path")
 	if got := wayfinderBase(); got != "" {
 		t.Fatalf("path must be refused, got %q", got)
+	}
+}
+
+func TestWayfinderKeepsActivityAndSavings(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/healthz":
+			_, _ = w.Write([]byte(`{"status":"ok","offline":false}`))
+		case "/v1/savings":
+			_, _ = w.Write([]byte(`{"priced":true,"requests":1234,"tokens":987654,"saved":48.25,"saved_pct":72.5}`))
+		case "/router/models":
+			_, _ = w.Write([]byte(`{"models":[{"name":"a"},{"name":"b"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv(wayfinderURLEnv, srv.URL)
+
+	p := fetchWayfinder()
+	if !p.OK || p.Activity == nil || p.Activity.Requests == nil || p.Activity.Tokens == nil {
+		t.Fatalf("provider activity = %+v", p)
+	}
+	if *p.Activity.Requests != 1234 || *p.Activity.Tokens != 987654 {
+		t.Fatalf("activity = %+v", p.Activity)
+	}
+	if p.Activity.Saved == nil || p.Activity.Saved.Amount != 48.25 || p.Activity.Saved.Unit != "usd" {
+		t.Fatalf("saved amount = %+v", p.Activity.Saved)
 	}
 }
 

@@ -30,6 +30,7 @@ const usage = `subnsub-monitor — AI coding quota for machines you can't reach
   subnsub-monitor name [LABEL]           show or set this machine's dashboard name
   subnsub-monitor console [on|off]       show or set whether the dashboard may run commands here
   subnsub-monitor update [on|off]        show or set whether the dashboard may replace this helper
+  subnsub-monitor diagnostics [on|off]   show or set read-only on-demand diagnostics
   subnsub-monitor version                print this build's version and exit
   subnsub-monitor selftest               show what the collectors can and cannot open
 
@@ -54,6 +55,10 @@ the published checksum, so the relay cannot point this machine at anything else.
 Turning the console on implies it — a console can already run the installer —
 and 'update on' is for a machine that wants the button and no console. There is
 no timer: nothing is downloaded until somebody presses it.
+
+diagnostics is OFF until you turn it on here. It is read-only and independent
+of the console: the dashboard may request a bounded top-process resource list,
+but receives no command lines, environment, working directories or open files.
 `
 
 func main() {
@@ -73,6 +78,9 @@ func main() {
 				every = clampInterval(v)
 			}
 		}
+		// Same series the daemon pushes, so what `watch` prints is what the
+		// relay would receive rather than a second, thinner shape of it.
+		startSysSampler()
 		for {
 			fmt.Println(string(dump(collectAll())))
 			time.Sleep(time.Duration(every * float64(time.Second)))
@@ -213,6 +221,31 @@ func main() {
 		// change it, exactly as with the console.
 		if note := updateSandboxNote(on); note != "" {
 			fmt.Println(note)
+		}
+
+	case "diagnostics":
+		if len(args) > 1 {
+			on := args[1] == "on" || args[1] == "1" || args[1] == "true" || args[1] == "yes"
+			off := args[1] == "off" || args[1] == "0" || args[1] == "false" || args[1] == "no"
+			if !on && !off {
+				warnf("say 'diagnostics on' or 'diagnostics off'")
+				os.Exit(2)
+			}
+			if on && !diagnosticsAvailable() {
+				warnf("read-only process diagnostics are currently available on Linux only")
+				os.Exit(1)
+			}
+			if err := setDiagnostics(on); err != nil {
+				warnf("could not change the diagnostics setting: %v", err)
+				os.Exit(1)
+			}
+		}
+		if !diagnosticsAvailable() {
+			fmt.Printf("unsupported  (%s)\n", agentID())
+		} else if diagnosticsEnabled() {
+			fmt.Printf("on   (%s)\n", agentID())
+		} else {
+			fmt.Printf("off  (%s)\n", agentID())
 		}
 
 	case "version":

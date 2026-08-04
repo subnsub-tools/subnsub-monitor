@@ -117,6 +117,29 @@ func copilotUsed(s *copilotSnapshot) *float64 {
 	return fp(round2(used))
 }
 
+// The exact figures behind the percentage, when GitHub supplied both sides.
+// Keep this separate from copilotUsed: percent_remaining can stand on its own,
+// so a useful gauge must not disappear merely because the absolute pair did.
+func copilotAmounts(s *copilotSnapshot) (used, total, remaining *float64) {
+	if s == nil || s.Unlimited {
+		return nil, nil, nil
+	}
+	ent := asNum(s.Entitlement)
+	rem := asNum(s.Remaining)
+	if ent == nil || rem == nil || *ent <= 0 {
+		return nil, nil, nil
+	}
+	u := *ent - *rem
+	if u < 0 {
+		u = 0
+	}
+	used, total = fp(round2(u)), fp(round2(*ent))
+	if *rem >= 0 {
+		remaining = fp(round2(*rem))
+	}
+	return used, total, remaining
+}
+
 func fetchCopilot() Provider {
 	p := Provider{ID: "copilot", Name: "Copilot", Source: "api", CapturedAt: now()}
 	fail := func(err, detail string) Provider {
@@ -198,10 +221,12 @@ func fetchCopilot() Provider {
 		if key == "premium_interactions" {
 			label = "premium"
 		}
-		p.Limits = append(p.Limits, Limit{
+		lim := Limit{
 			Key: tame(label, 24), UsedPercent: *used,
 			WindowLabel: sp("month"), ResetsAt: resets,
-		})
+		}
+		lim.UsedAmount, lim.TotalAmount, lim.RemainingAmount = copilotAmounts(&s)
+		p.Limits = append(p.Limits, lim)
 	}
 	if unlimited {
 		p.Credits = &Credits{HasCredits: true, Unlimited: true}

@@ -300,7 +300,21 @@ func fetchKilo() Provider {
 		if pct > 100 {
 			pct = 100
 		}
-		p.Limits = append(p.Limits, Limit{Key: "credits", UsedPercent: round2(pct)})
+		rem := remaining
+		if rem == nil {
+			r := *total - *used
+			if r < 0 {
+				r = 0
+			}
+			rem = fp(r)
+		} else if *rem < 0 {
+			rem = fp(0)
+		}
+		p.Limits = append(p.Limits, Limit{
+			Key: "credits", UsedPercent: round2(pct),
+			UsedAmount: fp(round2(*used)), TotalAmount: fp(round2(*total)),
+			RemainingAmount: fp(round2(*rem)), Unit: "usd",
+		})
 	} else if total != nil && *total == 0 {
 		// Explicitly exhausted, the reference's (0,0,0) shape.
 		p.Limits = append(p.Limits, Limit{Key: "credits", UsedPercent: 100})
@@ -340,9 +354,15 @@ func fetchKilo() Provider {
 			if pct > 100 {
 				pct = 100
 			}
+			remaining := *pTotal - *pUsed
+			if remaining < 0 {
+				remaining = 0
+			}
 			p.Limits = append(p.Limits, Limit{
 				Key: "kilo_pass", UsedPercent: round2(pct),
 				WindowLabel: sp("plan"), ResetsAt: pReset,
+				UsedAmount: fp(round2(*pUsed)), TotalAmount: fp(round2(*pTotal)),
+				RemainingAmount: fp(round2(remaining)), Unit: "usd",
 			})
 		}
 	}

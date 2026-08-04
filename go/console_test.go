@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -171,5 +172,57 @@ func TestConsoleWaitClampsWhateverTheRelaySays(t *testing.T) {
 		if got := consoleWait(c.next, fb); got != c.want {
 			t.Fatalf("consoleWait(%d) = %v, want %v", c.next, got, c.want)
 		}
+	}
+}
+
+func TestDiagnosticsHasAnIndependentFailClosedSwitch(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(consoleEnvVar, "")
+	t.Setenv(diagnosticsEnvVar, "")
+	if !diagnosticsAvailable() {
+		t.Skip("the first diagnostics target is Linux-only")
+	}
+	if diagnosticsEnabled() {
+		t.Fatal("diagnostics on with no file and no env")
+	}
+	if err := setDiagnostics(true); err != nil {
+		t.Fatalf("setDiagnostics(true): %v", err)
+	}
+	if !diagnosticsEnabled() {
+		t.Fatal("diagnostics still off after opt-in")
+	}
+	if st, err := os.Stat(diagnosticsFile()); err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("diagnostics marker mode = %v, err=%v; want 0600", st, err)
+	}
+	if consoleEnabled() {
+		t.Fatal("diagnostics opt-in also enabled the shell console")
+	}
+	t.Setenv(diagnosticsEnvVar, "0")
+	if diagnosticsEnabled() {
+		t.Fatal("MON_DIAGNOSTICS=0 was overruled by the marker")
+	}
+}
+
+func TestProcessStatAllowsSpacesAndParenthesesInComm(t *testing.T) {
+	// After the comm: state(3), fields 4 through 24. utime=14, stime=15,
+	// starttime=22 and rss=24 are deliberately distinctive.
+	raw := "77 (worker ) name) S 4 5 6 7 8 9 10 11 12 13 7 8 16 17 18 19 20 21 1234 23 99\n"
+	start, ticks, rss, ok := parseProcessStat(raw)
+	if !ok || ticks != 15 || start != 1234 || rss != 99 {
+		t.Fatalf("parsed start=%v ticks=%v rss=%v ok=%v", start, ticks, rss, ok)
+	}
+}
+
+func TestProcessCPUTotalDoesNotDoubleCountGuests(t *testing.T) {
+	got, ok := parseTotalCPUTicks("cpu  1 2 3 4 5 6 7 8 900 1000")
+	if !ok || got != 36 {
+		t.Fatalf("total=%v ok=%v, want 36 true", got, ok)
+	}
+}
+
+func TestProcessNameDropsControlsAndBidi(t *testing.T) {
+	got := cleanProcessName("  node\n\u202ehidden  ")
+	if got != "nodehidden" {
+		t.Fatalf("cleaned process name %q", got)
 	}
 }

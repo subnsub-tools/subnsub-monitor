@@ -60,6 +60,19 @@ func TestCopilotUsedReadsAndDerives(t *testing.T) {
 	}
 }
 
+func TestCopilotAmountsKeepTheAbsolutePair(t *testing.T) {
+	used, total, remaining := copilotAmounts(&copilotSnapshot{
+		Entitlement: 300.0, Remaining: 60.0, PercentRemaining: 20.0,
+	})
+	if used == nil || total == nil || remaining == nil ||
+		*used != 240 || *total != 300 || *remaining != 60 {
+		t.Fatalf("amounts = %v / %v / %v, want 240 / 300 / 60", used, total, remaining)
+	}
+	if u, n, r := copilotAmounts(&copilotSnapshot{Entitlement: 0.0, Remaining: 0.0}); u != nil || n != nil || r != nil {
+		t.Fatalf("placeholder must carry no amounts, got %v / %v / %v", u, n, r)
+	}
+}
+
 // ── Droid (Factory) ───────────────────────────────────────────────────────
 
 func TestFactoryResetDisambiguatesUnits(t *testing.T) {
@@ -142,6 +155,27 @@ func TestKimiUsedHandlesStringNumbers(t *testing.T) {
 	d = &kimiDetail{Limit: "2,048", Used: "1,024"}
 	if got := kimiUsed(d); got == nil || *got != 50 {
 		t.Fatalf("grouped: want 50, got %v", got)
+	}
+}
+
+func TestKimiAmountsDeriveOnlyTheMissingSide(t *testing.T) {
+	used, total, remaining := kimiAmounts(&kimiDetail{Limit: "2048", Used: "117"})
+	if used == nil || total == nil || remaining == nil ||
+		*used != 117 || *total != 2048 || *remaining != 1931 {
+		t.Fatalf("from used = %v / %v / %v", used, total, remaining)
+	}
+	used, total, remaining = kimiAmounts(&kimiDetail{Limit: "100", Remaining: "25"})
+	if used == nil || total == nil || remaining == nil ||
+		*used != 75 || *total != 100 || *remaining != 25 {
+		t.Fatalf("from remaining = %v / %v / %v", used, total, remaining)
+	}
+	used, total, remaining = kimiAmounts(&kimiDetail{Limit: "100", Used: "-5"})
+	if used == nil || remaining == nil || *used != 0 || *remaining != 100 {
+		t.Fatalf("negative used must clamp before deriving remaining, got %v / %v / %v", used, total, remaining)
+	}
+	used, total, remaining = kimiAmounts(&kimiDetail{Limit: "100", Used: "125"})
+	if used == nil || remaining == nil || *used != 125 || *remaining != 0 {
+		t.Fatalf("overage must not produce negative remaining, got %v / %v / %v", used, total, remaining)
 	}
 }
 
