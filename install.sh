@@ -51,13 +51,13 @@ LABEL=com.subnsub.monitor   # shows up in `launchctl list`; brand domain there t
 # script that publishes the binaries. A binary that does not match is not installed, and a swapped binary
 # would otherwise be free to read ~/.claude/.credentials.json and post it
 # somewhere, which no amount of care in the Go source can prevent.
-SUM_linux_amd64=2e89719a58b290b3fd666a955fec63ab81d65696fb3e05dc91a785d713d0e188
-SUM_linux_arm64=df23880eef640137b9ecca41c24215a1fe05797782e89c00cd91a7a1b609834d
-SUM_linux_arm=f720193ea7c0d489f3582d77857b0f5eb7aaf5c54f37f33ead23096d96324f7f
-SUM_darwin_amd64=b9f137f36eb2c1abe0fd7a63cf527330234c2a5fdef45691436604848deb2a4f
-SUM_darwin_arm64=cf6843e1f586c71ac73f4024a729d9b927603ff5755189fd3e87d6b73d06b7d2
-SUM_freebsd_amd64=3a52447fba871af525755d905df9f8f69c7a5f904ff63e5a4c2b8cf8be10bd8f
-SUM_freebsd_arm64=914e5791589ccdbe530e0ee8fcdc04d816303ec6f7979bfafcd28082349ba416
+SUM_linux_amd64=811d9685f51db1d52aac629c861fec0df6a0b699a00adebe8e1fe2a980fd9c98
+SUM_linux_arm64=b8a542cb6da6fff0365b6927d0157fa5044233c1d25afe9f74c3e526b71e7096
+SUM_linux_arm=45335e03c5491f2e79b95b43a068ce36e17de27433fdc38e9c547eb8e29d4926
+SUM_darwin_amd64=1afade824f4516f62456a8aaef0cf8491031e9168f6b1fe9bfba1d88d9ecf01c
+SUM_darwin_arm64=390226498caed6c0abedc2983a0501e0246633beeef815e8b8a787d48a10e17c
+SUM_freebsd_amd64=2b50a2543a0c56cf21d5ab94166567be4f707a7ca1658ac1af58f9cf92568782
+SUM_freebsd_arm64=b505e3a71f7803e6e62823ef61554c7a1ca2f7620bfa1b3a71fa240a3e39d961
 
 say()  { printf '%s\n' "$*"; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -99,7 +99,8 @@ uninstall() {
     rm -f "${INSTALLED_BIN:-$BINDIR/$NAME}" "$HOME/.config/$NAME/token" \
           "$HOME/.config/$NAME/token.current" "$HOME/.config/$NAME/token.current.new" \
           "$HOME/.config/$NAME/agent-id" "$HOME/.config/$NAME/name" \
-          "$HOME/.config/$NAME/console" "$HOME/.config/$NAME/update" "$manifest"
+          "$HOME/.config/$NAME/console" "$HOME/.config/$NAME/update" \
+          "$HOME/.config/$NAME/diagnostics" "$manifest"
     # The binary the last self-update moved aside. Left behind it would be an
     # unreferenced few megabytes under a name nothing else will ever clean up.
     rm -f "${INSTALLED_BIN:-$BINDIR/$NAME}.prev"
