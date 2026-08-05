@@ -89,3 +89,34 @@ func TestNICCountersMatchByName(t *testing.T) {
 		t.Error("a negative counter was admitted as a reading")
 	}
 }
+
+// The cap has to spend itself on the interfaces worth having. A container host
+// full of bridges must not push the machine's real NIC off the list just
+// because "br-" sorts before "eth".
+func TestNICCapPrefersUsefulInterfaces(t *testing.T) {
+	out := make([]NIC, 0, 20)
+	for i := 0; i < 18; i++ {
+		out = append(out, NIC{Name: "br-" + string(rune('a'+i)), Up: true})
+	}
+	out = append(out, NIC{Name: "eth0", IPs: []string{"10.0.0.5"}, Up: true})
+	out = append(out, NIC{Name: "wg0", IPs: []string{"10.9.0.2"}, Up: false})
+	kept := capNICs(out)
+	if len(kept) != maxNICs {
+		t.Fatalf("kept %d, want %d", len(kept), maxNICs)
+	}
+	seen := map[string]bool{}
+	for _, n := range kept {
+		seen[n.Name] = true
+	}
+	if !seen["eth0"] {
+		t.Error("the addressed interface was capped away")
+	}
+	if !seen["wg0"] {
+		t.Error("a down interface WITH an address still beats an addressless one")
+	}
+	for i := 1; i < len(kept); i++ {
+		if kept[i-1].Name > kept[i].Name {
+			t.Fatalf("display order is not by name: %q before %q", kept[i-1].Name, kept[i].Name)
+		}
+	}
+}
