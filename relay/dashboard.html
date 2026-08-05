@@ -873,6 +873,27 @@ function onFrame(f) {
    to. Text for a human to copy, never a load. */
 const PUB_BASE = 'https://tools.subnsub.com/monitor';
 
+/* Everything woven into a generated command is either from a CLOSED set or
+   it is refused — these lines get pasted into shells, and an unquoted
+   $(…) inside a "relay URL" or a "token" would run on the machine being
+   enrolled. Same alphabet the relay enforces, so a token that fails here
+   was never going to push anyway. */
+const TOKEN_RE = /^[A-Za-z0-9_-]{24,128}$/;
+
+/* A relay URL fit to sit unquoted in a shell line: parses, http(s), no
+   credentials, no query or fragment, and every character from a set no
+   shell interprets. Brackets are excluded on purpose — an IPv6 literal is
+   a glob pattern to an unquoted shell — so those machines get a hostname
+   in front of them instead. */
+function cleanRelayURL(raw) {
+  let u;
+  try { u = new URL(raw); } catch (_) { return null; }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+  if (u.username || u.password || u.search || u.hash) return null;
+  const s = (u.origin + u.pathname).replace(/\/+$/, '');
+  return /^[A-Za-z0-9.:/_-]+$/.test(s) ? s : null;
+}
+
 /* The install command, with the one POSIX trap this page used to set for its
    own operators: the MON_RELAY assignment must ride on `sh`, not on `curl` —
    a VAR=value prefix reaches only the first command of a pipeline, and it is
@@ -880,7 +901,6 @@ const PUB_BASE = 'https://tools.subnsub.com/monitor';
    the DEFAULT relay, which 403s a self-hosted token, and the machine simply
    never appeared here. */
 function installCmds(relay, tok) {
-  relay = relay.replace(/\/+$/, '');
   const dl = state.dlLive === true;
   const base = dl ? relay + '/dl' : PUB_BASE;
   const env = 'MON_RELAY=' + relay + (dl ? ' MON_BASE=' + base : '');
@@ -898,8 +918,19 @@ function installCmds(relay, tok) {
 const prefillTok = () => (state.tokenSplit === false ? state.token : null);
 
 function renderEmpty() {
+  /* location.origin is this page's own — but it still goes through the same
+     gate as typed input, because an IPv6-literal origin is just as unfit to
+     sit unquoted in a shell line as a typed one. */
+  const relay = cleanRelayURL(location.origin);
+  if (!relay) {
+    $('#empty-cmd').textContent = '';
+    $('#empty-alt').textContent = 'This page’s own address does not fit ' +
+      'safely into a shell line (an IPv6 literal, most likely) — reach the ' +
+      'relay by hostname and the command appears here.';
+    return;
+  }
   const tok = prefillTok() || 'TOKEN';
-  const c = installCmds(location.origin, tok);
+  const c = installCmds(relay, tok);
   $('#empty-cmd').textContent = c.https ? c.one : c.hand;
   $('#empty-alt').textContent = c.https
     ? 'or by hand, where the helper is already installed:  ' + c.hand
@@ -911,17 +942,40 @@ function renderSetup() {
   const split = state.tokenSplit !== false;
   $('#set-tokrow').style.display = split ? '' : 'none';
   $('#set-toknote').style.display = split ? '' : 'none';
-  const relay = $('#set-url').value.trim() || location.origin;
-  const tok = (split ? $('#set-tok').value.trim() : state.token) || 'TOKEN';
+  const warn = [];
+
+  const relay = cleanRelayURL($('#set-url').value.trim() || location.origin);
+  if (!relay) {
+    /* No command at all — a refused URL must not leave a copyable line
+       behind, least of all the previous URL's. */
+    $('#set-cmd-t').textContent = 'no command for this URL';
+    $('#set-cmd').textContent = '';
+    $('#set-hand').textContent = '';
+    $('#set-src').textContent = '';
+    $('#set-warn').textContent = 'That relay URL cannot sit safely in a ' +
+      'shell line. http(s), no credentials, no query — and hostnames ' +
+      'rather than IPv6 literals, which unquoted shells read as globs.';
+    $('#set-warn').style.display = '';
+    return;
+  }
+
+  const tokRaw = split ? $('#set-tok').value.trim() : state.token;
+  let tok = 'TOKEN';
+  if (TOKEN_RE.test(tokRaw)) tok = tokRaw;
+  else if (tokRaw) {
+    warn.push('That is not a token this relay could accept (24-128 ' +
+      'characters of A-Za-z0-9_-), so the command carries the placeholder ' +
+      'instead.');
+  }
+
   const c = installCmds(relay, tok);
   $('#set-cmd-t').textContent = c.https ? 'install and connect'
     : 'this relay is not behind https';
   $('#set-cmd').textContent = c.https ? c.one : c.hand;
   $('#set-hand').textContent = c.hand;
   $('#set-src').textContent = state.dlLive === true
-    ? 'The installer and binaries come from this relay (/dl/) — nothing is fetched from anywhere else.'
+    ? 'The install fetches the installer and binaries from this relay (/dl/) and touches no other host. Remote self-update, if you enable it later, still fetches from the public release bucket by design — the README explains.'
     : 'Binaries come from the public release host; run the relay with -dist to serve them yourself.';
-  const warn = [];
   if (!c.https) {
     warn.push('The one-line installer refuses a plain-http relay — a bearer ' +
       'token crossing a network in cleartext is a token that network has. ' +
@@ -1060,6 +1114,13 @@ function forgetToken(msg) {
   $('#addm').textContent = 'add machine';
   $('#setup').style.display = 'none';
   $('#set-tok').value = '';
+  /* "Forget the token" has to mean the GENERATED lines too: the one-token
+     command carries the dashboard token verbatim, and the split-mode one
+     carries whatever machine token was pasted — both would otherwise sit
+     on in hidden text nodes after sign-out. */
+  for (const id of ['set-cmd', 'set-hand', 'empty-cmd', 'empty-alt']) {
+    $('#' + id).textContent = '';
+  }
   $('#gate').style.display = '';
   setConn('signed out', false);
   if (msg) { $('#gate-err').textContent = msg; $('#gate-err').style.display = 'block'; }
