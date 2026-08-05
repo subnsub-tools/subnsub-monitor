@@ -36,6 +36,7 @@ const (
 	// eight addresses covers a v4, a global v6, a privacy v6 and aliases.
 	maxNICs      = 16
 	maxNICAddrs  = 8
+	maxNICName   = 40
 	detailArgMax = 120 // a credential path or a dial error, not a paragraph
 )
 
@@ -43,11 +44,6 @@ var (
 	agentIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{4,32}$`)
 	versionRe = regexp.MustCompile(`^\d{4}\.\d{2}\.\d{2}\.\d{1,3}$`)
 	kernelRe  = regexp.MustCompile(`^\d{1,4}\.\d{1,4}$`)
-	// An interface is named by its kernel, and kernels do not put spaces or
-	// slashes in one. A character class rather than a length cap, for the
-	// reason the platform/arch whitelists give: a cap turns an identifying
-	// string into a shorter identifying string.
-	nicNameRe = regexp.MustCompile(`^[A-Za-z0-9._@:-]{1,24}$`)
 	// Why a provider failed, in machine form — a lookup key, so a closed shape
 	// rather than a length cap.
 	detailCodeRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
@@ -180,10 +176,10 @@ type system struct {
 	NetRxTotal *float64 `json:"net_rx_total,omitempty"`
 	NetTxTotal *float64 `json:"net_tx_total,omitempty"`
 	NICs       []nic    `json:"nics,omitempty"`
-	Procs     *float64 `json:"procs,omitempty"`
-	TempC     *float64 `json:"temp_c,omitempty"`
-	Missing   []string `json:"missing,omitempty"`
-	Series    *series  `json:"series,omitempty"`
+	Procs      *float64 `json:"procs,omitempty"`
+	TempC      *float64 `json:"temp_c,omitempty"`
+	Missing    []string `json:"missing,omitempty"`
+	Series     *series  `json:"series,omitempty"`
 }
 
 // One frame's worth of samples for the readings that move fast enough to draw
@@ -270,6 +266,34 @@ func clampPct(v float64, ceiling float64) float64 {
 // helper's own (nics.go): sixteen rows, eight addresses in one, a kernel-shaped
 // name, one row per name. A row that fails any of it is dropped on its own —
 // one malformed interface must never cost a machine the rest of its list.
+// An interface name, which is NOT a kernel-shaped token: Go reports Windows
+// interfaces by their friendly name, so "Ethernet 2" and "Wi-Fi" are ordinary
+// and a localised install spells them in its own script. A class built around
+// eth0/wg0 emptied the panel on every Windows machine. What is dangerous in a
+// string about to be rendered is not a space but the characters that CONTROL
+// rendering — C0/C1, the bidi overrides and isolates, the zero-width joiners,
+// the line separators — and those are the ones refused here. Bounded by RUNES,
+// so a name in a non-Latin script gets its full length.
+func cleanNicName(v string) string {
+	s := strings.TrimSpace(v)
+	if s == "" || len([]rune(s)) > maxNICName {
+		return ""
+	}
+	for _, r := range s {
+		switch {
+		case r < 0x20, r >= 0x7f && r <= 0x9f:
+			return ""
+		case r == 0x061c, r >= 0x200b && r <= 0x200f:
+			return ""
+		case r == 0x2028, r == 0x2029, r >= 0x202a && r <= 0x202e:
+			return ""
+		case r >= 0x2060 && r <= 0x2064, r >= 0x2066 && r <= 0x2069, r == 0xfeff:
+			return ""
+		}
+	}
+	return s
+}
+
 func cleanNICs(raw []json.RawMessage) []nic {
 	if len(raw) == 0 {
 		return nil
@@ -290,11 +314,12 @@ func cleanNICs(raw []json.RawMessage) []nic {
 		if json.Unmarshal(item, &r) != nil {
 			continue
 		}
-		if !nicNameRe.MatchString(r.Name) || seen[r.Name] {
+		name := cleanNicName(r.Name)
+		if name == "" || seen[name] {
 			continue
 		}
-		seen[r.Name] = true
-		n := nic{Name: r.Name, Up: r.Up != nil && *r.Up}
+		seen[name] = true
+		n := nic{Name: name, Up: r.Up != nil && *r.Up}
 		for _, a := range r.IPs {
 			if len(n.IPs) >= maxNICAddrs {
 				break
@@ -741,10 +766,10 @@ func cleanSystem(body json.RawMessage, capturedAt *float64) *system {
 		NetRxTotal json.RawMessage   `json:"net_rx_total"`
 		NetTxTotal json.RawMessage   `json:"net_tx_total"`
 		NICs       []json.RawMessage `json:"nics"`
-		Procs    json.RawMessage `json:"procs"`
-		TempC    json.RawMessage `json:"temp_c"`
-		Series   json.RawMessage `json:"series"`
-		Missing  []string        `json:"missing"`
+		Procs      json.RawMessage   `json:"procs"`
+		TempC      json.RawMessage   `json:"temp_c"`
+		Series     json.RawMessage   `json:"series"`
+		Missing    []string          `json:"missing"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil
