@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"syscall"
@@ -48,12 +49,18 @@ options:
                     unset, the push token also watches
   -listen ADDR      address to bind (default 127.0.0.1:8788)
   -state PATH       file to persist names and last readings across restarts
+  -dist DIR         also serve the helper's installer and binaries from DIR at
+                    /dl/ (build them with go/build.sh and copy install.sh in),
+                    so machines download from this relay and nowhere else
 
 Mint a token with 'subnsub-monitor token' (any 24-128 chars of A-Za-z0-9_- do).
 Then, on each machine to watch:
 
-  MON_RELAY=https://relay.example.org \
-    curl -fsSL https://tools.subnsub.com/monitor/install.sh | sh -s -- TOKEN
+  curl -fsSL https://tools.subnsub.com/monitor/install.sh \
+    | MON_RELAY=https://relay.example.org sh -s -- TOKEN
+
+(The assignment rides on sh, not curl: a VAR=value prefix reaches only the
+first command of a pipeline, and it is the installer that reads MON_RELAY.)
 
 or, by hand:  subnsub-monitor connect https://relay.example.org TOKEN
 
@@ -117,6 +124,7 @@ func main() {
 		opFlag    = flag.String("op-token", "", "")
 		listen    = flag.String("listen", "127.0.0.1:8788", "")
 		statePath = flag.String("state", "", "")
+		distDir   = flag.String("dist", "", "")
 	)
 	flag.Usage = func() { fmt.Fprint(os.Stderr, relayUsage) }
 	flag.Parse()
@@ -145,9 +153,25 @@ func main() {
 		os.Exit(2)
 	}
 
+	if *distDir != "" {
+		// Checked now, loudly. A mistyped directory that turned into silent
+		// 404s would read as "the download link is broken" on some other
+		// machine, hours later, with the cause long scrolled away.
+		if st, err := os.Stat(*distDir); err != nil || !st.IsDir() {
+			fmt.Fprintf(os.Stderr, "error: -dist %s is not a readable directory\n", *distDir)
+			os.Exit(2)
+		}
+	}
+
 	hub := newHub(*statePath)
+	// Whether the dashboard secret differs from the machine one. The page
+	// needs to know because its add-machine panel prefills the token the
+	// viewer signed in with — which is exactly right when there is one token,
+	// and would hand the DASHBOARD secret to a monitored box when there are
+	// two. Written once, before anything serves.
+	hub.tokenSplit = opTok != machineTok
 	az := newAuth(machineTok, opTok)
-	mux := routes(hub, az)
+	mux := routes(hub, az, *distDir)
 
 	// Timeouts shaped like the helper's own listener: header and body reads
 	// bounded, no global write deadline — /api/stream and a held /commands
@@ -175,6 +199,9 @@ func main() {
 	if strings.HasPrefix(*listen, "127.0.0.1") || strings.HasPrefix(*listen, "localhost") {
 		fmt.Fprintf(os.Stderr, "loopback only — put a TLS proxy in front for machines elsewhere\n")
 	}
+	if *distDir != "" {
+		fmt.Fprintf(os.Stderr, "serving helper downloads from %s at /dl/\n", *distDir)
+	}
 	if err := srv.ListenAndServe(); err != nil {
 		fmt.Fprintf(os.Stderr, "listener stopped: %v\n", err)
 		hub.saveState()
@@ -182,9 +209,29 @@ func main() {
 	}
 }
 
+// The exact names /dl may serve — the whitelist IS the access model, and a
+// name either matches an entry here or is not served, which is what makes the
+// route safe to leave unauthenticated: nothing an operator drops in the
+// directory by accident can reach the network, and a traversal has no name to
+// arrive at. The binary names are a protocol, not a convention — the helper's
+// self-update and the installer both spell them from GOOS-GOARCH — so this
+// list changes only when the published target list does.
+var distFiles = map[string]string{
+	"install.sh":                    "text/plain; charset=utf-8",
+	"SHA256SUMS":                    "text/plain; charset=utf-8",
+	"VERSION":                       "text/plain; charset=utf-8",
+	"subnsub-monitor-linux-amd64":   "application/octet-stream",
+	"subnsub-monitor-linux-arm":     "application/octet-stream",
+	"subnsub-monitor-linux-arm64":   "application/octet-stream",
+	"subnsub-monitor-darwin-amd64":  "application/octet-stream",
+	"subnsub-monitor-darwin-arm64":  "application/octet-stream",
+	"subnsub-monitor-freebsd-amd64": "application/octet-stream",
+	"subnsub-monitor-freebsd-arm64": "application/octet-stream",
+}
+
 // Every route this relay answers, in one place so the tests drive the same
 // mux the binary serves rather than a reconstruction of it.
-func routes(hub *Hub, az auth) *http.ServeMux {
+func routes(hub *Hub, az auth, distDir string) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// ── the helper's three legs, wire-compatible with the hosted relay ─────
@@ -293,6 +340,43 @@ func routes(hub *Hub, az auth) *http.ServeMux {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, "monitor-relay ok")
 	})
+
+	// ── optional: hand out the helper itself ───────────────────────────────
+	//
+	// With -dist, the install command this relay's dashboard generates points
+	// machines HERE for the installer and the binaries, so a deployment built
+	// from source touches no host but its own. Unauthenticated on purpose:
+	// the installer is fetched by `curl | sh` with no way to carry a header,
+	// and everything nameable here is public release material — the same
+	// bytes as the repository this program came from. Integrity does not
+	// hang on this route either way: install.sh carries the expected SHA-256
+	// of every binary inline, which is also why the directory must hold an
+	// installer stamped for the same source it was built from.
+	if distDir != "" {
+		mux.HandleFunc("/dl/", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				http.Error(w, "method", http.StatusMethodNotAllowed)
+				return
+			}
+			name := strings.TrimPrefix(r.URL.Path, "/dl/")
+			ct, ok := distFiles[name]
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			p := filepath.Join(distDir, name)
+			// ServeFile answers a directory with a listing; a directory
+			// wearing a whitelisted name is a misconfiguration, not a file.
+			if st, err := os.Stat(p); err != nil || st.IsDir() {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", ct)
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.Header().Set("Cache-Control", "no-store")
+			http.ServeFile(w, r, p)
+		})
+	}
 
 	return mux
 }

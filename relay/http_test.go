@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -17,7 +19,8 @@ const (
 func testServer(t *testing.T) (*httptest.Server, *Hub) {
 	t.Helper()
 	hub := newHub("")
-	srv := httptest.NewServer(routes(hub, newAuth(machTok, opTok)))
+	hub.tokenSplit = true
+	srv := httptest.NewServer(routes(hub, newAuth(machTok, opTok), ""))
 	t.Cleanup(srv.Close)
 	return srv, hub
 }
@@ -96,7 +99,7 @@ func TestSeparateTokensKeepTheTwoSidesApart(t *testing.T) {
 func TestOneTokenModeWatchesAndPushes(t *testing.T) {
 	hub := newHub("")
 	// What `-op-token` unset produces: the push token also watches.
-	srv := httptest.NewServer(routes(hub, newAuth(machTok, machTok)))
+	srv := httptest.NewServer(routes(hub, newAuth(machTok, machTok), ""))
 	t.Cleanup(srv.Close)
 	push := `{"agent_id":"machineone","providers":[{"id":"codex","ok":true,"limits":[{"used_percent":1}]}]}`
 	if r := do(t, srv, "POST", "/push", machTok, push); r.StatusCode != 200 {
@@ -211,5 +214,121 @@ func TestUnknownPathsAre404(t *testing.T) {
 		if r := do(t, srv, "GET", p, "", ""); r.StatusCode != http.StatusNotFound {
 			t.Errorf("%s: %d, want 404", p, r.StatusCode)
 		}
+	}
+}
+
+// The first SSE frame off /api/stream, which is always the hello.
+func firstFrame(t *testing.T, srv *httptest.Server, token string) map[string]any {
+	t.Helper()
+	r := do(t, srv, "GET", "/api/stream", token, "")
+	if r.StatusCode != 200 {
+		t.Fatalf("stream: %d", r.StatusCode)
+	}
+	buf := make([]byte, 8192)
+	var got string
+	for !strings.Contains(got, "\n\n") {
+		n, err := r.Body.Read(buf)
+		if n > 0 {
+			got += string(buf[:n])
+		}
+		if err != nil {
+			break
+		}
+	}
+	chunk, _, ok := strings.Cut(got, "\n\n")
+	if !ok || !strings.HasPrefix(chunk, "data: ") {
+		t.Fatalf("no hello frame in %q", got)
+	}
+	var f map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(chunk, "data: ")), &f); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+// The page decides whether it may PREFILL the signed-in token into an install
+// command off this flag, so each mode has to say the truth about itself: with
+// one token the viewer's secret is the machine secret and prefilling is right;
+// with two, prefilling would copy the dashboard secret onto a monitored box.
+func TestHelloSaysWhetherTheTokensAreSplit(t *testing.T) {
+	srv, _ := testServer(t) // split tokens
+	if f := firstFrame(t, srv, opTok); f["token_split"] != true {
+		t.Fatalf("split relay said token_split=%v", f["token_split"])
+	}
+	one := newHub("")
+	oneSrv := httptest.NewServer(routes(one, newAuth(machTok, machTok), ""))
+	t.Cleanup(oneSrv.Close)
+	if f := firstFrame(t, oneSrv, machTok); f["token_split"] != false {
+		t.Fatalf("one-token relay said token_split=%v", f["token_split"])
+	}
+}
+
+func distServer(t *testing.T, dir string) *httptest.Server {
+	t.Helper()
+	hub := newHub("")
+	srv := httptest.NewServer(routes(hub, newAuth(machTok, opTok), dir))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestDistServesTheWhitelistAndNothingElse(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("install.sh", "#!/bin/sh\necho hi\n")
+	write("subnsub-monitor-linux-amd64", "ELF pretend")
+	// The two shapes an operator's directory realistically grows: a file the
+	// whitelist has never heard of, and a directory wearing a listed name.
+	write("state.json", `{"secret":"yes"}`)
+	if err := os.Mkdir(filepath.Join(dir, "VERSION"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srv := distServer(t, dir)
+
+	r := do(t, srv, "GET", "/dl/install.sh", "", "")
+	if r.StatusCode != 200 {
+		t.Fatalf("install.sh: %d", r.StatusCode)
+	}
+	if body, _ := io.ReadAll(r.Body); !strings.Contains(string(body), "echo hi") {
+		t.Fatalf("install.sh body = %q", body)
+	}
+	if r.Header.Get("X-Content-Type-Options") != "nosniff" {
+		t.Error("no nosniff on /dl")
+	}
+	if r := do(t, srv, "GET", "/dl/subnsub-monitor-linux-amd64", "", ""); r.StatusCode != 200 {
+		t.Fatalf("binary: %d", r.StatusCode)
+	}
+	// HEAD is what the dashboard probes with.
+	if r := do(t, srv, "HEAD", "/dl/install.sh", "", ""); r.StatusCode != 200 {
+		t.Fatalf("HEAD install.sh: %d", r.StatusCode)
+	}
+	for _, tc := range []struct{ name, path string }{
+		{"unlisted file", "/dl/state.json"},
+		{"listed name, absent file", "/dl/SHA256SUMS"},
+		{"listed name, directory", "/dl/VERSION"},
+		{"bare prefix", "/dl/"},
+		{"encoded traversal", "/dl/%2e%2e%2fstate.json"},
+	} {
+		r := do(t, srv, "GET", tc.path, "", "")
+		if r.StatusCode == 200 {
+			t.Errorf("%s (%s) was served", tc.name, tc.path)
+		}
+		if body, _ := io.ReadAll(r.Body); strings.Contains(string(body), "secret") {
+			t.Errorf("%s (%s) leaked the file body", tc.name, tc.path)
+		}
+	}
+	if r := do(t, srv, "POST", "/dl/install.sh", "", ""); r.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("POST /dl: %d, want 405", r.StatusCode)
+	}
+}
+
+func TestDistIsOffByDefault(t *testing.T) {
+	srv, _ := testServer(t)
+	if r := do(t, srv, "GET", "/dl/install.sh", "", ""); r.StatusCode != http.StatusNotFound {
+		t.Errorf("/dl with no -dist: %d, want 404", r.StatusCode)
 	}
 }

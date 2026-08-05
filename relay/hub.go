@@ -106,6 +106,13 @@ type Hub struct {
 	watchers map[chan []byte]bool
 	polls    int
 
+	// Whether the dashboard secret differs from the machine one, told to the
+	// page in hello. The page's add-machine panel prefills the token its
+	// viewer signed in with — right when the tokens are one and the same, and
+	// a leak of the dashboard secret onto a monitored box when they are not.
+	// Set once in main before anything serves, never written after.
+	tokenSplit bool
+
 	statePath string
 	dirty     bool
 	// Held for a whole save. Separate from mu, which is released while the
@@ -571,7 +578,8 @@ func (h *Hub) attach() (chan []byte, []byte, bool) {
 	}
 	hello, err := json.Marshal(frame{"type": "hello",
 		"offline_after": offlineAfter, "term_ttl": termTTL,
-		"names": h.names, "machines": machines})
+		"token_split": h.tokenSplit,
+		"names":       h.names, "machines": machines})
 	if err != nil {
 		return nil, nil, false
 	}
