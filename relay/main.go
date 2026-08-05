@@ -67,11 +67,16 @@ readable by that network.
 // here works there and the other way round.
 var tokenRe = regexp.MustCompile(`^[A-Za-z0-9_-]{24,128}$`)
 
-// Request body ceilings, the hosted relay's numbers: a reading fits well
-// under 8 KiB, and the helper itself trims console output to keep a result
-// under 24 KiB. Anything past these is not a helper.
+// Request body ceilings, the hosted relay's numbers — and they have to STAY
+// the hosted relay's, because a helper that pushes here must behave identically
+// against both. This one drifted: the hosted MAX_BODY went to 16 KiB when the
+// collector count grew, and 8 KiB here meant a fully-populated machine got a
+// 413 and simply stopped appearing on its own dashboard, with the reason
+// visible only in a relay log nobody was reading. A reading now carries a
+// per-second sample series as well (four lanes, up to 72 slots), which is
+// another kilobyte or two on top of fourteen providers.
 const (
-	maxPushBody   = 8 * 1024
+	maxPushBody   = 16 * 1024
 	maxResultBody = 24 * 1024
 	maxOpBody     = 8 * 1024
 )

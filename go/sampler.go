@@ -119,6 +119,15 @@ func sampledSystem() (*System, *SysSeries) {
 		return nil, nil
 	}
 	newest := sampler.buf[len(sampler.buf)-1]
+	// A wall clock that stepped BACKWARDS — an NTP correction on a machine that
+	// has been up a while, a VM restored from a snapshot — leaves the cursor
+	// ahead of every sample that will be taken for as long as the jump was
+	// wide, and every frame in between would carry no series at all. The cursor
+	// exists to stop a sample being sent twice; a clock that moved makes it
+	// meaningless rather than strict, so it starts again.
+	if newest.at < sampler.sent {
+		sampler.sent = 0
+	}
 	fresh := make([]sysSample, 0, len(sampler.buf))
 	for _, sm := range sampler.buf {
 		if sm.at > sampler.sent {
@@ -136,9 +145,11 @@ func sampledSystem() (*System, *SysSeries) {
 //
 // A grid rather than a timestamp per sample, because it halves the frame: the
 // page needs to know WHEN each point was taken, and "one second apart, ending
-// here" says that in two numbers instead of thirty. Slots with no sample are
-// null — a machine that slept, or a ticker the scheduler starved, leaves a
-// visible hole rather than a line drawn straight across the gap.
+// here" says that in two numbers instead of thirty. Slots with no sample stay
+// null — a machine that slept, or a ticker the scheduler starved, reports the
+// gap as a gap rather than as an invented reading. (What the strip DRAWS across
+// a gap is the renderer's business, and today it bridges one: a polyline has no
+// way to lift the pen. The wire keeps the truth either way.)
 func buildSysSeries(fresh []sysSample, end float64) *SysSeries {
 	// One point is not a series: the snapshot already carries that reading, and
 	// a one-slot series would only be a second copy of it.
