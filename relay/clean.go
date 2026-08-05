@@ -34,9 +34,12 @@ const (
 	// The interface list, bounded exactly as the helper bounds it (nics.go):
 	// more rows than this is a container host whose list is bridge noise, and
 	// eight addresses covers a v4, a global v6, a privacy v6 and aliases.
-	maxNICs      = 16
-	maxNICAddrs  = 8
-	maxNICName   = 40
+	maxNICs     = 16
+	maxNICAddrs = 8
+	maxNICName  = 40
+	// A cumulative byte counter is not a capacity: uint64 is the range the
+	// kernel keeps these in, and an exabyte cap would null a real reading.
+	counterMax   = 1.9e19
 	detailArgMax = 120 // a credential path or a dial error, not a paragraph
 )
 
@@ -330,8 +333,8 @@ func cleanNICs(raw []json.RawMessage) []nic {
 				n.IPs = append(n.IPs, ip.String())
 			}
 		}
-		n.RxTotal = cleanNonNeg(looseNum(r.RxTotal), 1e18)
-		n.TxTotal = cleanNonNeg(looseNum(r.TxTotal), 1e18)
+		n.RxTotal = cleanNonNeg(looseNum(r.RxTotal), counterMax)
+		n.TxTotal = cleanNonNeg(looseNum(r.TxTotal), counterMax)
 		out = append(out, n)
 	}
 	if len(out) == 0 {
@@ -805,11 +808,12 @@ func cleanSystem(body json.RawMessage, capturedAt *float64) *system {
 	// the tighter ceiling catches a cumulative counter pushed as a rate.
 	s.NetRxBps = cleanNonNeg(looseNum(raw.NetRxBps), 1e15)
 	s.NetTxBps = cleanNonNeg(looseNum(raw.NetTxBps), 1e15)
-	// Cumulative counters, so the rate ceiling would be exactly wrong: an
-	// exabyte is past anything that has moved bytes, and the same bound every
-	// other absolute quantity here takes.
-	s.NetRxTotal = cleanNonNeg(looseNum(raw.NetRxTotal), 1e18)
-	s.NetTxTotal = cleanNonNeg(looseNum(raw.NetTxTotal), 1e18)
+	// Cumulative counters, so neither the rate ceiling nor the capacity one
+	// fits: an exabyte is a fine bound for a disk and a real 400 Gb/s link
+	// walks past it in eight months. uint64 is what the kernel keeps these
+	// in, so that is the bound.
+	s.NetRxTotal = cleanNonNeg(looseNum(raw.NetRxTotal), counterMax)
+	s.NetTxTotal = cleanNonNeg(looseNum(raw.NetTxTotal), counterMax)
 	s.NICs = cleanNICs(raw.NICs)
 	if v := looseNum(raw.Procs); v != nil && *v >= 1 && *v <= 1e7 {
 		n := float64(int64(*v))

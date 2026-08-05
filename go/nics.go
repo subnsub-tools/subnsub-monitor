@@ -48,10 +48,6 @@ func fillNICs(s *System) {
 	if err != nil || len(ifaces) == 0 {
 		return
 	}
-	// Stable order regardless of what the kernel hands back, so a card's rows
-	// do not reshuffle between two pushes that measured the same machine.
-	sort.Slice(ifaces, func(i, j int) bool { return ifaces[i].Name < ifaces[j].Name })
-
 	out := make([]NIC, 0, len(ifaces))
 	for _, iface := range ifaces {
 		if iface.Flags&net.FlagLoopback != 0 {
@@ -83,13 +79,38 @@ func fillNICs(s *System) {
 			continue
 		}
 		out = append(out, n)
-		if len(out) >= maxNICs {
-			break
-		}
 	}
-	if len(out) > 0 {
+	if out = capNICs(out); len(out) > 0 {
 		s.NICs = out
 	}
+}
+
+// Apply the cap by USEFULNESS, not alphabetically, and hand back what survived
+// in display order.
+//
+// A container host carries a dozen `br-<hash>` bridges and every one of them
+// sorts ahead of `eth0` — capping a name-sorted list there spends the whole
+// allowance on bridge noise and drops the one interface the machine is
+// actually reached on, which is the opposite of what the cap exists for. So:
+// rank (an interface with addresses beats one without, up beats down), take
+// the cap, and only THEN sort by name, so a card's rows do not reshuffle
+// between two pushes that measured the same machine.
+func capNICs(out []NIC) []NIC {
+	if len(out) > maxNICs {
+		sort.SliceStable(out, func(i, j int) bool {
+			ai, aj := len(out[i].IPs) > 0, len(out[j].IPs) > 0
+			if ai != aj {
+				return ai
+			}
+			if out[i].Up != out[j].Up {
+				return out[i].Up
+			}
+			return out[i].Name < out[j].Name
+		})
+		out = out[:maxNICs]
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // Attach per-interface totals collected by the platform's own network read.
