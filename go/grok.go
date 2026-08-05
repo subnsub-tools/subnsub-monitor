@@ -93,14 +93,14 @@ func grokToken() string {
 
 func fetchGrok() Provider {
 	p := Provider{ID: "grok", Name: "Grok", Source: "api", CapturedAt: now()}
-	fail := func(err, detail string) Provider {
-		p.Error, p.Detail = err, detail
+	fail := func(err, code string, arg ...string) Provider {
+		p.failWith(err, code, arg...)
 		return p
 	}
 
 	token := grokToken()
 	if token == "" {
-		return fail("not-signed-in", "~/.grok/auth.json 里没有可用的凭据；跑一次 grok login。")
+		return fail("not-signed-in", "creds-missing", "~/.grok/auth.json")
 	}
 
 	// One empty grpc-web frame: 1 flag byte + 4-byte big-endian length 0.
@@ -115,21 +115,21 @@ func fetchGrok() Provider {
 		"X-User-Agent":  "connect-es/2.1.1",
 	}, reqBody)
 	if err != nil {
-		return fail("unreachable", "请求失败")
+		return fail("unreachable", "req-failed")
 	}
 	switch {
 	case status == 401 || status == 403:
-		return fail("token-expired", "Grok 计费接口返回 "+itoa(status))
+		return fail("token-expired", "http-status", itoa(status))
 	case status != 200:
-		return fail("api-error", "Grok 计费接口返回 "+itoa(status))
+		return fail("api-error", "http-status", itoa(status))
 	}
 
 	used, resets, perr := grokParseBilling(body)
 	if perr != nil {
-		return fail("api-error", "Grok 计费响应无法解析")
+		return fail("api-error", "http-parse")
 	}
 	if used == nil {
-		return fail("no-readings", "Grok 计费响应里没有可用的用量")
+		return fail("no-readings", "no-usage")
 	}
 
 	l := Limit{Key: "credits", UsedPercent: round2(*used)}

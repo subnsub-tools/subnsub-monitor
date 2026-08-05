@@ -142,14 +142,14 @@ func copilotAmounts(s *copilotSnapshot) (used, total, remaining *float64) {
 
 func fetchCopilot() Provider {
 	p := Provider{ID: "copilot", Name: "Copilot", Source: "api", CapturedAt: now()}
-	fail := func(err, detail string) Provider {
-		p.Error, p.Detail = err, detail
+	fail := func(err, code string, arg ...string) Provider {
+		p.failWith(err, code, arg...)
 		return p
 	}
 
 	token := copilotToken()
 	if token == "" {
-		return fail("not-signed-in", "~/.config/github-copilot/ 里没有可用的 oauth_token")
+		return fail("not-signed-in", "creds-missing", "~/.config/github-copilot/")
 	}
 
 	status, body, err := provRequest("GET", copilotURL, map[string]string{
@@ -161,16 +161,16 @@ func fetchCopilot() Provider {
 		"X-Github-Api-Version":  "2025-04-01",
 	}, nil)
 	if err != nil {
-		return fail("unreachable", "请求失败")
+		return fail("unreachable", "req-failed")
 	}
 	switch {
 	case status == 401 || status == 403:
-		return fail("token-expired", "Copilot 接口返回 "+itoa(status))
+		return fail("token-expired", "http-status", itoa(status))
 	case status == 404:
 		// The endpoint answers 404 for an account with no Copilot at all.
-		return fail("not-signed-in", "这个 GitHub 账号没有 Copilot 订阅")
+		return fail("not-signed-in", "no-subscription")
 	case status != 200:
-		return fail("api-error", "Copilot 接口返回 "+itoa(status))
+		return fail("api-error", "http-status", itoa(status))
 	}
 
 	var doc struct {
@@ -179,7 +179,7 @@ func fetchCopilot() Provider {
 		CopilotPlan    string                     `json:"copilot_plan"`
 	}
 	if json.Unmarshal(body, &doc) != nil {
-		return fail("api-error", "Copilot 接口返回的不是预期结构")
+		return fail("api-error", "http-shape")
 	}
 
 	// The reset date is a bare YYYY-MM-DD. Day granularity is all upstream
@@ -232,7 +232,7 @@ func fetchCopilot() Provider {
 		p.Credits = &Credits{HasCredits: true, Unlimited: true}
 	}
 	if len(p.Limits) == 0 && !unlimited {
-		return fail("no-readings", "Copilot 接口没有返回可用的额度窗口")
+		return fail("no-readings", "no-window")
 	}
 
 	p.OK = true

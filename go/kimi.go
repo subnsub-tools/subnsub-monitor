@@ -191,17 +191,17 @@ func kimiReset(d *kimiDetail) *float64 {
 
 func fetchKimi() Provider {
 	p := Provider{ID: "kimi", Name: "Kimi Code", Source: "api", CapturedAt: now()}
-	fail := func(err, detail string) Provider {
-		p.Error, p.Detail = err, detail
+	fail := func(err, code string, arg ...string) Provider {
+		p.failWith(err, code, arg...)
 		return p
 	}
 
 	token, exp := kimiToken()
 	if token == "" {
-		return fail("not-signed-in", "~/.kimi-code/credentials/ 里没有 access_token")
+		return fail("not-signed-in", "creds-missing", "~/.kimi-code/credentials/")
 	}
 	if exp > 0 && exp < now() {
-		return fail("token-expired", "凭据已过期；跑一次 kimi 让它续期。")
+		return fail("token-expired", "creds-expired", "kimi")
 	}
 	hdr := map[string]string{
 		"Authorization": "Bearer " + token,
@@ -210,13 +210,13 @@ func fetchKimi() Provider {
 
 	status, body, err := provRequest("POST", kimiUsagesURL, hdr, []byte(`{"scope":["FEATURE_CODING"]}`))
 	if err != nil {
-		return fail("unreachable", "请求失败")
+		return fail("unreachable", "req-failed")
 	}
 	switch {
 	case status == 401 || status == 403:
-		return fail("token-expired", "Kimi 接口返回 "+itoa(status))
+		return fail("token-expired", "http-status", itoa(status))
 	case status != 200:
-		return fail("api-error", "Kimi 接口返回 "+itoa(status))
+		return fail("api-error", "http-status", itoa(status))
 	}
 
 	var doc struct {
@@ -230,7 +230,7 @@ func fetchKimi() Provider {
 		} `json:"usages"`
 	}
 	if json.Unmarshal(body, &doc) != nil {
-		return fail("api-error", "Kimi 接口返回的不是预期结构")
+		return fail("api-error", "http-shape")
 	}
 
 	for _, u := range doc.Usages {
@@ -262,7 +262,7 @@ func fetchKimi() Provider {
 		break
 	}
 	if len(p.Limits) == 0 {
-		return fail("no-readings", "Kimi 接口没有返回可用的额度窗口")
+		return fail("no-readings", "no-window")
 	}
 
 	// Subscription stats are a second, separately-failing request and carry

@@ -80,8 +80,8 @@ func wayfinderLoopback(host string) bool {
 
 func fetchWayfinder() Provider {
 	p := Provider{ID: "wayfinder", Name: "Wayfinder", Source: "local-api", CapturedAt: now()}
-	fail := func(err, detail string) Provider {
-		p.Error, p.Detail = err, detail
+	fail := func(err, code string, arg ...string) Provider {
+		p.failWith(err, code, arg...)
 		return p
 	}
 
@@ -89,7 +89,7 @@ func fetchWayfinder() Provider {
 	if base == "" {
 		// Deliberately does NOT echo the override value: Detail travels to the
 		// relay, and a misconfigured override could carry anything.
-		return fail("api-error", "MON_WAYFINDER_URL 不是合法的 loopback/HTTPS 地址")
+		return fail("api-error", "gateway-url")
 	}
 
 	// healthz first: it is how we tell "no gateway here" (unreachable) from
@@ -97,7 +97,7 @@ func fetchWayfinder() Provider {
 	// base is not published in the message for the same reason.
 	hstatus, hbody, err := provRequest("GET", base+"/healthz", nil, nil)
 	if err != nil || hstatus != 200 {
-		return fail("not-installed", "没有 Wayfinder 网关在配置的地址上应答")
+		return fail("not-installed", "gateway-down")
 	}
 	var health struct {
 		Status  string `json:"status"`
@@ -109,7 +109,7 @@ func fetchWayfinder() Provider {
 	// has routed nothing yet has no savings, and that is a live, honest zero.
 	sstatus, sbody, err := provRequest("GET", base+"/v1/savings?period=30d", nil, nil)
 	if err != nil || sstatus != 200 {
-		return fail("no-readings", "Wayfinder 网关没有返回 savings 数据")
+		return fail("no-readings", "no-savings")
 	}
 	var sav struct {
 		Priced   bool    `json:"priced"`
@@ -119,7 +119,7 @@ func fetchWayfinder() Provider {
 		SavedPct float64 `json:"saved_pct"`
 	}
 	if json.Unmarshal(sbody, &sav) != nil {
-		return fail("api-error", "Wayfinder savings 响应无法解析")
+		return fail("api-error", "http-parse")
 	}
 
 	// NOT a Limit. used_percent is a quota gauge: the panel colours a high

@@ -42,22 +42,22 @@ var (
 
 func fetchAugment() Provider {
 	p := Provider{ID: "augment", Name: "Augment", Source: "cli", CapturedAt: now()}
-	fail := func(err, detail string) Provider {
-		p.Error, p.Detail = err, detail
+	fail := func(err, code string, arg ...string) Provider {
+		p.failWith(err, code, arg...)
 		return p
 	}
 
 	bin := vendorBinary(augmentBinEnv, vendorCandidates("auggie"))
 	if bin == "" {
-		return fail("not-installed", "找不到可用的 auggie 命令")
+		return fail("not-installed", "cli-missing", "auggie")
 	}
 	out, exited, err := runVendorCLI(bin, []string{"account", "status"},
 		[]string{"AUGMENT_"}, 20*time.Second)
 	if err != nil {
 		if err == errAmpTimeout {
-			return fail("unreachable", "auggie 超时")
+			return fail("unreachable", "cli-timeout", "auggie")
 		}
-		return fail("cli-failed", "auggie 执行失败")
+		return fail("cli-failed", "cli-failed", "auggie")
 	}
 	text := ansiRE.ReplaceAllString(out, "")
 
@@ -118,11 +118,11 @@ func fetchAugment() Provider {
 	if len(p.Limits) == 0 && p.Credits == nil {
 		switch {
 		case augSignedOutRE.MatchString(text):
-			return fail("not-signed-in", "auggie 未登录；跑一次 auggie login。")
+			return fail("not-signed-in", "cli-signin", "auggie login")
 		case exited:
-			return fail("cli-failed", "auggie 以非零状态退出")
+			return fail("cli-failed", "cli-exit", "auggie")
 		}
-		return fail("no-readings", "auggie 没有输出可识别的额度行")
+		return fail("no-readings", "cli-nolines", "auggie")
 	}
 
 	p.OK = true

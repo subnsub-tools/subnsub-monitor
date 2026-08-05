@@ -132,8 +132,7 @@ func fetchAntigravity() Provider {
 	if len(cands) == 0 {
 		// Not running is the ordinary state on most machines, and it is not a
 		// failure of anything. Same wording as a missing CLI.
-		p.Error = "not-installed"
-		p.Detail = "no Antigravity language server is listening"
+		p.failWith("not-installed", "ls-none")
 		return p
 	}
 
@@ -168,8 +167,7 @@ func fetchAntigravity() Provider {
 	}
 	// The server was there and would not answer. Distinct from "not running",
 	// because the two want different things done about them.
-	p.Error = "unreachable"
-	p.Detail = "the Antigravity language server did not return a quota: " + lastErr
+	p.failWith("unreachable", "ls-no-quota", lastErr)
 	return p
 }
 

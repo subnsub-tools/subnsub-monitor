@@ -106,8 +106,15 @@ type Provider struct {
 	// present, are fixed-commit review provenance only; see the types above.
 	Collector *CollectorProvenance `json:"collector,omitempty"`
 
-	Error  string `json:"error,omitempty"`
-	Detail string `json:"detail,omitempty"`
+	// Why there is no reading, said twice. Detail is an English sentence, for
+	// the readers with no translation layer — raw JSON, a self-hosted
+	// dashboard, this helper's own console. DetailCode (plus at most one
+	// argument spliced into it) is the same sentence in machine form, which is
+	// what the panel translates. See detail.go.
+	Error      string `json:"error,omitempty"`
+	Detail     string `json:"detail,omitempty"`
+	DetailCode string `json:"detail_code,omitempty"`
+	DetailArg  string `json:"detail_arg,omitempty"`
 
 	CapturedAt float64  `json:"captured_at"`
 	RecordedAt *float64 `json:"recorded_at,omitempty"`
@@ -296,8 +303,8 @@ func safeCollect(id string, fn func() Provider) (p Provider) {
 		if r := recover(); r != nil {
 			// Type/message of a panic can quote whatever it was handed, and
 			// these collectors handle credentials. Say nothing about it.
-			p = Provider{ID: id, OK: false, Error: "collector-crashed",
-				Detail: "collector panicked", CapturedAt: now()}
+			p = Provider{ID: id, OK: false, CapturedAt: now()}
+			p.failWith("collector-crashed", "collector-panic")
 		}
 	}()
 	return fn()

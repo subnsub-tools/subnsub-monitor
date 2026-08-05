@@ -210,23 +210,23 @@ func geminiClient() (id, secret string) {
 
 // A usable access token: the file's if it still has a minute to live, the
 // cached refreshed one next, a fresh refresh last. Empty string plus an error
-// slug when none of the three can be had.
-func geminiAccessToken(c geminiCreds) (string, string, string) {
+// slug, a detail code and its argument when none of the three can be had.
+func geminiAccessToken(c geminiCreds) (token, errSlug, code, arg string) {
 	t := now()
 	geminiTok.Lock()
 	defer geminiTok.Unlock()
 	if c.access != "" && c.access != geminiTok.bad && c.expiryMs/1000 > t+60 {
-		return c.access, "", ""
+		return c.access, "", "", ""
 	}
 	if geminiTok.token != "" && geminiTok.until > t+60 && geminiTok.from == c.refresh {
-		return geminiTok.token, "", ""
+		return geminiTok.token, "", "", ""
 	}
 	if c.refresh == "" {
-		return "", "token-expired", "凭据已过期且没有 refresh token；跑一次 gemini 让它续期。"
+		return "", "token-expired", "creds-norefresh", "gemini"
 	}
 	id, secret := geminiClient()
 	if id == "" || secret == "" {
-		return "", "not-supported", "找不到 gemini-cli 的 OAuth client（装了 CLI 吗？也可设 GEMINI_OAUTH_CLIENT_ID/SECRET）。"
+		return "", "not-supported", "no-oauth-client", ""
 	}
 	form := url.Values{
 		"client_id":     {id},
@@ -238,7 +238,7 @@ func geminiAccessToken(c geminiCreds) (string, string, string) {
 		map[string]string{"Content-Type": "application/x-www-form-urlencoded"},
 		[]byte(form.Encode()))
 	if err != nil {
-		return "", "unreachable", "刷新令牌失败"
+		return "", "unreachable", "refresh-failed", ""
 	}
 	if status == 400 || status == 401 {
 		// Only invalid_grant means the refresh token itself is dead. A 400 can
@@ -248,38 +248,38 @@ func geminiAccessToken(c geminiCreds) (string, string, string) {
 			Error string `json:"error"`
 		}
 		if json.Unmarshal(body, &oe) == nil && oe.Error == "invalid_grant" {
-			return "", "token-expired", "refresh token 已失效；跑一次 gemini 重新登录。"
+			return "", "token-expired", "refresh-invalid", "gemini"
 		}
-		return "", "api-error", "令牌接口拒绝了刷新请求（" + itoa(status) + "）"
+		return "", "api-error", "refresh-refused", itoa(status)
 	}
 	if status != 200 {
-		return "", "api-error", "令牌接口返回 " + itoa(status)
+		return "", "api-error", "token-status", itoa(status)
 	}
 	var tok struct {
 		AccessToken string `json:"access_token"`
 		ExpiresIn   any    `json:"expires_in"`
 	}
 	if json.Unmarshal(body, &tok) != nil || tok.AccessToken == "" {
-		return "", "api-error", "令牌接口返回的不是预期结构"
+		return "", "api-error", "token-shape", ""
 	}
 	ttl := 3600.0
 	if v := asNum(tok.ExpiresIn); v != nil && *v > 60 {
 		ttl = *v
 	}
 	geminiTok.token, geminiTok.until, geminiTok.from = tok.AccessToken, t+ttl-60, c.refresh
-	return tok.AccessToken, "", ""
+	return tok.AccessToken, "", "", ""
 }
 
 func fetchGemini() Provider {
 	p := Provider{ID: "gemini", Name: "Gemini CLI", Source: "api", CapturedAt: now()}
-	fail := func(err, detail string) Provider {
-		p.Error, p.Detail = err, detail
+	fail := func(err, code string, arg ...string) Provider {
+		p.failWith(err, code, arg...)
 		return p
 	}
 
 	creds, ok := readGeminiCreds()
 	if !ok {
-		return fail("not-signed-in", "~/.gemini/oauth_creds.json 不存在——gemini-cli 装了并登录过吗？")
+		return fail("not-signed-in", "creds-missing", "~/.gemini/oauth_creds.json")
 	}
 	switch at := geminiAuthType(); at {
 	case "", "oauth-personal":
@@ -292,12 +292,12 @@ func fetchGemini() Provider {
 		// and querying the personal-quota endpoint for it would publish a
 		// confident number about the wrong meter. api-key, vertex-ai and
 		// whatever the CLI grows next all land here, named in the message.
-		return fail("not-supported", "这台机器的 gemini-cli 用 "+tame(at, 24)+" 认证，额度不在个人配额接口上。")
+		return fail("not-supported", "other-auth", tame(at, 24))
 	}
 
-	token, errSlug, detail := geminiAccessToken(creds)
+	token, errSlug, code, arg := geminiAccessToken(creds)
 	if token == "" {
-		return fail(errSlug, detail)
+		return fail(errSlug, code, arg)
 	}
 	hdr := map[string]string{
 		"Authorization": "Bearer " + token,
@@ -336,7 +336,7 @@ func fetchGemini() Provider {
 		// so the NEXT collection refreshes instead of replaying the refusal
 		// for the rest of the hour.
 		geminiInvalidate(token)
-		return fail("token-expired", "Code Assist 接口返回 401")
+		return fail("token-expired", "http-401")
 	}
 
 	quotaBody := []byte(`{}`)
@@ -347,21 +347,21 @@ func fetchGemini() Provider {
 	}
 	status, body, err := provRequest("POST", geminiQuotaURL, hdr, quotaBody)
 	if err != nil {
-		return fail("unreachable", "请求失败")
+		return fail("unreachable", "req-failed")
 	}
 	switch {
 	case status == 401:
 		geminiInvalidate(token)
-		return fail("token-expired", "配额接口返回 401")
+		return fail("token-expired", "http-401")
 	case status == 403:
 		// Not conflated with 401: a 403 is "this account may not", which no
 		// amount of refreshing changes, and burning the refresh token's
 		// goodwill on it would be pure noise.
-		return fail("api-error", "配额接口拒绝访问（403）")
+		return fail("api-error", "http-403")
 	case status == 429:
-		return fail("rate-limited", "配额接口限流（429）")
+		return fail("rate-limited", "http-429")
 	case status != 200:
-		return fail("api-error", "配额接口返回 "+itoa(status))
+		return fail("api-error", "http-status", itoa(status))
 	}
 
 	var qr struct {
@@ -372,7 +372,7 @@ func fetchGemini() Provider {
 		} `json:"buckets"`
 	}
 	if json.Unmarshal(body, &qr) != nil {
-		return fail("api-error", "配额接口返回的不是预期结构")
+		return fail("api-error", "http-shape")
 	}
 
 	// One row per model, worst bucket wins — a model's tightest window is the
@@ -416,7 +416,7 @@ func fetchGemini() Provider {
 		p.Limits = append(p.Limits, l)
 	}
 	if len(p.Limits) == 0 {
-		return fail("no-readings", "配额接口没有返回可用的额度窗口")
+		return fail("no-readings", "no-window")
 	}
 
 	p.OK = true

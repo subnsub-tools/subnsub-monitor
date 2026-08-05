@@ -73,29 +73,29 @@ func doubaoReset(v any) *float64 {
 
 func fetchDoubao() Provider {
 	p := Provider{ID: "doubao", Name: "Doubao", Source: "cli", CapturedAt: now()}
-	fail := func(err, detail string) Provider {
-		p.Error, p.Detail = err, detail
+	fail := func(err, code string, arg ...string) Provider {
+		p.failWith(err, code, arg...)
 		return p
 	}
 
 	bin := vendorBinary(arkcliBinEnv, vendorCandidates("arkcli"))
 	if bin == "" {
-		return fail("not-installed", "找不到可用的 arkcli 命令")
+		return fail("not-installed", "cli-missing", "arkcli")
 	}
 	out, exited, err := runVendorCLI(bin, []string{"usage", "plan", "--format", "json"},
 		[]string{"VOLC", "VOLCENGINE_", "DOUBAO_", "ARK_"}, 15*time.Second)
 	if err != nil {
 		if err == errAmpTimeout {
-			return fail("unreachable", "arkcli 超时")
+			return fail("unreachable", "cli-timeout", "arkcli")
 		}
-		return fail("cli-failed", "arkcli 执行失败")
+		return fail("cli-failed", "cli-failed", "arkcli")
 	}
 	// A non-zero exit that still printed something reaches here with err=nil
 	// (runVendorCLI's contract), so the signed-out check has to sit on THIS
 	// path, before the JSON decode — otherwise a "not logged in" message on a
 	// failing exit is misreported as an api-error (review finding).
 	if exited && arkcliSignedOut(out) {
-		return fail("not-signed-in", "arkcli 未登录；跑一次 arkcli login。")
+		return fail("not-signed-in", "cli-signin", "arkcli login")
 	}
 
 	var doc struct {
@@ -114,10 +114,10 @@ func fetchDoubao() Provider {
 		} `json:"items"`
 	}
 	if json.Unmarshal([]byte(out), &doc) != nil {
-		return fail("api-error", "arkcli 返回的不是预期 JSON")
+		return fail("api-error", "cli-shape", "arkcli")
 	}
 	if doc.Viewer != nil && strings.EqualFold(strings.TrimSpace(doc.Viewer.AuthMethod), "none") {
-		return fail("not-signed-in", "arkcli 未登录；跑一次 arkcli login。")
+		return fail("not-signed-in", "cli-signin", "arkcli login")
 	}
 
 	for _, it := range doc.Items {
@@ -155,9 +155,9 @@ func fetchDoubao() Provider {
 
 	if len(p.Limits) == 0 {
 		if exited {
-			return fail("cli-failed", "arkcli 以非零状态退出")
+			return fail("cli-failed", "cli-exit", "arkcli")
 		}
-		return fail("no-readings", "arkcli 没有返回可用的额度窗口")
+		return fail("no-readings", "no-window")
 	}
 
 	p.OK = true
