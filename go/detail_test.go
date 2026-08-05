@@ -193,18 +193,31 @@ func TestBothLocalesCarryEveryDetailPhrase(t *testing.T) {
 			continue
 		}
 		// An argument dropped in translation is a sentence with a hole in it:
-		// "the endpoint answered 429" becomes "the endpoint answered".
-		if strings.Contains(phrase, "{a}") != strings.Contains(zhVal, "{a}") {
-			t.Errorf("zh-CN %q loses or invents the {a} argument: %s", key, zhVal)
+		// "the endpoint answered 429" becomes "the endpoint answered". Checked
+		// against EVERY value in the file rather than only the two packs this
+		// test can locate: the panel ships eleven locales as of 2026-08-06, and
+		// which pack a given string lives in is not something a regex over this
+		// file should have to know.
+		wantArg := strings.Contains(phrase, "{a}")
+		for _, v := range localeValues(text, key) {
+			if strings.Contains(v, "{a}") != wantArg {
+				t.Errorf("a translation of %q loses or invents the {a} argument: %s", key, v)
+			}
 		}
 	}
 }
 
-// One key's value out of a pack. Both quote styles, because an English string
-// containing an apostrophe is written with double quotes.
+// One key's value out of a pack. Both quote styles on the key AND on the
+// value: the hand-written packs quote keys with ', the generated blocks quote
+// them with ", and an English string containing an apostrophe has to be
+// written with double quotes either way.
+var keyValueRE = func(key string) *regexp.Regexp {
+	q := regexp.QuoteMeta(key)
+	return regexp.MustCompile(`['"]` + q + `['"]:\s*(?:"([^"]*)"|'([^']*)')`)
+}
+
 func localeValue(pack, key string) string {
-	re := regexp.MustCompile(`'` + regexp.QuoteMeta(key) + `':\s*(?:"([^"]*)"|'([^']*)')`)
-	m := re.FindStringSubmatch(pack)
+	m := keyValueRE(key).FindStringSubmatch(pack)
 	if m == nil {
 		return ""
 	}
@@ -212,4 +225,17 @@ func localeValue(pack, key string) string {
 		return m[1]
 	}
 	return m[2]
+}
+
+// Every value written for one key, in every pack in the file.
+func localeValues(text, key string) []string {
+	var out []string
+	for _, m := range keyValueRE(key).FindAllStringSubmatch(text, -1) {
+		if m[1] != "" {
+			out = append(out, m[1])
+		} else {
+			out = append(out, m[2])
+		}
+	}
+	return out
 }

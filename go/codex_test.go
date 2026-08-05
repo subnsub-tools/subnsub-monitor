@@ -51,7 +51,7 @@ func TestCodexReadsARollout(t *testing.T) {
 	home := testHome(t)
 	writeRollout(t, home)
 
-	p := collectCodex()
+	p := collectCodexLog()
 	if !p.OK || len(p.Limits) != 1 || p.Limits[0].UsedPercent != 12 {
 		t.Fatalf("a plain rollout did not read: %+v", p)
 	}
@@ -74,7 +74,7 @@ func TestCodexNamesAHardLinkedSessionTree(t *testing.T) {
 		t.Skipf("this filesystem will not hard link: %v", err)
 	}
 
-	p := collectCodex()
+	p := collectCodexLog()
 	if p.OK {
 		t.Fatal("a multiply-named file was read; the guard is gone")
 	}
@@ -115,7 +115,7 @@ func TestCodexCountsOnlyWhatItOpened(t *testing.T) {
 		}
 	}
 
-	p := collectCodex()
+	p := collectCodexLog()
 	if p.DetailCode != "sessions-linked" {
 		t.Fatalf("detail code %q", p.DetailCode)
 	}
@@ -150,7 +150,7 @@ func TestCodexKeepsReadingWhenOnlySomeFilesAreRefused(t *testing.T) {
 		t.Skipf("this filesystem will not hard link: %v", err)
 	}
 
-	p := collectCodex()
+	p := collectCodexLog()
 	if !p.OK || len(p.Limits) != 1 {
 		t.Fatalf("the readable file was not used: %+v", p)
 	}
