@@ -102,21 +102,95 @@ type codexLiveCredits struct {
 	Balance    any `json:"balance"`
 }
 
+// The tolerance has to reach the OBJECTS too, which is why every nested value
+// below is held raw and decoded on its own. Typed nesting looks like it says the
+// same thing and does not: with `credits` declared as a struct pointer, a vendor
+// that ships it as a string one day takes the whole payload down with it —
+// usedPercent, plan, every bucket in the map — and this leg goes dark on a
+// machine whose only other leg is a log that may be a fortnight stale. Field by
+// field, entry by entry, view by view: a shape nobody here recognises costs
+// exactly the value it arrived in.
 type codexLiveBucket struct {
-	LimitID   any               `json:"limitId"`
-	LimitName any               `json:"limitName"`
-	Primary   *codexLiveWindow  `json:"primary"`
-	Secondary *codexLiveWindow  `json:"secondary"`
-	PlanType  any               `json:"planType"`
-	Credits   *codexLiveCredits `json:"credits"`
+	LimitID   any             `json:"limitId"`
+	LimitName any             `json:"limitName"`
+	Primary   json.RawMessage `json:"primary"`
+	Secondary json.RawMessage `json:"secondary"`
+	PlanType  any             `json:"planType"`
+	Credits   json.RawMessage `json:"credits"`
 }
 
+// Both views held raw, and that includes the map itself rather than only its
+// entries: declared as a map, a `rateLimitsByLimitId` that arrived as anything
+// but an object takes the flat view down with it, and the flat view is the one
+// carrying the account's own quota.
 type codexLiveResult struct {
 	// The backward-compatible single-bucket view, same shape the session log
 	// carries. Kept as the fallback for a build that predates the map.
-	RateLimits *codexLiveBucket `json:"rateLimits"`
+	RateLimits json.RawMessage `json:"rateLimits"`
 	// One entry per metered limit, keyed by limitId.
-	ByLimitID map[string]*codexLiveBucket `json:"rateLimitsByLimitId"`
+	ByLimitID json.RawMessage `json:"rateLimitsByLimitId"`
+}
+
+func codexBucketMap(raw json.RawMessage) map[string]json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var m map[string]json.RawMessage
+	if json.Unmarshal(raw, &m) != nil {
+		return nil
+	}
+	return m
+}
+
+// One nested object, or nothing. JSON `null` decodes into a zeroed value rather
+// than an error, which is the right answer for all three: every field inside is
+// optional and reads as absent.
+func codexWindow(raw json.RawMessage) *codexLiveWindow {
+	if len(raw) == 0 {
+		return nil
+	}
+	var w codexLiveWindow
+	if json.Unmarshal(raw, &w) != nil {
+		return nil
+	}
+	return &w
+}
+
+func codexCredits(raw json.RawMessage) *codexLiveCredits {
+	if len(raw) == 0 {
+		return nil
+	}
+	var c codexLiveCredits
+	if json.Unmarshal(raw, &c) != nil {
+		return nil
+	}
+	return &c
+}
+
+func codexBucket(raw json.RawMessage) *codexLiveBucket {
+	if len(raw) == 0 {
+		return nil
+	}
+	var b codexLiveBucket
+	if json.Unmarshal(raw, &b) != nil {
+		return nil
+	}
+	return &b
+}
+
+// Whether a bucket carries a window anyone could read a number off. "Present"
+// and "readable" are different questions, and the account bucket is chosen on
+// the second one.
+func codexBucketReadable(b *codexLiveBucket) bool {
+	if b == nil {
+		return false
+	}
+	for _, raw := range []json.RawMessage{b.Primary, b.Secondary} {
+		if w := codexWindow(raw); w != nil && asNum(w.UsedPercent) != nil {
+			return true
+		}
+	}
+	return false
 }
 
 type codexRPCMessage struct {
@@ -145,13 +219,15 @@ var (
 // than it is. `codex` from npm is a script beginning `#!/usr/bin/env node`, so
 // choosing the script from a fixed list still leaves the kernel resolving
 // `node` through PATH at exec time. Pinning an interpreter instead is not an
-// option worth the trade: the node that belongs to this install is the one
-// beside it under a version manager, naming it would mean hard-coding one
-// layout, and a helper that cannot find node stops reporting rather than
-// reports safely. What the fixed list actually guarantees is that the TOOL is
-// the one the user installed; the interpreter is trusted exactly as far as this
-// account's PATH is, which is the same footing every other CLI-rung collector
-// here has always stood on.
+// option worth the trade: naming one would mean hard-coding one layout, and a
+// helper that cannot find node stops reporting rather than reports safely.
+// codexEnv does the part that is worth doing — it puts the chosen install's own
+// directory at the front of the child's PATH, so the interpreter comes from the
+// same place the tool did — but that is about getting the RIGHT node, not about
+// keeping out a wrong one. What the fixed list actually guarantees is that the
+// TOOL is the one the user installed; the interpreter is trusted exactly as far
+// as this account's PATH is, which is the same footing every other CLI-rung
+// collector here has always stood on.
 //
 // The node version managers are the difference from vendorCandidates' fixed
 // list. Codex ships as an npm package, so on a great many machines it lives
@@ -223,6 +299,36 @@ func codexNodeVersionCandidates(home string) []string {
 	return matches
 }
 
+// The child's environment, with the chosen install's own directory in front of
+// PATH.
+//
+// Finding the CLI is only half of it. `codex` from npm begins
+// `#!/usr/bin/env node`, so choosing the script leaves the kernel to resolve
+// `node` through PATH — and PATH here is whatever the service manager handed
+// this helper, which routinely has no version manager on it at all. Searching
+// ~/.nvm for the newest Codex and then launching it under a PATH that cannot
+// see that install's node is a search that finds the right file and runs the
+// wrong one, or nothing.
+//
+// The node an install was built against is the one sitting beside it, so that
+// directory goes first. This is not a pin and not a sandbox — everything the
+// account could already reach is still on PATH behind it — it is only where to
+// look first, and it makes the tool and its interpreter come from one place.
+func codexEnv(bin string) []string {
+	env := vendorEnv([]string{"CODEX_"})
+	dir := filepath.Dir(bin)
+	if dir == "" || dir == "." {
+		return env
+	}
+	for i, kv := range env {
+		if strings.HasPrefix(kv, "PATH=") {
+			env[i] = "PATH=" + dir + string(os.PathListSeparator) + kv[len("PATH="):]
+			return env
+		}
+	}
+	return append(env, "PATH="+dir)
+}
+
 // One app-server conversation: start it, initialize, ask, leave.
 //
 // THE DEADLINE IS ON THE READ, not only on the context, and that distinction is
@@ -247,23 +353,36 @@ func codexAskRateLimits(bin string) (*codexLiveResult, error) {
 	defer cancel()
 
 	cmd := toolCommand(ctx, bin, "app-server")
-	cmd.Env = vendorEnv([]string{"CODEX_"})
+	cmd.Env = codexEnv(bin)
 	// nil is the null device, which is what we want for stderr: the app-server
 	// writes progress there and nobody reads it, and an unread pipe that fills
 	// is a deadlock rather than a missing log line.
 	cmd.Stderr = nil
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, errCodexSpawn
-	}
+	// Its own process group, so the cleanup below can take down what it starts
+	// rather than only what we started. Has to be said before Start.
+	setProcessGroup(cmd)
+
 	// Deliberately NOT cmd.StdoutPipe(): that hands back a pipe whose lifetime
 	// belongs to Wait(), and an *os.File we made ourselves is the only one we
-	// can put a deadline on.
+	// can put a deadline on. os/exec never closes a file handed to it as
+	// cmd.Stdout, so every path out of here that does not reach Start has to
+	// close both ends itself.
+	//
+	// Made BEFORE StdinPipe, which is the only ordering with no leak in it: a
+	// failure here would otherwise strand a stdin pipe that only Start or Wait
+	// knows how to close, and neither ever runs. Running out of descriptors is
+	// exactly when os.Pipe fails, so that is the worst moment to leak two.
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		return nil, errCodexSpawn
 	}
 	cmd.Stdout = pw
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		pr.Close()
+		pw.Close()
+		return nil, errCodexSpawn
+	}
 	cmd.WaitDelay = 2 * time.Second
 
 	if err := cmd.Start(); err != nil {
@@ -274,19 +393,32 @@ func codexAskRateLimits(bin string) (*codexLiveResult, error) {
 	// The child holds its own copy now. Ours has to go, or the read end never
 	// sees EOF even when every process in the tree has exited.
 	pw.Close()
-	pr.SetReadDeadline(time.Now().Add(codexRPCTimeout))
 	defer func() {
 		// Order matters. stdin first: EOF is how a stdio server is asked to
-		// leave, and it reaches the grandchild that a kill does not. Then the
-		// read end, so nothing is left blocked on it. Then the process this
-		// actually started, then exactly one Wait to reap it.
+		// leave, and it is what collects a healthy one — a kill reaches the
+		// process we started and not the binary it spawned. Then the read end,
+		// so nothing is left blocked on it. Then the whole process group for
+		// the server that did not take the hint, then exactly one Wait to reap
+		// the one child that is ours to reap.
 		stdin.Close()
 		pr.Close()
-		if cmd.Process != nil {
-			cmd.Process.Kill()
-		}
+		killProcessTree(cmd)
 		cmd.Wait()
 	}()
+
+	// The SAME instant the context is already counting to, not a fresh twenty
+	// seconds from here: two deadlines that drift apart would let a slow spawn
+	// push the total past the only number this function promises. The error is
+	// checked because ignoring it is how the permanent hang comes back — a pipe
+	// the runtime could not register for polling takes no deadline at all, and
+	// a Scan on it blocks until something else in the tree decides otherwise.
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		deadline = time.Now().Add(codexRPCTimeout)
+	}
+	if err := pr.SetReadDeadline(deadline); err != nil {
+		return nil, errCodexSpawn
+	}
 	stdout := pr
 
 	send := func(v any) error {
@@ -373,7 +505,7 @@ func codexAskRateLimits(bin string) (*codexLiveResult, error) {
 	if json.Unmarshal(raw, &res) != nil {
 		return nil, errCodexProtocol
 	}
-	if res.RateLimits == nil && len(res.ByLimitID) == 0 {
+	if len(res.RateLimits) == 0 && len(res.ByLimitID) == 0 {
 		return nil, errCodexProtocol
 	}
 	return &res, nil
@@ -384,13 +516,24 @@ func codexAskRateLimits(bin string) (*codexLiveResult, error) {
 // other meters and carry their own nulls for the rest.
 const codexPrimaryLimitID = "codex"
 
-// A bucket and the name it was filed under. The map key is carried rather than
-// re-derived from the bucket's own limitId: the two are the same today, the
-// protocol promises only the key, and a bucket whose embedded id is null would
-// otherwise lose the one identifier it had.
+// A bucket, the name it was filed under, and whether it is the account's own.
+//
+// The map key is carried rather than re-derived from the bucket's own limitId:
+// the two are the same today, the protocol promises only the key, and a bucket
+// whose embedded id is null would otherwise lose the one identifier it had.
+//
+// `primary` is carried for the same reason, and it is not the same as "first".
+// It was read off position once — the account bucket sorts first, so index zero
+// meant account — which held right up until a payload arrived with extra meters
+// and no account bucket at all. Then the first EXTRA meter inherited everything
+// that belongs to the account: the bare "primary" key, no scope to tell it
+// apart, and the right to name the plan and the credit balance. Identity is
+// something this either knows or does not; it is not something to infer from
+// where a thing ended up in a slice.
 type codexBucketRef struct {
-	id string
-	b  *codexLiveBucket
+	id      string
+	b       *codexLiveBucket
+	primary bool
 }
 
 // Buckets in a stable order: the account's own first, then the rest by id.
@@ -405,23 +548,31 @@ type codexBucketRef struct {
 // ignore it entirely, which on a payload holding extra meters and no `codex`
 // entry would have thrown away the main quota and then read the plan and credit
 // balance off whichever extra meter happened to sort first.
+//
+// "Does not carry one" is decided on READABILITY, not on whether the key is
+// present. A `codex` entry that arrived with no window in it, or with a window
+// whose usedPercent is a shape nobody can parse, is not an account reading —
+// and preferring it over a flat view that is perfectly intact would lose the
+// main quota to a technicality, silently if any extra meter was there to keep
+// the reading alive.
 func codexOrderedBuckets(res *codexLiveResult) []codexBucketRef {
 	var out []codexBucketRef
+	byID := codexBucketMap(res.ByLimitID)
 	primaryID := codexPrimaryLimitID
-	primary := res.ByLimitID[codexPrimaryLimitID]
-	if primary == nil {
-		primary = res.RateLimits
-		if primary != nil {
-			if id := asStr(primary.LimitID, 64); id != "" {
+	primary := codexBucket(byID[codexPrimaryLimitID])
+	if !codexBucketReadable(primary) {
+		if flat := codexBucket(res.RateLimits); codexBucketReadable(flat) {
+			primary = flat
+			if id := asStr(flat.LimitID, 64); id != "" {
 				primaryID = id
 			}
 		}
 	}
 	if primary != nil {
-		out = append(out, codexBucketRef{primaryID, primary})
+		out = append(out, codexBucketRef{id: primaryID, b: primary, primary: true})
 	}
-	ids := make([]string, 0, len(res.ByLimitID))
-	for id := range res.ByLimitID {
+	ids := make([]string, 0, len(byID))
+	for id := range byID {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
@@ -429,8 +580,10 @@ func codexOrderedBuckets(res *codexLiveResult) []codexBucketRef {
 		if id == primaryID || id == codexPrimaryLimitID {
 			continue
 		}
-		if b := res.ByLimitID[id]; b != nil {
-			out = append(out, codexBucketRef{id, b})
+		// Decoded one at a time on purpose: a single entry in an unexpected
+		// shape costs that meter its row, not every other meter theirs.
+		if b := codexBucket(byID[id]); b != nil {
+			out = append(out, codexBucketRef{id: id, b: b})
 		}
 	}
 	return out
@@ -475,7 +628,7 @@ func codexLimitKey(id, window string) string {
 // the meter, which the protocol allows. Without that fallback two nameless
 // weekly buckets both render as "7d" and nothing on the card says which is
 // which — the row label is the window, and the window is what they share.
-func codexBucketLimits(ref codexBucketRef, isPrimaryBucket bool) []Limit {
+func codexBucketLimits(ref codexBucketRef) []Limit {
 	b := ref.b
 	if b == nil {
 		return nil
@@ -487,17 +640,18 @@ func codexBucketLimits(ref codexBucketRef, isPrimaryBucket bool) []Limit {
 	var out []Limit
 	for _, w := range []struct {
 		key string
-		win *codexLiveWindow
+		raw json.RawMessage
 	}{{"primary", b.Primary}, {"secondary", b.Secondary}} {
-		if w.win == nil {
+		win := codexWindow(w.raw)
+		if win == nil {
 			continue
 		}
-		used := asNum(w.win.UsedPercent)
+		used := asNum(win.UsedPercent)
 		if used == nil {
 			continue
 		}
 		key := w.key
-		if !isPrimaryBucket {
+		if !ref.primary {
 			key = codexLimitKey(ref.id, w.key)
 		}
 		l := Limit{
@@ -506,14 +660,14 @@ func codexBucketLimits(ref codexBucketRef, isPrimaryBucket bool) []Limit {
 			// Codex reports no severity; the page colours these by percentage.
 			Severity: nil, Active: nil,
 		}
-		if !isPrimaryBucket && scope != "" {
+		if !ref.primary && scope != "" {
 			l.Scope = sp(scope)
 		}
-		if m := asNum(w.win.WindowMins); m != nil {
+		if m := asNum(win.WindowMins); m != nil {
 			l.WindowMinutes = m
 			l.WindowLabel = windowLabel(*m)
 		}
-		l.ResetsAt = asNum(w.win.ResetsAt)
+		l.ResetsAt = asNum(win.ResetsAt)
 		out = append(out, l)
 	}
 	return out
@@ -546,18 +700,20 @@ func codexLiveFetch() Provider {
 		return p
 	}
 
-	// The first ref is the account's own bucket by construction, and it is the
-	// only one the plan and the credit balance may come from: every other
-	// bucket is a window on some other meter and carries nulls for both.
-	for i, ref := range codexOrderedBuckets(res) {
-		p.Limits = append(p.Limits, codexBucketLimits(ref, i == 0)...)
-		if i > 0 {
+	// The account's own bucket is the only one the plan and the credit balance
+	// may come from: every other bucket is a window on some other meter and
+	// carries nulls for both. Asked of the ref rather than of its position — a
+	// payload with no account bucket has nobody to answer, and the first extra
+	// meter is not a stand-in.
+	for _, ref := range codexOrderedBuckets(res) {
+		p.Limits = append(p.Limits, codexBucketLimits(ref)...)
+		if !ref.primary {
 			continue
 		}
 		if plan := asStr(ref.b.PlanType, 40); plan != "" {
 			p.PlanType = sp(plan)
 		}
-		if c := ref.b.Credits; c != nil {
+		if c := codexCredits(ref.b.Credits); c != nil {
 			p.Credits = &Credits{
 				HasCredits: asBool(c.HasCredits),
 				Unlimited:  asBool(c.Unlimited),
@@ -596,16 +752,33 @@ func codexLiveFetch() Provider {
 // written since then sits unread on disk. So a live answer that is no longer
 // fresh is compared against the log rather than trusted on its rung alone, and
 // whichever was recorded later is the one that goes out.
+//
+// Freshness is an AGE, and an age below zero is not a very small one. These are
+// wall-clock seconds, so a machine that steps its clock backwards — ntp settling
+// after a boot, a laptop returning from suspend, a VM resuming — produces a
+// reading that appears to have been taken in the future. Reading that as "newer
+// than new" would pin the live leg in place for as long as the jump lasted,
+// which is exactly the interval when the log is the thing worth consulting. Only
+// a plainly recent reading skips the comparison; everything else goes on to it.
+//
+// An unstamped live reading takes the same road for the same reason: unknown is
+// not fresh. codexLiveFetch always stamps one, so that branch stands as the
+// invariant holding rather than a case anyone expects to see.
 func collectCodex() Provider {
 	live := codexLiveCache.collect(codexLiveFetch)
 	if !live.OK {
 		return collectCodexLog()
 	}
-	if live.RecordedAt == nil || live.CapturedAt-*live.RecordedAt < provMinInterval {
-		return live
+	if live.RecordedAt != nil {
+		if age := live.CapturedAt - *live.RecordedAt; age >= 0 && age < provMinInterval {
+			return live
+		}
 	}
 	logged := collectCodexLog()
-	if logged.OK && logged.RecordedAt != nil && *logged.RecordedAt > *live.RecordedAt {
+	if !logged.OK || logged.RecordedAt == nil {
+		return live
+	}
+	if live.RecordedAt == nil || *logged.RecordedAt > *live.RecordedAt {
 		return logged
 	}
 	return live
