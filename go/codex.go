@@ -46,6 +46,22 @@ const (
 	mtimeSlack = 600 * time.Second
 )
 
+// Why a candidate yielded nothing — which is not the same question as whether
+// it holds a reading.
+//
+// A file we searched and found nothing in supports "no reading here". A file
+// we refused before opening supports nothing at all, and reporting the two the
+// same way is how a machine spent a day saying "no quota recorded yet" while
+// every session file on it sat there holding one. Counting them separately is
+// what lets the card name the actual reason.
+type scanRefusal int
+
+const (
+	scanSearched  scanRefusal = iota // opened and read to the end of the budget
+	scanManyNames                    // more than one name for the inode; see singleLink
+	scanUnopened                     // could not be opened, or is not a regular file
+)
+
 // Everything that can vary is decoded as `any` and converted by hand.
 //
 // Strong types are the wrong tool against a file written by another program:
@@ -175,22 +191,22 @@ func codexCandidates(root string) (out []candidate, partial bool) {
 // older, and there is no newer reading left to miss. (The Python reads to the
 // budget regardless and can report truncated alongside a hit — same numbers,
 // but it spends 4 MiB of reads to say so.)
-func codexScanFile(root *os.Root, rel string) (rec *rollutRecord, truncated bool) {
+func codexScanFile(root *os.Root, rel string) (rec *rollutRecord, truncated bool, why scanRefusal) {
 	f, err := root.Open(rel)
 	if err != nil {
-		return nil, false
+		return nil, false, scanUnopened
 	}
 	defer f.Close()
 
 	st, err := f.Stat()
 	if err != nil || !st.Mode().IsRegular() {
-		return nil, false
+		return nil, false, scanUnopened
 	}
 	// Refuse when the link count cannot be established, not just when it is
 	// wrong — see singleLink, which is where the per-platform way of asking
 	// lives and where the fail-closed rule is enforced for all of them.
 	if !singleLink(f, st) {
-		return nil, false // hard link, or a link count we cannot verify
+		return nil, false, scanManyNames // hard link, or a count we cannot verify
 	}
 
 	size := st.Size()
@@ -202,7 +218,7 @@ func codexScanFile(root *os.Root, rel string) (rec *rollutRecord, truncated bool
 			// Stopped with a partial line unresolved, so anything earlier is
 			// unread. Reporting "no rate_limits here" would state a negative
 			// this never established.
-			return nil, true
+			return nil, true, scanSearched
 		}
 		step := int64(tailChunk)
 		if step > pos {
@@ -212,7 +228,7 @@ func codexScanFile(root *os.Root, rel string) (rec *rollutRecord, truncated bool
 		read += step
 		buf := make([]byte, step)
 		if _, err := f.ReadAt(buf, pos); err != nil {
-			return nil, false
+			return nil, true, scanSearched
 		}
 		tail = append(buf, tail...)
 
@@ -223,7 +239,7 @@ func codexScanFile(root *os.Root, rel string) (rec *rollutRecord, truncated bool
 				continue
 			}
 			if r.Payload.Type == "token_count" && r.Payload.RateLimits != nil {
-				return &r, false
+				return &r, false, scanSearched
 			}
 		}
 		if pos > 0 {
@@ -233,7 +249,7 @@ func codexScanFile(root *os.Root, rel string) (rec *rollutRecord, truncated bool
 			}
 		}
 	}
-	return nil, false
+	return nil, false, scanSearched
 }
 
 // Complete lines out of the buffer. When more of the file remains to the left,
@@ -273,7 +289,7 @@ func collectCodex() Provider {
 
 	var best *rollutRecord
 	var bestEpoch float64
-	var scanned int
+	var scanned, refusedNames int
 	var truncated, capped bool
 	var sourceFile string
 
@@ -295,9 +311,18 @@ func collectCodex() Provider {
 			break
 		}
 		scanned++
-		rec, trunc := codexScanFile(r, c.rel)
+		rec, trunc, why := codexScanFile(r, c.rel)
 		if trunc {
 			truncated = true
+		}
+		if why != scanSearched {
+			// Never looked at, so whatever is inside it is still unknown — the
+			// same standing as a scan that ran out of budget, and the reason
+			// "nothing newer exists" has to be hedged rather than claimed.
+			truncated = true
+			if why == scanManyNames {
+				refusedNames++
+			}
 		}
 		if rec == nil {
 			continue
@@ -310,9 +335,19 @@ func collectCodex() Provider {
 
 	p.Truncated, p.Capped = truncated, capped
 	if best == nil {
-		p.failWith("no-readings", "scan-none")
-		if truncated || capped {
+		switch {
+		// Every file this was allowed to look at was refused for having more
+		// than one name, so nothing here is a statement about quota at all.
+		// Named on its own because the cause is somewhere else entirely — a
+		// backup, a de-duplicator or a test fixture that hard-linked the
+		// session tree — and "the scan was cut short" sends whoever reads it
+		// looking in the wrong place. Cost a day of hunting once.
+		case scanned > 0 && refusedNames == scanned:
+			p.failWith("no-readings", "sessions-linked", itoa(refusedNames))
+		case truncated || capped:
 			p.failWith("no-readings", "scan-cut")
+		default:
+			p.failWith("no-readings", "scan-none")
 		}
 		return p
 	}

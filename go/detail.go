@@ -82,6 +82,7 @@ var detailPhrases = map[string]string{
 	"session-dir-closed": "the sessions directory could not be opened",
 	"scan-none":          "the session files carry no quota reading yet",
 	"scan-cut":           "the scan was cut short, so this is not a settled no",
+	"sessions-linked":    "all {a} session files have more than one name on disk, and this build will not read a file it cannot prove is only itself — something has hard-linked ~/.codex/sessions",
 	"latest-no-window":   "the newest record holds no usable quota window",
 
 	// Provider-specific enough to be worth their own line.

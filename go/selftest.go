@@ -29,7 +29,13 @@ func selftest() {
 					break
 				}
 				f, err := r.Open(c.rel)
-				fmt.Printf("  %s\n    opened=%v\n", c.rel, err == nil)
+				// The link count belongs next to `opened`, because a file
+				// that opens perfectly and is then refused for having a
+				// second name looks identical from here otherwise. 1 is the
+				// only value this collector will read; anything else (0 = the
+				// platform would not say) is why the card says nothing.
+				fmt.Printf("  %s\n    opened=%v nlink=%d\n",
+					c.rel, err == nil, linkCount(filepath.Join(root, c.rel)))
 				if f != nil {
 					f.Close()
 				}
@@ -77,7 +83,7 @@ func hardlinkProbe(r *os.Root, root string) {
 	}
 	defer os.Remove(link)
 
-	rec, _ := codexScanFile(r, filepath.Base(link))
+	rec, _, _ := codexScanFile(r, filepath.Base(link))
 	refused := rec == nil
 	// Confirm the probe actually built the shape it claims to test. 0 means the
 	// platform would not say, which is worth printing rather than hiding: it is
@@ -107,6 +113,6 @@ func symlinkProbe(r *os.Root, root string) {
 	}
 	defer os.Remove(link) // removes the LINK, never follows into it
 
-	rec, _ := codexScanFile(r, filepath.Join(filepath.Base(link), "rollout-outside.jsonl"))
+	rec, _, _ := codexScanFile(r, filepath.Join(filepath.Base(link), "rollout-outside.jsonl"))
 	fmt.Printf("  symlink probe     : parent symlink refused=%v\n", rec == nil)
 }
