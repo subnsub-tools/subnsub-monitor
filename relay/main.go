@@ -49,8 +49,9 @@ options:
   -listen ADDR      address to bind (default 127.0.0.1:8788)
   -state PATH       file to persist names and last readings across restarts
   -dist DIR         also serve the helper's installer and binaries from DIR at
-                    /dl/ (build them with go/build.sh and copy install.sh in),
-                    so machines download from this relay and nowhere else
+                    /dl/ — build with go/build.sh, then go/stamp.sh writes the
+                    matching installer beside them — so machines download from
+                    this relay and nowhere else
 
 Mint a token with 'subnsub-monitor token' (any 24-128 chars of A-Za-z0-9_- do).
 Then, on each machine to watch:
@@ -166,19 +167,27 @@ func main() {
 		os.Exit(2)
 	}
 
+	var distRoot *os.Root
 	if *distDir != "" {
-		// Checked now, loudly. A mistyped directory that turned into silent
-		// 404s would read as "the download link is broken" on some other
-		// machine, hours later, with the cause long scrolled away.
-		if st, err := os.Stat(*distDir); err != nil || !st.IsDir() {
-			fmt.Fprintf(os.Stderr, "error: -dist %s is not a readable directory\n", *distDir)
+		// Opened once, now, loudly — and this handle is the directory /dl
+		// serves for the life of the process. Re-resolving the path per
+		// request would follow whatever the path's components have become
+		// since; a symlink swapped into it after startup would quietly point
+		// every later download at a different directory than the one that
+		// was validated here. (os.Root is documented safe for concurrent
+		// use.) A mistyped directory failing as silent 404s would read as
+		// "the download link is broken" on some other machine, hours later.
+		r, err := os.OpenRoot(*distDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: -dist %s is not an openable directory: %v\n", *distDir, err)
 			os.Exit(2)
 		}
+		distRoot = r
 	}
 
 	hub := newRelayHub(*statePath, machineTok, opTok)
 	az := newAuth(machineTok, opTok)
-	mux := routes(hub, az, *distDir)
+	mux := routes(hub, az, distRoot)
 
 	// Timeouts shaped like the helper's own listener: header and body reads
 	// bounded, no global write deadline — /api/stream and a held /commands
@@ -237,8 +246,9 @@ var distFiles = map[string]string{
 }
 
 // Every route this relay answers, in one place so the tests drive the same
-// mux the binary serves rather than a reconstruction of it.
-func routes(hub *Hub, az auth, distDir string) *http.ServeMux {
+// mux the binary serves rather than a reconstruction of it. dist is nil when
+// -dist was not given, and the /dl route simply does not exist.
+func routes(hub *Hub, az auth, dist *os.Root) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// ── the helper's three legs, wire-compatible with the hosted relay ─────
@@ -359,7 +369,7 @@ func routes(hub *Hub, az auth, distDir string) *http.ServeMux {
 	// hang on this route either way: install.sh carries the expected SHA-256
 	// of every binary inline, which is also why the directory must hold an
 	// installer stamped for the same source it was built from.
-	if distDir != "" {
+	if dist != nil {
 		mux.HandleFunc("/dl/", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodGet && r.Method != http.MethodHead {
 				http.Error(w, "method", http.StatusMethodNotAllowed)
@@ -371,42 +381,53 @@ func routes(hub *Hub, az auth, distDir string) *http.ServeMux {
 				http.NotFound(w, r)
 				return
 			}
-			// os.Root confines every resolution to the directory: a raced
-			// swap of the file for a symlink still cannot reach outside it.
-			root, err := os.OpenRoot(distDir)
-			if err != nil {
-				http.NotFound(w, r)
-				return
-			}
-			defer root.Close()
 			// Lstat, never Stat: a SYMLINK wearing a listed name must read
 			// as the symlink it is — followed, it would lend this route's
-			// unauthenticated reach to whatever it points at, the relay's
-			// own state file included. And a FIFO must be refused without
-			// being opened, because opening one blocks until a writer
-			// appears. Anything but a plain file is a misconfiguration,
-			// answered like an absent one.
-			st, err := root.Lstat(name)
+			// unauthenticated reach to whatever it points at — and a FIFO
+			// must be refused without being opened, because opening one
+			// blocks until a writer appears. Anything but a plain file is a
+			// misconfiguration, answered like an absent one.
+			st, err := dist.Lstat(name)
 			if err != nil || !st.Mode().IsRegular() {
 				http.NotFound(w, r)
 				return
 			}
-			f, err := root.Open(name)
+			// distOpenExtra is O_NOFOLLOW|O_NONBLOCK where the platform has
+			// them (dist_unix.go): the open itself then refuses a symlink
+			// raced in since the Lstat, and cannot block on a raced-in FIFO
+			// — a nonblocking open of one succeeds and is caught by the
+			// fstat below. Elsewhere the flags are zero and the SameFile
+			// check is the (weaker) guard for the same race. Either way the
+			// Root bounds resolution to the directory; what no userspace
+			// check can see is a bind mount or a hard link wearing a listed
+			// name, which is why the directory itself must be trusted.
+			f, err := dist.OpenFile(name, os.O_RDONLY|distOpenExtra, 0)
 			if err != nil {
 				http.NotFound(w, r)
 				return
 			}
 			defer f.Close()
-			// fstat on the opened descriptor: the Lstat above was another
-			// instant's answer, and this one is the file actually served.
 			fst, err := f.Stat()
-			if err != nil || !fst.Mode().IsRegular() {
+			if err != nil || !fst.Mode().IsRegular() || !os.SameFile(st, fst) {
 				http.NotFound(w, r)
 				return
 			}
+			// This server has no global write timeout — /api/stream and the
+			// held poll are long-lived writes by design — so an
+			// unauthenticated multi-megabyte download must bound itself: a
+			// reader drawing one byte a minute would otherwise hold the
+			// goroutine and two descriptors for as long as it pleased.
+			// Generous, because the slow it exists to stop is adversarial
+			// slow, not rural-link slow.
+			rc := http.NewResponseController(w)
+			rc.SetWriteDeadline(time.Now().Add(10 * time.Minute))
 			w.Header().Set("Content-Type", ct)
 			w.Header().Set("X-Content-Type-Options", "nosniff")
 			w.Header().Set("Cache-Control", "no-store")
+			// The marker the dashboard's probe looks for: a reverse proxy
+			// that answers every path with a friendly 200 must not be read
+			// as "this relay serves binaries".
+			w.Header().Set("X-Mon-Dist", "1")
 			http.ServeContent(w, r, name, fst.ModTime(), f)
 		})
 	}
