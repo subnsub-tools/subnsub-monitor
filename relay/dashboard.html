@@ -975,7 +975,11 @@ function renderSetup() {
   $('#set-hand').textContent = c.hand;
   $('#set-src').textContent = state.dlLive === true
     ? 'The install fetches the installer and binaries from this relay (/dl/) and touches no other host. Remote self-update, if you enable it later, still fetches from the public release bucket by design — the README explains.'
-    : 'Binaries come from the public release host; run the relay with -dist to serve them yourself.';
+      + (relay === location.origin.replace(/\/+$/, '') ? ''
+        : ' (The /dl check ran against this page’s own relay; the command assumes the URL above reaches the same one.)')
+    : state.dlLive === false
+      ? 'Binaries come from the public release host; run the relay with -dist to serve them yourself.'
+      : 'Still checking whether this relay serves its own binaries (/dl/) — the command uses the public release host, which works either way, and regenerates if the answer is yes.';
   if (!c.https) {
     warn.push('The one-line installer refuses a plain-http relay — a bearer ' +
       'token crossing a network in cleartext is a token that network has. ' +
@@ -993,9 +997,17 @@ function renderSetup() {
 function probeDl(then) {
   if (state.dlLive !== null) { then(); return; }
   /* Same-origin and unauthenticated, exactly like the installer's own fetch.
-     404 = the relay runs without -dist, which is the default. */
+     Only two answers settle the question: the route's own marker header says
+     yes (a reverse proxy answering every path with a friendly 200 must not
+     read as "this relay serves binaries"), and a 404 says no — the default.
+     Anything else (network hiccup, 5xx, proxy noise) stays UNKNOWN and is
+     asked again next time, rather than being cached as a permanent no. */
   fetch('/dl/install.sh', { method: 'HEAD', cache: 'no-store' })
-    .then(r => { state.dlLive = r.ok; }, () => { state.dlLive = false; })
+    .then(r => {
+      if (r.ok && r.headers.get('X-Mon-Dist') === '1') state.dlLive = true;
+      else if (r.status === 404) state.dlLive = false;
+      else state.dlLive = null;
+    }, () => { state.dlLive = null; })
     .then(then);
 }
 

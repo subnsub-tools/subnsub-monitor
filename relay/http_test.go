@@ -21,7 +21,7 @@ func testServer(t *testing.T) (*httptest.Server, *Hub) {
 	// Built the way the binary builds it, so the hello these tests read went
 	// through the same token_split derivation the binary ships.
 	hub := newRelayHub("", machTok, opTok)
-	srv := httptest.NewServer(routes(hub, newAuth(machTok, opTok), ""))
+	srv := httptest.NewServer(routes(hub, newAuth(machTok, opTok), nil))
 	t.Cleanup(srv.Close)
 	return srv, hub
 }
@@ -100,7 +100,7 @@ func TestSeparateTokensKeepTheTwoSidesApart(t *testing.T) {
 func TestOneTokenModeWatchesAndPushes(t *testing.T) {
 	// What `-op-token` unset produces: the push token also watches.
 	hub := newRelayHub("", machTok, machTok)
-	srv := httptest.NewServer(routes(hub, newAuth(machTok, machTok), ""))
+	srv := httptest.NewServer(routes(hub, newAuth(machTok, machTok), nil))
 	t.Cleanup(srv.Close)
 	push := `{"agent_id":"machineone","providers":[{"id":"codex","ok":true,"limits":[{"used_percent":1}]}]}`
 	if r := do(t, srv, "POST", "/push", machTok, push); r.StatusCode != 200 {
@@ -259,7 +259,7 @@ func TestHelloSaysWhetherTheTokensAreSplit(t *testing.T) {
 		t.Fatalf("split relay said token_split=%v", f["token_split"])
 	}
 	one := newRelayHub("", machTok, machTok)
-	oneSrv := httptest.NewServer(routes(one, newAuth(machTok, machTok), ""))
+	oneSrv := httptest.NewServer(routes(one, newAuth(machTok, machTok), nil))
 	t.Cleanup(oneSrv.Close)
 	if f := firstFrame(t, oneSrv, machTok); f["token_split"] != false {
 		t.Fatalf("one-token relay said token_split=%v", f["token_split"])
@@ -268,8 +268,15 @@ func TestHelloSaysWhetherTheTokensAreSplit(t *testing.T) {
 
 func distServer(t *testing.T, dir string) *httptest.Server {
 	t.Helper()
+	// The Root is opened once, the way main does it — per-request opening is
+	// exactly what the handler no longer does.
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { root.Close() })
 	hub := newHub("")
-	srv := httptest.NewServer(routes(hub, newAuth(machTok, opTok), dir))
+	srv := httptest.NewServer(routes(hub, newAuth(machTok, opTok), root))
 	t.Cleanup(srv.Close)
 	return srv
 }

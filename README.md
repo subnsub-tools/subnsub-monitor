@@ -581,11 +581,14 @@ The dashboard notices `/dl/` is alive and generates install commands that
 point machines at **your relay for everything the install touches** —
 installer and binaries included. One deliberate exception outlives the
 install: the dashboard's *remote self-update* button still fetches from the
-public release bucket, because its base URL is a compile-time constant no
-input can move — that immovability is the security property the whole update
-design stands on (see "Updating itself, and who decides what that means").
-A deployment that wants zero outside contact leaves remote update off, and
-upgrades by re-running its own install line.
+public release bucket, because nothing a relay sends can move that base URL —
+that immovability is the security property the whole update design stands on
+(see "Updating itself, and who decides what that means"). The one thing that
+can move it is `MON_UPDATE_BASE` in the machine's **own** environment, which
+is the machine's administrator speaking, not the network. A deployment that
+wants zero outside contact leaves remote update off and upgrades by
+re-running its own install line — or sets that variable at install time and
+owns the update trust that comes with it.
 
 Two rules keep it honest:
 
@@ -597,11 +600,14 @@ Two rules keep it honest:
   installer, sums replaced with those of the binaries you just built.
 - `/dl/` serves a **fixed whitelist of names** (the installer, the checksum
   list, the published binary names) and only plain files — a symlink or a
-  FIFO wearing a listed name is refused unopened, so nothing in or out of
-  the directory can be reached by indirection. It is unauthenticated —
+  FIFO wearing a listed name is refused unopened, so neither path traversal
+  nor link-following can reach past the directory. It is unauthenticated —
   `curl | sh` cannot carry a header, and everything nameable there is public
   release material — but a stray file in the directory is not nameable, so
-  state files and tokens cannot be fetched out of it.
+  state files and tokens cannot be fetched out of it. What no userspace
+  check can see: a **hard link or a bind mount** placed over a listed name
+  *is* a plain file — the directory you hand to `-dist` has to be one only
+  you write.
 
 `-op-token` is worth setting on anything bigger than a couple of machines. With
 one token, anyone who gets it can watch every machine and type at every console
