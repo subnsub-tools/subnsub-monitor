@@ -124,14 +124,14 @@ func factoryUsed(w *factoryWindow, reset *float64) *float64 {
 
 func fetchFactory() Provider {
 	p := Provider{ID: "factory", Name: "Droid", Source: "api", CapturedAt: now()}
-	fail := func(err, detail string) Provider {
-		p.Error, p.Detail = err, detail
+	fail := func(err, code string, arg ...string) Provider {
+		p.failWith(err, code, arg...)
 		return p
 	}
 
 	key := factoryKey()
 	if key == "" {
-		return fail("not-signed-in", "~/.factory/.env 里没有 FACTORY_API_KEY")
+		return fail("not-signed-in", "creds-missing", "~/.factory/.env")
 	}
 	hdr := map[string]string{
 		"Authorization":    "Bearer " + key,
@@ -140,13 +140,13 @@ func fetchFactory() Provider {
 
 	status, body, err := provRequest("GET", factoryLimitsURL, hdr, nil)
 	if err != nil {
-		return fail("unreachable", "请求失败")
+		return fail("unreachable", "req-failed")
 	}
 	switch {
 	case status == 401 || status == 403:
-		return fail("token-expired", "Factory 接口返回 "+itoa(status))
+		return fail("token-expired", "http-status", itoa(status))
 	case status != 200:
-		return fail("api-error", "Factory 接口返回 "+itoa(status))
+		return fail("api-error", "http-status", itoa(status))
 	}
 
 	var doc struct {
@@ -165,7 +165,7 @@ func fetchFactory() Provider {
 		ExtraUsageBalanceCents any `json:"extraUsageBalanceCents"`
 	}
 	if json.Unmarshal(body, &doc) != nil {
-		return fail("api-error", "Factory 接口返回的不是预期结构")
+		return fail("api-error", "http-shape")
 	}
 
 	t := now()
@@ -201,7 +201,7 @@ func fetchFactory() Provider {
 			Balance: "$" + trimAmount(*cents/100)}
 	}
 	if len(p.Limits) == 0 && p.Credits == nil {
-		return fail("no-readings", "Factory 接口没有返回可用的额度窗口")
+		return fail("no-readings", "no-window")
 	}
 
 	// The plan name is a second, separately-failing request, and a nicety:

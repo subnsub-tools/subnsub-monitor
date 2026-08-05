@@ -53,6 +53,42 @@ func TestCleanReadingAcceptsAHelperPush(t *testing.T) {
 	}
 }
 
+// A failed provider now says why twice: a sentence and a code a dashboard with
+// translations can look up. The code is a lookup key, so it is gated on SHAPE —
+// while the argument spliced into it is free text out of a vendor's error
+// string, and gets the same scrubbing and cap as any other display string.
+func TestCleanProviderGatesTheDetailCode(t *testing.T) {
+	fail := func(extra string) *provider {
+		return cleanProvider([]byte(`{"id":"kilo","name":"Kilo","ok":false,` +
+			`"error":"api-error","detail":"the endpoint answered 500"` + extra + `}`))
+	}
+	p := fail(`,"detail_code":"http-status","detail_arg":"500"`)
+	if p == nil || p.DetailCode != "http-status" || p.DetailArg != "500" {
+		t.Fatalf("a well-formed code was dropped: %+v", p)
+	}
+	if p.Detail != "the endpoint answered 500" {
+		t.Fatalf("the sentence must survive alongside the code: %q", p.Detail)
+	}
+	for _, bad := range []string{"Http-Status", "http status", "http_status", "1status",
+		strings.Repeat("a", 33), ""} {
+		if got := fail(`,"detail_code":` + quote(bad)); got.DetailCode != "" {
+			t.Errorf("detail_code %q passed the shape gate as %q", bad, got.DetailCode)
+		}
+	}
+	long := fail(`,"detail_code":"ls-no-quota","detail_arg":` + quote(strings.Repeat("x", 400)))
+	if n := len([]rune(long.DetailArg)); n != detailArgMax {
+		t.Errorf("argument kept %d runes, cap is %d", n, detailArgMax)
+	}
+	if got := fail(`,"detail_code":"ls-no-quota","detail_arg":"dial‮tcp"`); strings.ContainsRune(got.DetailArg, 0x202e) {
+		t.Errorf("a bidi override rode into the argument: %q", got.DetailArg)
+	}
+}
+
+func quote(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
 func TestCleanReadingRefusesFramesWithNothingToShow(t *testing.T) {
 	for _, tc := range []struct{ name, body string }{
 		{"not json", `{`},

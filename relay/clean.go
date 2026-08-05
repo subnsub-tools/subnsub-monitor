@@ -30,12 +30,16 @@ const (
 	maxLimits    = 8
 	maxMissing   = 8
 	maxNameRunes = 24
+	detailArgMax = 120 // a credential path or a dial error, not a paragraph
 )
 
 var (
 	agentIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{4,32}$`)
 	versionRe = regexp.MustCompile(`^\d{4}\.\d{2}\.\d{2}\.\d{1,3}$`)
 	kernelRe  = regexp.MustCompile(`^\d{1,4}\.\d{1,4}$`)
+	// Why a provider failed, in machine form — a lookup key, so a closed shape
+	// rather than a length cap.
+	detailCodeRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 	// Numbers the helper stamps as "epoch seconds". Anything outside this
 	// window is a unit mistake — milliseconds, usually — and a wrong-unit
 	// timestamp renders as a countdown of several decades, which looks
@@ -84,8 +88,16 @@ type provider struct {
 	Source string `json:"source,omitempty"`
 	OK     bool   `json:"ok"`
 
-	Error  string `json:"error,omitempty"`
-	Detail string `json:"detail,omitempty"`
+	// Why there is no reading. Detail is the helper's own sentence, written in
+	// one language; DetailCode is the same thing in machine form, for a
+	// dashboard that has more than one. This dashboard shows the sentence — it
+	// ships no translations on purpose — but the field has to survive the trip,
+	// because a helper cannot tell the two relays apart and must not lose data
+	// by choosing one. See helper/go/detail.go.
+	Error      string `json:"error,omitempty"`
+	Detail     string `json:"detail,omitempty"`
+	DetailCode string `json:"detail_code,omitempty"`
+	DetailArg  string `json:"detail_arg,omitempty"`
 
 	RecordedAt    *float64 `json:"recorded_at,omitempty"`
 	PlanType      string   `json:"plan_type,omitempty"`
@@ -331,6 +343,8 @@ func cleanProvider(body json.RawMessage) *provider {
 		OK            *bool             `json:"ok"`
 		Error         *string           `json:"error"`
 		Detail        *string           `json:"detail"`
+		DetailCode    *string           `json:"detail_code"`
+		DetailArg     *string           `json:"detail_arg"`
 		RecordedAt    *float64          `json:"recorded_at"`
 		PlanType      *string           `json:"plan_type"`
 		RateLimitTier *string           `json:"rate_limit_tier"`
@@ -369,6 +383,16 @@ func cleanProvider(body json.RawMessage) *provider {
 		}
 		if raw.Detail != nil {
 			p.Detail = displayText(*raw.Detail, 400)
+		}
+		// A closed shape, not a length cap: this is a lookup key on a
+		// dashboard, so anything that is not a slug can only ever miss. The
+		// argument spliced into it is free text — a vendor's error string can
+		// reach it — and gets the same scrubbing as any other display string.
+		if raw.DetailCode != nil && detailCodeRE.MatchString(*raw.DetailCode) {
+			p.DetailCode = *raw.DetailCode
+		}
+		if raw.DetailArg != nil {
+			p.DetailArg = displayText(*raw.DetailArg, detailArgMax)
 		}
 		return p
 	}

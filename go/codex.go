@@ -256,18 +256,17 @@ func collectCodex() Provider {
 	p := Provider{ID: "codex", Name: "Codex", Source: "local-log", CapturedAt: now()}
 	root := codexSessionsDir()
 	if root == "" {
-		p.Error, p.Detail = "no-sessions", "找不到 home 目录"
+		p.failWith("no-sessions", "no-home")
 		return p
 	}
 	if st, err := os.Stat(root); err != nil || !st.IsDir() {
-		p.Error = "no-sessions"
-		p.Detail = "~/.codex/sessions 不存在——Codex CLI 装了并登录过吗？"
+		p.failWith("no-sessions", "no-session-dir")
 		return p
 	}
 
 	r, err := os.OpenRoot(root)
 	if err != nil {
-		p.Error, p.Detail = "no-sessions", "无法打开 sessions 目录"
+		p.failWith("no-sessions", "session-dir-closed")
 		return p
 	}
 	defer r.Close()
@@ -311,10 +310,9 @@ func collectCodex() Provider {
 
 	p.Truncated, p.Capped = truncated, capped
 	if best == nil {
-		p.Error = "no-readings"
-		p.Detail = "扫描了若干 session 文件，还没有额度记录。"
+		p.failWith("no-readings", "scan-none")
 		if truncated || capped {
-			p.Detail = "扫描被截断，这不是一个确定的否定结论。"
+			p.failWith("no-readings", "scan-cut")
 		}
 		return p
 	}
@@ -348,7 +346,7 @@ func collectCodex() Provider {
 		// A rate_limits object with no usable window is not a reading. Saying
 		// ok here would leave the page showing its previous gauge, freshly
 		// stamped live — worse than showing nothing.
-		p.Error, p.Detail = "no-readings", "最新记录里没有可用的额度窗口。"
+		p.failWith("no-readings", "latest-no-window")
 		return p
 	}
 

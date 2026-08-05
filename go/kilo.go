@@ -171,14 +171,14 @@ func kiloPayload(entry any) any {
 
 func fetchKilo() Provider {
 	p := Provider{ID: "kilo", Name: "Kilo", Source: "api", CapturedAt: now()}
-	fail := func(err, detail string) Provider {
-		p.Error, p.Detail = err, detail
+	fail := func(err, code string, arg ...string) Provider {
+		p.failWith(err, code, arg...)
 		return p
 	}
 
 	token := kiloToken()
 	if token == "" {
-		return fail("not-signed-in", "~/.local/share/kilo/auth.json 里没有 access token")
+		return fail("not-signed-in", "creds-missing", "~/.local/share/kilo/auth.json")
 	}
 
 	input := `{"0":{"json":null},"1":{"json":null},"2":{"json":null}}`
@@ -190,19 +190,19 @@ func fetchKilo() Provider {
 		"Accept":        "application/json",
 	}, nil)
 	if err != nil {
-		return fail("unreachable", "请求失败")
+		return fail("unreachable", "req-failed")
 	}
 	switch {
 	case status == 401 || status == 403:
-		return fail("token-expired", "Kilo 接口返回 "+itoa(status))
+		return fail("token-expired", "http-status", itoa(status))
 	case status != 200:
-		return fail("api-error", "Kilo 接口返回 "+itoa(status))
+		return fail("api-error", "http-status", itoa(status))
 	}
 
 	// The batch is an array of entries, or a single object for one procedure.
 	var raw any
 	if json.Unmarshal(body, &raw) != nil {
-		return fail("api-error", "Kilo 接口返回的不是预期结构")
+		return fail("api-error", "http-shape")
 	}
 	entries := map[int]any{}
 	switch t := raw.(type) {
@@ -368,7 +368,7 @@ func fetchKilo() Provider {
 	}
 
 	if len(p.Limits) == 0 && p.Credits == nil {
-		return fail("no-readings", "Kilo 接口没有返回可用的额度")
+		return fail("no-readings", "no-window")
 	}
 
 	p.OK = true

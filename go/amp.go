@@ -137,23 +137,23 @@ func collectAmp() Provider {
 
 func fetchAmp() Provider {
 	p := Provider{ID: "amp", Name: "Amp", Source: "cli", CapturedAt: now()}
-	fail := func(err, detail string) Provider {
-		p.Error, p.Detail = err, detail
+	fail := func(err, code string, arg ...string) Provider {
+		p.failWith(err, code, arg...)
 		return p
 	}
 
 	bin := ampBinary()
 	if bin == "" {
-		return fail("not-installed", "找不到可用的 amp 命令")
+		return fail("not-installed", "cli-missing", "amp")
 	}
 	out, exited, err := runAmpUsage(bin)
 	if err != nil {
 		// Never err.Error(): exec errors quote the full path being run, which
 		// carries the local username straight onto every watcher's screen.
 		if err == errAmpTimeout {
-			return fail("unreachable", "amp usage 超时")
+			return fail("unreachable", "cli-timeout", "amp usage")
 		}
-		return fail("cli-failed", "amp usage 执行失败")
+		return fail("cli-failed", "cli-failed", "amp usage")
 	}
 	return parseAmpUsage(p, out, now(), exited)
 }
@@ -434,8 +434,8 @@ func ampUsed(remaining float64) float64 {
 }
 
 func parseAmpUsage(p Provider, out string, t float64, exited bool) Provider {
-	fail := func(err, detail string) Provider {
-		p.Error, p.Detail = err, detail
+	fail := func(err, code string, arg ...string) Provider {
+		p.failWith(err, code, arg...)
 		return p
 	}
 	text := ansiRE.ReplaceAllString(out, "")
@@ -523,13 +523,13 @@ func parseAmpUsage(p Provider, out string, t float64, exited bool) Provider {
 		// that diagnosis now; a failing exit is reported as a failing exit.
 		switch {
 		case ampSignedOutRE.MatchString(text):
-			return fail("not-signed-in", "amp 未登录；跑一次 amp login。")
+			return fail("not-signed-in", "cli-signin", "amp login")
 		case exited:
-			return fail("cli-failed", "amp usage 以非零状态退出")
+			return fail("cli-failed", "cli-exit", "amp usage")
 		case !ampSignedInRE.MatchString(text):
-			return fail("cli-failed", "amp usage 的输出不是预期的形状")
+			return fail("cli-failed", "cli-shape", "amp usage")
 		}
-		return fail("no-readings", "amp usage 没有输出可识别的额度行")
+		return fail("no-readings", "cli-nolines", "amp usage")
 	}
 
 	if p.PlanType == nil && ampFreePctRE.MatchString(text) {

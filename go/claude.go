@@ -169,8 +169,9 @@ func collectClaude() Provider {
 	}
 	if t < claudeCache.coolUntil {
 		// Cooling down with nothing cached to fall back on.
-		return Provider{ID: "claude", Name: "Claude Code", Source: "api", CapturedAt: t,
-			Error: "rate-limited", Detail: "额度接口限流中，稍后重试"}
+		cooling := Provider{ID: "claude", Name: "Claude Code", Source: "api", CapturedAt: t}
+		cooling.failWith("rate-limited", "rate-hold")
+		return cooling
 	}
 
 	p := fetchClaude()
@@ -200,8 +201,8 @@ func collectClaude() Provider {
 
 func fetchClaude() Provider {
 	p := Provider{ID: "claude", Name: "Claude Code", Source: "api", CapturedAt: now()}
-	fail := func(err, detail string) Provider {
-		p.Error, p.Detail = err, detail
+	fail := func(err, code string, arg ...string) Provider {
+		p.failWith(err, code, arg...)
 		return p
 	}
 
@@ -209,16 +210,16 @@ func fetchClaude() Provider {
 	if !ok {
 		// Literal path, never the absolute one — that carries the local
 		// username, which would then travel to every watcher's screen.
-		return fail("not-signed-in", "~/.claude/.credentials.json 里没有 claudeAiOauth")
+		return fail("not-signed-in", "creds-missing", "~/.claude/.credentials.json")
 	}
 	if auth.expiresAt > 0 && auth.expiresAt/1000 < now() {
-		return fail("token-expired", "凭据已过期；跑一次 Claude Code 让它续期。")
+		return fail("token-expired", "creds-expired", "Claude Code")
 	}
 
 	req, err := http.NewRequest("GET", claudeUsageURL, nil)
 	if err != nil {
 		// Type only. err.Error() here can quote the URL and headers.
-		return fail("unreachable", "构造请求失败")
+		return fail("unreachable", "req-build")
 	}
 	req.Header.Set("Authorization", "Bearer "+auth.token)
 	req.Header.Set("Content-Type", "application/json")
@@ -236,29 +237,29 @@ func fetchClaude() Provider {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fail("unreachable", "请求失败")
+		return fail("unreachable", "req-failed")
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		return fail("api-error", "额度接口试图重定向")
+		return fail("api-error", "http-redirect")
 	}
 	if resp.StatusCode == 401 {
-		return fail("token-expired", "额度接口返回 401")
+		return fail("token-expired", "http-401")
 	}
 	if resp.StatusCode == 429 {
 		// Distinct from api-error: this one is our fault and self-corrects,
 		// and the caller reacts to it by backing off rather than by telling
 		// the user something is broken.
-		return fail("rate-limited", "额度接口限流（429）")
+		return fail("rate-limited", "http-429")
 	}
 	if resp.StatusCode != 200 {
-		return fail("api-error", "额度接口返回 "+itoa(resp.StatusCode))
+		return fail("api-error", "http-status", itoa(resp.StatusCode))
 	}
 
 	var usage claudeUsage
 	if json.NewDecoder(resp.Body).Decode(&usage) != nil {
-		return fail("api-error", "额度接口返回的不是预期结构")
+		return fail("api-error", "http-shape")
 	}
 
 	for _, raw := range usage.Limits {
@@ -299,7 +300,7 @@ func fetchClaude() Provider {
 		p.Limits = append(p.Limits, lim)
 	}
 	if len(p.Limits) == 0 {
-		return fail("no-readings", "额度接口没有返回可用的窗口")
+		return fail("no-readings", "no-window")
 	}
 
 	p.OK = true

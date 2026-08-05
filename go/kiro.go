@@ -90,22 +90,22 @@ func kiroReset(s string) *float64 {
 
 func fetchKiro() Provider {
 	p := Provider{ID: "kiro", Name: "Kiro", Source: "cli", CapturedAt: now()}
-	fail := func(err, detail string) Provider {
-		p.Error, p.Detail = err, detail
+	fail := func(err, code string, arg ...string) Provider {
+		p.failWith(err, code, arg...)
 		return p
 	}
 
 	bin := vendorBinary(kiroBinEnv, vendorCandidates("kiro-cli"))
 	if bin == "" {
-		return fail("not-installed", "找不到可用的 kiro-cli 命令")
+		return fail("not-installed", "cli-missing", "kiro-cli")
 	}
 	out, exited, err := runVendorCLI(bin, []string{"chat", "--no-interactive", "/usage"},
 		[]string{"KIRO_", "AWS_", "Q_"}, 30*time.Second)
 	if err != nil {
 		if err == errAmpTimeout {
-			return fail("unreachable", "kiro-cli 超时")
+			return fail("unreachable", "cli-timeout", "kiro-cli")
 		}
-		return fail("cli-failed", "kiro-cli 执行失败")
+		return fail("cli-failed", "cli-failed", "kiro-cli")
 	}
 	text := ansiRE.ReplaceAllString(out, "")
 
@@ -173,11 +173,11 @@ func fetchKiro() Provider {
 	if len(p.Limits) == 0 && p.Credits == nil {
 		switch {
 		case kiroSignedOutRE.MatchString(text):
-			return fail("not-signed-in", "kiro-cli 未登录；跑一次 kiro-cli login。")
+			return fail("not-signed-in", "cli-signin", "kiro-cli login")
 		case exited:
-			return fail("cli-failed", "kiro-cli 以非零状态退出")
+			return fail("cli-failed", "cli-exit", "kiro-cli")
 		}
-		return fail("no-readings", "kiro-cli 没有输出可识别的额度行")
+		return fail("no-readings", "cli-nolines", "kiro-cli")
 	}
 
 	p.OK = true
