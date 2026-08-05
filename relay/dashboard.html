@@ -103,6 +103,24 @@ main { padding: 20px; max-width: 1400px; margin: 0 auto; }
   padding: 12px 14px; overflow-x: auto; white-space: pre;
 }
 
+/* add-machine panel */
+#setup { max-width: 720px; margin: 0 auto 20px; display: none; }
+.setrow { display: flex; align-items: center; gap: 8px; margin: 10px 0 0; }
+.setrow label { color: var(--mute); font-size: 12.5px; flex: none; width: 104px; }
+.setrow input {
+  flex: 1; border: 1px solid var(--line); background: var(--bg);
+  border-radius: 8px; padding: 7px 10px; min-width: 0;
+}
+.setrow input:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: transparent; }
+.sethead { display: flex; align-items: center; gap: 8px; margin: 14px 0 0; }
+.sethead .t { color: var(--mute); font-size: 12px; flex: 1; }
+#setup pre {
+  background: var(--inset); border-radius: 8px; padding: 10px 12px;
+  overflow-x: auto; white-space: pre; margin: 6px 0 0;
+}
+#setup .note { color: var(--mute); font-size: 12px; margin: 8px 0 0; }
+#setup .warnnote { color: var(--warn); }
+
 /* board */
 #board {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
@@ -211,6 +229,7 @@ main { padding: 20px; max-width: 1400px; margin: 0 auto; }
   <h1>subnsub-monitor</h1>
   <span id="conn"><span class="dot"></span><span id="conn-t">connecting</span></span>
   <span id="count" class="num"></span>
+  <button class="hbtn" id="addm" style="display:none">add machine</button>
   <button class="hbtn" id="theme" title="theme">theme</button>
   <button class="hbtn" id="lock" title="forget the token" style="display:none">sign out</button>
 </header>
@@ -226,11 +245,38 @@ main { padding: 20px; max-width: 1400px; margin: 0 auto; }
       <p id="gate-err"></p>
     </div>
   </div>
+  <div id="setup">
+    <div class="gatecard">
+      <h2>Add a machine</h2>
+      <p>Run one line on the machine you want to watch; it installs the helper
+         and points it at this relay.</p>
+      <div class="setrow">
+        <label for="set-url">relay URL</label>
+        <input id="set-url" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="setrow" id="set-tokrow" style="display:none">
+        <label for="set-tok">machine token</label>
+        <input id="set-tok" type="password" autocomplete="off" placeholder="the push token, not this dashboard's">
+      </div>
+      <p class="note" id="set-toknote" style="display:none">This relay runs with
+        a separate dashboard token, so the one this page signed in with must not
+        be installed on a machine. Paste the machine token (the relay's
+        MON_RELAY_TOKEN); it goes into the command below and nowhere else.</p>
+      <div class="sethead"><span class="t" id="set-cmd-t">install and connect</span>
+        <button class="ghost" id="set-copy1" type="button">copy</button></div>
+      <pre class="mono" id="set-cmd"></pre>
+      <div class="sethead"><span class="t">or by hand, where the helper is already installed</span>
+        <button class="ghost" id="set-copy2" type="button">copy</button></div>
+      <pre class="mono" id="set-hand"></pre>
+      <p class="note" id="set-src"></p>
+      <p class="note warnnote" id="set-warn" style="display:none"></p>
+    </div>
+  </div>
   <div id="empty">
     <h2>No machines yet</h2>
     <p>On each machine you want to watch, install the helper against this relay:</p>
     <pre class="mono" id="empty-cmd"></pre>
-    <p>or run it by hand: <span class="mono" id="empty-hand"></span></p>
+    <p id="empty-alt"></p>
     <p>The first push appears here within seconds of the service starting.</p>
   </div>
   <div id="board"></div>
@@ -267,6 +313,14 @@ const state = {
   connected: false,
   offlineAfter: 90,
   termTTL: 120000,
+  /* Whether this relay runs -op-token, told by hello. Null = not heard yet,
+     and unknown is treated as SPLIT: prefilling the signed-in token into an
+     install command is only safe once the relay has said that token is the
+     machine one, because in split mode the signed-in token is the dashboard
+     secret and an install command is exactly how it would end up sitting on
+     a monitored box. */
+  tokenSplit: null,
+  dlLive: null,      // does this relay serve /dl/? null = not probed yet
   names: {},
   machines: new Map(), // id -> {id, seenAt(ms), reading, hist:[], ui:{...}, pend:Map, termOn:false}
 };
@@ -759,6 +813,11 @@ function onFrame(f) {
     case 'hello':
       state.offlineAfter = f.offline_after || 90;
       state.termTTL = f.term_ttl || 120000;
+      /* Absent on a relay older than this page = stays null = treated as
+         split, which errs toward never prefilling a token. */
+      if (typeof f.token_split === 'boolean') state.tokenSplit = f.token_split;
+      renderEmpty();
+      if ($('#setup').style.display === 'block') renderSetup();
       state.names = f.names || {};
       for (const m of f.machines || []) upsertMachine(m.id, m.seen_at, m.reading);
       dropMissing(new Set((f.machines || []).map(x => x.id)));
@@ -806,6 +865,124 @@ function onFrame(f) {
     }
   }
 }
+
+/* ── adding a machine ───────────────────────────────────────────────────── */
+
+/* Where binaries come from when this relay does not serve them itself: the
+   public release host, the same constant the repository's install.sh defaults
+   to. Text for a human to copy, never a load. */
+const PUB_BASE = 'https://tools.subnsub.com/monitor';
+
+/* The install command, with the one POSIX trap this page used to set for its
+   own operators: the MON_RELAY assignment must ride on `sh`, not on `curl` —
+   a VAR=value prefix reaches only the first command of a pipeline, and it is
+   the installer that reads it. The old shape installed machines pointed at
+   the DEFAULT relay, which 403s a self-hosted token, and the machine simply
+   never appeared here. */
+function installCmds(relay, tok) {
+  relay = relay.replace(/\/+$/, '');
+  const dl = state.dlLive === true;
+  const base = dl ? relay + '/dl' : PUB_BASE;
+  const env = 'MON_RELAY=' + relay + (dl ? ' MON_BASE=' + base : '');
+  return {
+    https: /^https:\/\//.test(relay),
+    one: 'curl -fsSL ' + base + '/install.sh \\\n  | ' + env + ' sh -s -- ' + tok,
+    hand: 'subnsub-monitor connect ' + relay + ' ' + tok,
+  };
+}
+
+/* The token an install command may carry without being asked: only the one
+   the viewer signed in with, and only once hello has said this relay has ONE
+   token — on a split relay the signed-in token watches, and must never be
+   typed into a machine. */
+const prefillTok = () => (state.tokenSplit === false ? state.token : null);
+
+function renderEmpty() {
+  const tok = prefillTok() || 'TOKEN';
+  const c = installCmds(location.origin, tok);
+  $('#empty-cmd').textContent = c.https ? c.one : c.hand;
+  $('#empty-alt').textContent = c.https
+    ? 'or by hand, where the helper is already installed:  ' + c.hand
+    : 'That is the by-hand form: the one-line installer only accepts an ' +
+      'https:// relay, so front this one with TLS first (the README shows how).';
+}
+
+function renderSetup() {
+  const split = state.tokenSplit !== false;
+  $('#set-tokrow').style.display = split ? '' : 'none';
+  $('#set-toknote').style.display = split ? '' : 'none';
+  const relay = $('#set-url').value.trim() || location.origin;
+  const tok = (split ? $('#set-tok').value.trim() : state.token) || 'TOKEN';
+  const c = installCmds(relay, tok);
+  $('#set-cmd-t').textContent = c.https ? 'install and connect'
+    : 'this relay is not behind https';
+  $('#set-cmd').textContent = c.https ? c.one : c.hand;
+  $('#set-hand').textContent = c.hand;
+  $('#set-src').textContent = state.dlLive === true
+    ? 'The installer and binaries come from this relay (/dl/) — nothing is fetched from anywhere else.'
+    : 'Binaries come from the public release host; run the relay with -dist to serve them yourself.';
+  const warn = [];
+  if (!c.https) {
+    warn.push('The one-line installer refuses a plain-http relay — a bearer ' +
+      'token crossing a network in cleartext is a token that network has. ' +
+      'Put TLS in front (README: "Put TLS in front of it"), or use the ' +
+      'by-hand line locally.');
+  }
+  if (!split && tok !== 'TOKEN') {
+    warn.push('The command carries this dashboard’s token, which is also ' +
+      'the machine token on a one-token relay. Treat the line as a secret.');
+  }
+  $('#set-warn').textContent = warn.join(' ');
+  $('#set-warn').style.display = warn.length ? '' : 'none';
+}
+
+function probeDl(then) {
+  if (state.dlLive !== null) { then(); return; }
+  /* Same-origin and unauthenticated, exactly like the installer's own fetch.
+     404 = the relay runs without -dist, which is the default. */
+  fetch('/dl/install.sh', { method: 'HEAD', cache: 'no-store' })
+    .then(r => { state.dlLive = r.ok; }, () => { state.dlLive = false; })
+    .then(then);
+}
+
+function bindCopy(btn, pre) {
+  btn.onclick = () => {
+    const done = ok => {
+      btn.textContent = ok ? 'copied' : 'select it and copy';
+      setTimeout(() => { btn.textContent = 'copy'; }, 1400);
+    };
+    const fallback = () => {
+      const r = document.createRange();
+      r.selectNodeContents(pre);
+      const sel = getSelection();
+      sel.removeAllRanges(); sel.addRange(r);
+      let ok = false;
+      try { ok = document.execCommand('copy'); } catch (_) {}
+      done(ok);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(pre.textContent).then(() => done(true), fallback);
+    } else fallback();
+  };
+}
+bindCopy($('#set-copy1'), $('#set-cmd'));
+bindCopy($('#set-copy2'), $('#set-hand'));
+
+/* The stylesheet hides #setup, so the inline style is the whole open/closed
+   state — and it has to be read as the explicit 'block', because a fresh
+   node's style.display is the empty string while the panel sits hidden. */
+$('#addm').onclick = () => {
+  const open = $('#setup').style.display === 'block';
+  $('#setup').style.display = open ? 'none' : 'block';
+  $('#addm').textContent = open ? 'add machine' : 'close';
+  if (!open) {
+    if (!$('#set-url').value) $('#set-url').value = location.origin;
+    renderSetup();
+    probeDl(renderSetup);
+  }
+};
+$('#set-url').oninput = renderSetup;
+$('#set-tok').oninput = renderSetup;
 
 /* ── the stream ─────────────────────────────────────────────────────────── */
 
@@ -870,6 +1047,7 @@ async function streamLoop(gen, signal) {
 function forgetToken(msg) {
   store.removeItem(LSK);
   state.token = '';
+  state.tokenSplit = null;
   state.gen++;
   if (state.abort) { state.abort.abort(); state.abort = null; }
   state.connected = false;
@@ -878,6 +1056,10 @@ function forgetToken(msg) {
   $('#board').style.display = 'none';
   $('#empty').style.display = 'none';
   $('#lock').style.display = 'none';
+  $('#addm').style.display = 'none';
+  $('#addm').textContent = 'add machine';
+  $('#setup').style.display = 'none';
+  $('#set-tok').value = '';
   $('#gate').style.display = '';
   setConn('signed out', false);
   if (msg) { $('#gate-err').textContent = msg; $('#gate-err').style.display = 'block'; }
@@ -886,11 +1068,10 @@ function forgetToken(msg) {
 function start() {
   $('#gate').style.display = 'none';
   $('#lock').style.display = '';
+  $('#addm').style.display = '';
   setConn('connecting', false);
-  const origin = location.origin;
-  $('#empty-cmd').textContent =
-    'MON_RELAY=' + origin + ' \\\n  curl -fsSL https://tools.subnsub.com/monitor/install.sh | sh -s -- TOKEN';
-  $('#empty-hand').textContent = 'subnsub-monitor connect ' + origin + ' TOKEN';
+  renderEmpty();
+  probeDl(renderEmpty);
   state.gen++;
   // A fresh controller per generation. Any earlier one is ended here rather
   // than relying on the caller having gone through forgetToken.
