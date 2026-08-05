@@ -518,6 +518,19 @@ at it:
 subnsub-monitor connect http://relay.example.org:8788 <TOKEN>
 ```
 
+The dashboard's **add machine** button assembles that command for you — the
+exact line for each box, with the relay URL and the token filled in. On a
+one-token relay it uses the token you signed in with; with `-op-token` set it
+asks you to paste the machine token instead, because the one this page holds
+is the dashboard's and must never be installed on a monitored box.
+
+One shell trap worth knowing if you write the line yourself: in
+`curl … | MON_RELAY=… sh -s -- TOKEN` the assignment must ride on `sh`, not
+on `curl`. A `VAR=value` prefix reaches only the first command of a pipeline,
+and it is the installer that reads `MON_RELAY` — put it on `curl` and the
+installer silently defaults to the hosted relay, which refuses your token,
+and the machine simply never appears on your dashboard.
+
 It is one static binary with no dependencies, no database, and nothing on the
 network but the port you gave it. State — the names you typed and the last
 reading from each machine — lives in one JSON file if you pass `-state`, and
@@ -534,7 +547,7 @@ exactly one host, which is the one you started.
 |---|---|
 | Speaks | the same `POST /push`, `GET /commands`, `POST /result` the hosted relay does, so any released helper works against it unmodified |
 | Holds | the last reading per machine, in memory, plus optional persistence to one file |
-| Serves | a dashboard at `/` — machine cards, health gauges, quota bars, the console, the update button |
+| Serves | a dashboard at `/` — machine cards, health gauges, quota bars, the console, the update button — and, with `-dist`, the helper's installer and binaries at `/dl/` |
 | Needs | one token. Machines push with it and browsers watch with it |
 | Talks to | nothing. No telemetry, no update check, no third-party font or script |
 
@@ -545,7 +558,39 @@ exactly one host, which is the one you started.
 -op-token TOKEN   a separate secret for the dashboard (or MON_RELAY_OP_TOKEN)
 -listen ADDR      address to bind (default 127.0.0.1:8788)
 -state PATH       file to persist names and last readings across restarts
+-dist DIR         also serve the helper's installer and binaries from DIR at /dl/
 ```
+
+### Serving the helper yourself (`-dist`)
+
+By default the install command your dashboard generates fetches the installer
+and the binary from our public release host. That is a convenience, not a
+dependency you have to keep: build the helper from this same checkout, put the
+installer beside it, and hand the directory to the relay —
+
+```sh
+cd go && sh build.sh                # → dist/subnsub-monitor-<goos>-<goarch> + SHA256SUMS
+cp ../install.sh dist/
+subnsub-monitor-relay -token … -dist go/dist
+```
+
+The dashboard notices `/dl/` is alive and generates install commands that
+point machines at **your relay for everything** — after which a deployment
+built this way talks to no host you do not run, installer and binaries
+included.
+
+Two rules keep it honest:
+
+- **Build and serve from one checkout.** The installer verifies binaries
+  against the SHA-256 lines stamped inside it, and builds here are
+  reproducible — so the repository's `install.sh` matches binaries built from
+  the same commit, and a mismatch means the two came from different sources,
+  which is exactly what the check is for.
+- `/dl/` serves a **fixed whitelist of names** (the installer, the checksum
+  list, the published binary names) and nothing else. It is unauthenticated —
+  `curl | sh` cannot carry a header, and everything nameable there is public
+  release material — but a stray file in the directory is not nameable, so
+  state files and tokens cannot be fetched out of it.
 
 `-op-token` is worth setting on anything bigger than a couple of machines. With
 one token, anyone who gets it can watch every machine and type at every console
@@ -592,6 +637,41 @@ lets you use the one-liner:
 ```sh
 MON_RELAY=https://relay.example.org sh install.sh <TOKEN>
 ```
+
+### Or a Cloudflare Tunnel, if nothing may listen at all
+
+If the box running the relay cannot accept inbound connections — no port
+forward, no public address — `cloudflared` gives it a public `https://` name
+by dialling **out**, the same direction the helper pushes:
+
+```sh
+cloudflared tunnel --url http://127.0.0.1:8788
+```
+
+That prints a temporary `*.trycloudflare.com` URL, enough to try the whole
+thing end to end. For something permanent, create a named tunnel in your own
+Cloudflare account and route a hostname of yours at `http://127.0.0.1:8788`;
+TLS terminates at their edge, the tunnel carries it home.
+
+Two things to hold onto:
+
+- **The relay's tokens remain the entire access control.** A tunnel provides
+  reachability and TLS, not authentication — which is fine, because this
+  relay never runs open in the first place. Do not put Cloudflare Access in
+  front of the whole hostname: machines authenticate with a Bearer token, not
+  a browser login, so an Access wall across `/push` takes your fleet dark.
+  Access scoped to `/` alone (the dashboard) can sit on top if you want a
+  second door there.
+- The event stream and the held `/commands` poll pass through a tunnel
+  unchanged — the dashboard's 20-second pings keep the connection under any
+  idle timeout on the path.
+
+There is deliberately **no Workers port of this relay**. The protocol already
+has two implementations that must answer byte-identically — the hosted relay
+and this program — and a third, with its own storage model and no dashboard
+of its own, would tax every future frame change for the benefit of not
+running one binary. If you want Cloudflare in front, put their edge in front
+of this relay; that is what the tunnel is.
 
 ### As a service
 
