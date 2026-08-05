@@ -21,6 +21,7 @@ package main
 
 import (
 	"encoding/json"
+	"net"
 	"regexp"
 	"strings"
 )
@@ -30,6 +31,11 @@ const (
 	maxLimits    = 8
 	maxMissing   = 8
 	maxNameRunes = 24
+	// The interface list, bounded exactly as the helper bounds it (nics.go):
+	// more rows than this is a container host whose list is bridge noise, and
+	// eight addresses covers a v4, a global v6, a privacy v6 and aliases.
+	maxNICs      = 16
+	maxNICAddrs  = 8
 	detailArgMax = 120 // a credential path or a dial error, not a paragraph
 )
 
@@ -37,6 +43,11 @@ var (
 	agentIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{4,32}$`)
 	versionRe = regexp.MustCompile(`^\d{4}\.\d{2}\.\d{2}\.\d{1,3}$`)
 	kernelRe  = regexp.MustCompile(`^\d{1,4}\.\d{1,4}$`)
+	// An interface is named by its kernel, and kernels do not put spaces or
+	// slashes in one. A character class rather than a length cap, for the
+	// reason the platform/arch whitelists give: a cap turns an identifying
+	// string into a shorter identifying string.
+	nicNameRe = regexp.MustCompile(`^[A-Za-z0-9._@:-]{1,24}$`)
 	// Why a provider failed, in machine form — a lookup key, so a closed shape
 	// rather than a length cap.
 	detailCodeRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
@@ -126,6 +137,21 @@ type credits struct {
 	Balance    string `json:"balance,omitempty"`
 }
 
+// One of the machine's interfaces, as it described itself.
+//
+// Rebuilt like everything else here rather than passed through: the name goes
+// through a character class instead of a length cap (a cap only shortens an
+// identifying string), every address has to look like one, and both the row
+// count and the addresses per row are bounded. A relay that trusted this list
+// would be one strange agent away from a watcher that cannot render.
+type nic struct {
+	Name    string   `json:"name"`
+	IPs     []string `json:"ips,omitempty"`
+	RxTotal *float64 `json:"rx_total,omitempty"`
+	TxTotal *float64 `json:"tx_total,omitempty"`
+	Up      bool     `json:"up,omitempty"`
+}
+
 type system struct {
 	OK        bool     `json:"ok"`
 	Platform  string   `json:"platform"`
@@ -146,6 +172,14 @@ type system struct {
 	UptimeSec *float64 `json:"uptime_sec,omitempty"`
 	NetRxBps  *float64 `json:"net_rx_bps,omitempty"`
 	NetTxBps  *float64 `json:"net_tx_bps,omitempty"`
+	// Cumulative bytes since the machine booted, and the machine's own
+	// interfaces. A rate says whether a box is busy; a total says how much of
+	// a metered allowance is gone. The interface list is the only place a
+	// dual-stack machine's IPv6 can come from — a relay observes the address
+	// of ONE connection and cannot see the other family at all.
+	NetRxTotal *float64 `json:"net_rx_total,omitempty"`
+	NetTxTotal *float64 `json:"net_tx_total,omitempty"`
+	NICs       []nic    `json:"nics,omitempty"`
 	Procs     *float64 `json:"procs,omitempty"`
 	TempC     *float64 `json:"temp_c,omitempty"`
 	Missing   []string `json:"missing,omitempty"`
@@ -232,6 +266,64 @@ func clampPct(v float64, ceiling float64) float64 {
 // A finite float64 out of a raw JSON value, or nil for anything else — a
 // string, a bool, an absent key, a number too large for float64. Field-local
 // tolerance for the fields that need it; see the rawReading note.
+// The interface list, rebuilt row by row. Every bound here mirrors the
+// helper's own (nics.go): sixteen rows, eight addresses in one, a kernel-shaped
+// name, one row per name. A row that fails any of it is dropped on its own —
+// one malformed interface must never cost a machine the rest of its list.
+func cleanNICs(raw []json.RawMessage) []nic {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]nic, 0, len(raw))
+	seen := map[string]bool{}
+	for _, item := range raw {
+		if len(out) >= maxNICs {
+			break
+		}
+		var r struct {
+			Name    string          `json:"name"`
+			IPs     []string        `json:"ips"`
+			RxTotal json.RawMessage `json:"rx_total"`
+			TxTotal json.RawMessage `json:"tx_total"`
+			Up      *bool           `json:"up"`
+		}
+		if json.Unmarshal(item, &r) != nil {
+			continue
+		}
+		if !nicNameRe.MatchString(r.Name) || seen[r.Name] {
+			continue
+		}
+		seen[r.Name] = true
+		n := nic{Name: r.Name, Up: r.Up != nil && *r.Up}
+		for _, a := range r.IPs {
+			if len(n.IPs) >= maxNICAddrs {
+				break
+			}
+			// net.ParseIP is the shape check: it accepts exactly the textual
+			// forms an address has, and nothing that merely looks like one.
+			if ip := net.ParseIP(a); ip != nil && !contains(n.IPs, ip.String()) {
+				n.IPs = append(n.IPs, ip.String())
+			}
+		}
+		n.RxTotal = cleanNonNeg(looseNum(r.RxTotal), 1e18)
+		n.TxTotal = cleanNonNeg(looseNum(r.TxTotal), 1e18)
+		out = append(out, n)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func contains(list []string, v string) bool {
+	for _, s := range list {
+		if s == v {
+			return true
+		}
+	}
+	return false
+}
+
 func looseNum(raw json.RawMessage) *float64 {
 	if len(raw) == 0 {
 		return nil
@@ -642,6 +734,13 @@ func cleanSystem(body json.RawMessage, capturedAt *float64) *system {
 		// also what the hosted relay's cleaner does.
 		NetRxBps json.RawMessage `json:"net_rx_bps"`
 		NetTxBps json.RawMessage `json:"net_tx_bps"`
+		// Same RawMessage treatment and for the same compatibility promise:
+		// these keys were unknown to every deployed relay until 2026-08-06,
+		// so a rejection here has to stay field-local rather than costing the
+		// whole system block.
+		NetRxTotal json.RawMessage   `json:"net_rx_total"`
+		NetTxTotal json.RawMessage   `json:"net_tx_total"`
+		NICs       []json.RawMessage `json:"nics"`
 		Procs    json.RawMessage `json:"procs"`
 		TempC    json.RawMessage `json:"temp_c"`
 		Series   json.RawMessage `json:"series"`
@@ -681,6 +780,12 @@ func cleanSystem(body json.RawMessage, capturedAt *float64) *system {
 	// the tighter ceiling catches a cumulative counter pushed as a rate.
 	s.NetRxBps = cleanNonNeg(looseNum(raw.NetRxBps), 1e15)
 	s.NetTxBps = cleanNonNeg(looseNum(raw.NetTxBps), 1e15)
+	// Cumulative counters, so the rate ceiling would be exactly wrong: an
+	// exabyte is past anything that has moved bytes, and the same bound every
+	// other absolute quantity here takes.
+	s.NetRxTotal = cleanNonNeg(looseNum(raw.NetRxTotal), 1e18)
+	s.NetTxTotal = cleanNonNeg(looseNum(raw.NetTxTotal), 1e18)
+	s.NICs = cleanNICs(raw.NICs)
 	if v := looseNum(raw.Procs); v != nil && *v >= 1 && *v <= 1e7 {
 		n := float64(int64(*v))
 		s.Procs = &n

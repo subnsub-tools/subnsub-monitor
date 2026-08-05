@@ -185,6 +185,13 @@ func TestSnapshotCarriesNoIdentity(t *testing.T) {
 		"net_rx_bps": true, "net_tx_bps": true, "procs": true, "temp_c": true,
 		"tcp_estab": true, "tcp_time_wait": true, "tcp_retrans_ps": true,
 		"missing": true,
+		// Added 2026-08-06 by an explicit operator decision, not by a struct
+		// field arriving unnoticed: interface names and local addresses were
+		// refused until then (see the NICs note in system.go), and the ruling
+		// was that a dashboard compared against other probes has to carry what
+		// they carry, with the self-hosted relay as the answer for anyone
+		// unwilling to send it.
+		"net_rx_total": true, "net_tx_total": true, "nics": true,
 	}
 	for _, k := range topLevelKeys(blob) {
 		if !allowed[k] {

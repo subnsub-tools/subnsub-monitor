@@ -307,6 +307,11 @@ func macNet(s *System, out string, at float64) {
 		s.miss(mNetwork)
 		return
 	}
+	// Totals need no second sample, so they land on the first push — the rate
+	// below still does not. Per-interface counters are not split out here:
+	// netstat -ib repeats an interface once per address family and the sum
+	// already folds those, which is exactly the fold the parser exists for.
+	s.NetRxTotal, s.NetTxTotal = fp(rx), fp(tx)
 	rxBps, txBps := netDelta(rx, tx, at)
 	if rxBps == nil {
 		// First sample since startup, or the sum went backwards (an interface

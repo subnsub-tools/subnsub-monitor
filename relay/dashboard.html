@@ -669,8 +669,28 @@ function patchCard(m) {
       ui.chips.append(el('span', 'chip num',
         '↓ ' + fmt.rate(sys.net_rx_bps) + '  ↑ ' + fmt.rate(sys.net_tx_bps)));
     }
+    /* Cumulative bytes, which a rate cannot answer: on a metered box the
+       question is how much of the month is gone, not how busy it is now. */
+    if (typeof sys.net_rx_total === 'number' || typeof sys.net_tx_total === 'number') {
+      ui.chips.append(el('span', 'chip num',
+        'total ↓ ' + fmt.bytes(sys.net_rx_total || 0) + '  ↑ ' + fmt.bytes(sys.net_tx_total || 0)));
+    }
     if (sys.procs != null) ui.chips.append(el('span', 'chip num', Math.round(sys.procs) + ' procs'));
     if (sys.temp_c != null) ui.chips.append(el('span', 'chip num', Math.round(sys.temp_c) + '°C'));
+    /* One chip per interface, addresses and all. A relay observes the address
+       of ONE connection and so can never show a dual-stack machine's other
+       family; this list is where that address comes from. Text only — el()
+       sets textContent, and an address is a string a machine chose. */
+    for (const n of (Array.isArray(sys.nics) ? sys.nics : [])) {
+      if (!n || typeof n.name !== 'string') continue;
+      const addrs = Array.isArray(n.ips) && n.ips.length ? n.ips.join(' ') : 'no address';
+      const c = el('span', 'chip num', n.name + ' ' + addrs);
+      if (!n.up) c.style.opacity = '.55';
+      if (typeof n.rx_total === 'number' || typeof n.tx_total === 'number') {
+        c.title = '↓ ' + fmt.bytes(n.rx_total || 0) + '  ↑ ' + fmt.bytes(n.tx_total || 0);
+      }
+      ui.chips.append(c);
+    }
   }
   if (r && r.helper_version) ui.chips.append(el('span', 'chip num', 'helper ' + r.helper_version));
 
