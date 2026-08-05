@@ -5,6 +5,7 @@ package main
 // that shells out to somebody's actual CLI proves nothing repeatable anyway.
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -33,6 +34,15 @@ const codexTwoBuckets = `{"id":2,"result":{` +
 // notification is not decoration: the real server talks over its own startup,
 // and a reader that stopped at the first line it did not recognise would work
 // here and fail there.
+//
+// It insists on the handshake rather than merely surviving it. Matching loosely
+// — `*initialize*`, `*rateLimits*` — makes a stand-in that answers the request
+// this code SHOULD send and equally answers half a dozen it should not, so the
+// tests pass whether or not the conversation is the right one. Here `initialized`
+// is a notification and is answered with silence, `initialize` is a request and
+// is answered once, the method name is matched in full, and asking for limits
+// before the handshake finished is refused. Delete the `initialized` send from
+// codexAskRateLimits and these tests go red, which is the point of them.
 func fakeCodexBinary(t *testing.T, answer string) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -40,14 +50,24 @@ func fakeCodexBinary(t *testing.T, answer string) string {
 	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "codex")
-	script := "#!/bin/sh\n" +
-		"printf '%s\\n' '{\"method\":\"thread/started\",\"params\":{}}'\n" +
-		"while IFS= read -r line; do\n" +
-		"  case \"$line\" in\n" +
-		"    *rateLimits*) printf '%s\\n' '" + answer + "'; exit 0 ;;\n" +
-		"    *initialize*) printf '%s\\n' '{\"id\":1,\"result\":{}}' ;;\n" +
-		"  esac\n" +
-		"done\n"
+	script := strings.Replace(`#!/bin/sh
+D=$(dirname "$0")
+printf '%s\n' '{"method":"thread/started","params":{}}'
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialized"'*) : > "$D/ready" ;;
+    *'"method":"initialize"'*) printf '%s\n' '{"id":1,"result":{}}' ;;
+    *'"method":"account/rateLimits/read"'*)
+      if [ -f "$D/ready" ]; then
+        printf '%s\n' '@ANSWER@'
+      else
+        printf '%s\n' '{"id":2,"error":{"code":-32002,"message":"not initialized"}}'
+      fi
+      exit 0 ;;
+    *) printf '%s\n' '{"id":0,"error":{"code":-32601,"message":"unknown method"}}' ;;
+  esac
+done
+`, "@ANSWER@", answer, 1)
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -168,6 +188,91 @@ func TestCodexPrefersTheLiveLegOverTheLog(t *testing.T) {
 	}
 }
 
+// …but it wins on FRESHNESS, not on rank, and that is the half a rewrite would
+// quietly drop. The cache keeps serving its last success for ten minutes after
+// refreshes start failing, which is right — a stale real number beats an error —
+// but it means an `ok` live reading can be minutes old while a session written
+// since then sits unread on disk. Change collectCodex back to preferring live
+// unconditionally and every other test in this file still passes; this is the
+// one that goes red.
+func TestCodexPrefersANewerLogOverAStaleCachedLiveReading(t *testing.T) {
+	home := testHome(t)
+	writeRollout(t, home)
+	// An absolute path that does not exist, so every refresh from here fails and
+	// the cache is left serving what it already had — the situation this is about.
+	t.Setenv(codexBinEnv, filepath.Join(home, "no-such-codex"))
+	resetCodexLiveCache(t)
+	t.Cleanup(func() { resetCodexLiveCache(t) })
+
+	logged := collectCodexLog()
+	if !logged.OK || logged.RecordedAt == nil {
+		t.Fatalf("the log leg is what this compares against: %+v", logged)
+	}
+	// Fetched recently enough that the cache still serves it, but READ from the
+	// account a day before the session log was written. The two timestamps are
+	// different questions and this test only works because they are.
+	fetched := now() - (provMinInterval+provStaleMax)/2
+	seed := Provider{
+		ID: "codex", Name: "Codex", Source: "cli", OK: true,
+		CapturedAt: fetched,
+		RecordedAt: fp(*logged.RecordedAt - 86400),
+		Limits:     []Limit{{Key: "primary", UsedPercent: 99}},
+	}
+	codexLiveCache.Lock()
+	codexLiveCache.last, codexLiveCache.fetchedAt = &seed, fetched
+	codexLiveCache.Unlock()
+
+	p := collectCodex()
+	if p.Source != "local-log" {
+		t.Fatalf("a stale live reading outranked a log written after it: %+v", p)
+	}
+	if len(p.Limits) != 1 || p.Limits[0].UsedPercent != 12 {
+		t.Errorf("the log reading did not come through: %+v", p.Limits)
+	}
+}
+
+// The read budget covers the whole conversation, not each request in it. A
+// server that talks it away during the handshake has nothing left for the
+// answer, and the answer is refused rather than read. Reset the counters per
+// await — the obvious-looking tidy-up — and a server can spend the budget as
+// many times as it likes to send.
+func TestCodexLiveSpendsOneReadBudgetAcrossTheWholeConversation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the stand-in is a shell script")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex")
+	// Just under the line by the end of the handshake: the startup notification,
+	// this noise, and the initialize answer. The reading that follows is one line
+	// too many. The exact arithmetic is not what is being tested — spending the
+	// budget earlier only fails earlier — the regression is a budget that comes
+	// back.
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' '{"method":"thread/started","params":{}}'
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      i=0
+      while [ $i -lt %d ]; do printf '%%s\n' '{"method":"noise"}'; i=$((i+1)); done
+      printf '%%s\n' '{"id":1,"result":{}}' ;;
+    *'"method":"account/rateLimits/read"'*) printf '%%s\n' '%s'; exit 0 ;;
+  esac
+done
+`, codexRPCMaxLines-2, codexTwoBuckets)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(codexBinEnv, path)
+
+	p := codexLiveFetch()
+	if p.OK {
+		t.Fatalf("a server past its read budget was still read as a reading: %+v", p)
+	}
+	if p.DetailCode != "cli-shape" {
+		t.Errorf("a budget refusal should read as a shape we do not know, got %q/%q", p.Error, p.DetailCode)
+	}
+}
+
 // The hang this is built to survive: `codex` from npm is a Node script that
 // spawns the real binary with inherited stdio, so killing the process we
 // started leaves a grandchild holding the write end of our stdout pipe. No EOF
@@ -180,9 +285,14 @@ func TestCodexLiveGivesUpWhenAGrandchildHoldsThePipe(t *testing.T) {
 	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "codex")
-	// The subshell inherits stdout and outlives the process we kill, which is
-	// exactly the npm launcher's shape.
-	script := "#!/bin/sh\n(sleep 60) &\nexec sleep 60\n"
+	// The background shell inherits stdout and outlives the process we kill,
+	// which is exactly the npm launcher's shape. It also leaves a mark once a
+	// second for as long as it lives, which is how the second half of this test
+	// tells "collected" from "still out there".
+	script := "#!/bin/sh\n" +
+		"D=$(dirname \"$0\")\n" +
+		"sh -c 'while :; do echo . >> \"$1/beat\"; sleep 1; done' _ \"$D\" &\n" +
+		"exec sleep 60\n"
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -204,6 +314,32 @@ func TestCodexLiveGivesUpWhenAGrandchildHoldsThePipe(t *testing.T) {
 		}
 	case <-time.After(20 * time.Second):
 		t.Fatal("the read never gave up — this is the hang that takes the helper off the air")
+	}
+
+	// Giving up on the read is only half the job. Killing the process we started
+	// leaves the one IT started running, still holding the pipe, and the cache
+	// floor means another one every two minutes for as long as the failure lasts
+	// — a leak measured in processes per hour on a machine nobody is watching.
+	beat := filepath.Join(dir, "beat")
+	size := func() int64 {
+		fi, err := os.Stat(beat)
+		if err != nil {
+			return -1
+		}
+		return fi.Size()
+	}
+	for i := 0; i < 60 && size() < 0; i++ {
+		time.Sleep(50 * time.Millisecond)
+	}
+	before := size()
+	if before < 0 {
+		t.Fatal("the grandchild never ran, so this proves nothing about collecting it")
+	}
+	// Two of its beats: enough that a live one has certainly moved the file.
+	time.Sleep(2500 * time.Millisecond)
+	if after := size(); after != before {
+		t.Errorf("the grandchild outlived the collector and kept working (%d → %d bytes) — "+
+			"a kill that names one process does not reach what that process started", before, after)
 	}
 }
 
@@ -235,6 +371,83 @@ func TestCodexLiveKeepsTheFlatBucketWhenTheMapHasNoAccountEntry(t *testing.T) {
 	// labelled by their window, and both windows are 7d.
 	if p.Limits[1].Scope == nil || *p.Limits[1].Scope != "codex_other" {
 		t.Errorf("a nameless bucket should fall back to its id for scope: %+v", p.Limits[1])
+	}
+}
+
+// An entry under the account's name that carries no readable window is not an
+// account reading, and preferring it because the KEY was there would lose the
+// main quota to a technicality — silently, whenever an extra meter is present to
+// keep the reading alive.
+func TestCodexLiveFallsBackToTheFlatViewWhenTheAccountEntryHasNoWindow(t *testing.T) {
+	fakeCodexBinary(t, `{"id":2,"result":{`+
+		`"rateLimits":{"limitId":"codex","primary":{"usedPercent":55,"windowDurationMins":10080},`+
+		`"planType":"prolite"},`+
+		`"rateLimitsByLimitId":{"codex":{"limitId":"codex","primary":null,"secondary":null},`+
+		`"codex_other":{"limitId":"codex_other","primary":{"usedPercent":5,"windowDurationMins":10080}}}}}`)
+
+	p := codexLiveFetch()
+	if !p.OK || len(p.Limits) != 2 {
+		t.Fatalf("an empty account entry took the account quota with it: %+v", p)
+	}
+	if p.Limits[0].Key != "primary" || p.Limits[0].UsedPercent != 55 {
+		t.Errorf("the flat view should have answered for the account: %+v", p.Limits[0])
+	}
+	if p.PlanType == nil || *p.PlanType != "prolite" {
+		t.Errorf("the plan comes with the bucket that answered, got %v", p.PlanType)
+	}
+}
+
+// No account bucket anywhere on the payload means nobody speaks for the account
+// — not the extra meter that happens to sort first. Reading identity off
+// position gives that meter the bare "primary" key, drops the scope that tells
+// it apart, and lets it name the plan and the credit balance.
+func TestCodexLiveDoesNotPromoteAnExtraMeterToTheAccount(t *testing.T) {
+	fakeCodexBinary(t, `{"id":2,"result":{"rateLimitsByLimitId":{`+
+		`"codex_bengalfox":{"limitId":"codex_bengalfox","limitName":"GPT-5.3-Codex-Spark",`+
+		`"primary":{"usedPercent":30,"windowDurationMins":10080},`+
+		`"credits":{"hasCredits":true,"unlimited":false,"balance":"5"},"planType":"prolite"}}}}`)
+
+	p := codexLiveFetch()
+	if !p.OK || len(p.Limits) != 1 {
+		t.Fatalf("the extra meter should still be reported: %+v", p)
+	}
+	if p.Limits[0].Key != "codex_bengalfox/p" {
+		t.Errorf("an extra meter must keep its namespaced key, got %q", p.Limits[0].Key)
+	}
+	if p.Limits[0].Scope == nil || *p.Limits[0].Scope != "GPT-5.3-Codex-Spark" {
+		t.Errorf("an extra meter must keep the name that tells it apart: %+v", p.Limits[0])
+	}
+	if p.PlanType != nil {
+		t.Errorf("the plan belongs to the account bucket, and there is none: %v", *p.PlanType)
+	}
+	if p.Credits != nil {
+		t.Errorf("the balance belongs to the account bucket, and there is none: %+v", p.Credits)
+	}
+}
+
+// The tolerance has to reach the objects, not only the scalars inside them. A
+// vendor that reshapes one optional field must cost this leg that field — not
+// the reading, and not the leg. Going dark here means falling back to a log
+// that on this machine may be a fortnight old, which is the exact failure the
+// live leg was written to end.
+func TestCodexLiveSurvivesOneFieldArrivingInAStrangeShape(t *testing.T) {
+	fakeCodexBinary(t, `{"id":2,"result":{`+
+		`"rateLimits":{"limitId":"codex","primary":{"usedPercent":40,"windowDurationMins":10080},`+
+		`"secondary":"who knows","credits":"not an object","planType":"prolite"},`+
+		`"rateLimitsByLimitId":"not a map either"}}`)
+
+	p := codexLiveFetch()
+	if !p.OK {
+		t.Fatalf("one odd field cost the whole reading: %+v", p)
+	}
+	if len(p.Limits) != 1 || p.Limits[0].UsedPercent != 40 {
+		t.Fatalf("the window that parsed should still be reported: %+v", p.Limits)
+	}
+	if p.PlanType == nil || *p.PlanType != "prolite" {
+		t.Errorf("a good field beside a bad one should survive it, got %v", p.PlanType)
+	}
+	if p.Credits != nil {
+		t.Errorf("credits nobody can read should be absent, not invented: %+v", p.Credits)
 	}
 }
 
