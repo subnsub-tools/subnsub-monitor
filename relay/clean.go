@@ -274,10 +274,13 @@ func cleanReading(body []byte) (string, *reading, bool) {
 
 	out := &reading{}
 
-	if raw.CapturedAt != nil {
-		if e := cleanEpoch(raw.CapturedAt); e != nil {
-			out.CapturedAt = *e
-		}
+	// Kept as the cleaned POINTER, not just copied into the output: the system
+	// series is admitted by comparing its machine-clock timestamp against this
+	// field, and handing the raw one down would let `captured_at: 0` pass a lag
+	// check the hosted cleaner fails (epoch(0) is null there).
+	capturedAt := cleanEpoch(raw.CapturedAt)
+	if capturedAt != nil {
+		out.CapturedAt = *capturedAt
 	}
 
 	seen := map[string]bool{}
@@ -315,7 +318,7 @@ func cleanReading(body []byte) (string, *reading, bool) {
 	out.Exec = raw.Exec != nil && *raw.Exec
 	out.Upd = raw.Upd != nil && *raw.Upd
 	if len(raw.System) > 0 {
-		out.System = cleanSystem(raw.System, raw.CapturedAt)
+		out.System = cleanSystem(raw.System, capturedAt)
 	}
 	return id, out, true
 }
@@ -492,13 +495,19 @@ func cleanSeries(body json.RawMessage, capturedAt *float64) *series {
 	if len(body) == 0 || capturedAt == nil {
 		return nil
 	}
+	// Every lane lands as one RawMessage and is decoded on its own. Declaring
+	// them []json.RawMessage instead put all four inside a single Unmarshal, so
+	// `"cpu": "bad"` failed the whole call and dropped a series the hosted
+	// cleaner would have kept minus one lane — the two admission rules have to
+	// agree, or a machine draws differently depending on which relay it is
+	// pointed at.
 	var raw struct {
-		At   json.RawMessage   `json:"at"`
-		Step json.RawMessage   `json:"step"`
-		CPU  []json.RawMessage `json:"cpu"`
-		Mem  []json.RawMessage `json:"mem"`
-		Rx   []json.RawMessage `json:"rx"`
-		Tx   []json.RawMessage `json:"tx"`
+		At   json.RawMessage `json:"at"`
+		Step json.RawMessage `json:"step"`
+		CPU  json.RawMessage `json:"cpu"`
+		Mem  json.RawMessage `json:"mem"`
+		Rx   json.RawMessage `json:"rx"`
+		Tx   json.RawMessage `json:"tx"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil
@@ -514,15 +523,52 @@ func cleanSeries(body json.RawMessage, capturedAt *float64) *series {
 	if lag := *capturedAt - *at; lag > seriesMaxLag || lag < -seriesMaxLag {
 		return nil
 	}
-	n := 0
+	slots := func(in json.RawMessage) []json.RawMessage {
+		if len(in) == 0 {
+			return nil
+		}
+		var out []json.RawMessage
+		if err := json.Unmarshal(in, &out); err != nil || len(out) == 0 || len(out) > seriesSlots {
+			return nil
+		}
+		return out
+	}
+	cpuIn, memIn := slots(raw.CPU), slots(raw.Mem)
+	rxIn, txIn := slots(raw.Rx), slots(raw.Tx)
+
+	// Which length IS the grid is decided before any lane is admitted, by vote.
+	// Letting the first well-shaped lane define it made the answer depend on
+	// field order: one corrupted 31-slot cpu lane ahead of three intact 30-slot
+	// ones would seat itself and evict all three. A tie is a frame that cannot
+	// say when its own samples were taken, so nothing is admitted.
+	var lengths []int
+	for _, in := range [][]json.RawMessage{cpuIn, memIn, rxIn, txIn} {
+		if len(in) > 0 {
+			lengths = append(lengths, len(in))
+		}
+	}
+	n, best := 0, 0
+	for _, l := range lengths {
+		votes := 0
+		for _, m := range lengths {
+			if m == l {
+				votes++
+			}
+		}
+		switch {
+		case votes > best:
+			n, best = l, votes
+		case votes == best && l != n:
+			n = 0
+		}
+	}
+	if n == 0 {
+		return nil
+	}
 	lane := func(in []json.RawMessage, pct bool) []*float64 {
-		if len(in) == 0 || len(in) > seriesSlots {
+		if len(in) != n {
 			return nil
 		}
-		if n != 0 && len(in) != n {
-			return nil
-		}
-		n = len(in)
 		out := make([]*float64, len(in))
 		for i, e := range in {
 			if pct {
@@ -534,10 +580,10 @@ func cleanSeries(body json.RawMessage, capturedAt *float64) *series {
 		return out
 	}
 	s := &series{At: *at, Step: *step}
-	s.CPU = lane(raw.CPU, true)
-	s.Mem = lane(raw.Mem, true)
-	s.Rx = lane(raw.Rx, false)
-	s.Tx = lane(raw.Tx, false)
+	s.CPU = lane(cpuIn, true)
+	s.Mem = lane(memIn, true)
+	s.Rx = lane(rxIn, false)
+	s.Tx = lane(txIn, false)
 	if s.CPU == nil && s.Mem == nil && s.Rx == nil && s.Tx == nil {
 		return nil
 	}
