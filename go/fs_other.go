@@ -17,7 +17,7 @@ import (
 	"os/exec"
 )
 
-func singleLink(_ *os.File, _ os.FileInfo) bool { return false }
+func openLinkCount(_ *os.File, _ os.FileInfo) (uint64, bool) { return 0, false }
 
 func linkCount(_ string) uint64 { return 0 }
 

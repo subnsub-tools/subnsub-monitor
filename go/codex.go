@@ -58,8 +58,13 @@ type scanRefusal int
 
 const (
 	scanSearched  scanRefusal = iota // opened and read to the end of the budget
-	scanManyNames                    // more than one name for the inode; see singleLink
-	scanUnopened                     // could not be opened, or is not a regular file
+	scanManyNames                    // VERIFIED to have more than one name
+	// Never looked at: could not be opened, is not a regular file, or the
+	// platform would not say how many names it has. All three refuse the read
+	// — the guard is fail-closed and stays that way — but none of them is
+	// evidence that anything hard-linked anything, so they must not be told to
+	// the reader as if they were.
+	scanUnusable
 )
 
 // Everything that can vary is decoded as `any` and converted by hand.
@@ -194,19 +199,25 @@ func codexCandidates(root string) (out []candidate, partial bool) {
 func codexScanFile(root *os.Root, rel string) (rec *rollutRecord, truncated bool, why scanRefusal) {
 	f, err := root.Open(rel)
 	if err != nil {
-		return nil, false, scanUnopened
+		return nil, false, scanUnusable
 	}
 	defer f.Close()
 
 	st, err := f.Stat()
 	if err != nil || !st.Mode().IsRegular() {
-		return nil, false, scanUnopened
+		return nil, false, scanUnusable
 	}
 	// Refuse when the link count cannot be established, not just when it is
-	// wrong — see singleLink, which is where the per-platform way of asking
-	// lives and where the fail-closed rule is enforced for all of them.
-	if !singleLink(f, st) {
-		return nil, false, scanManyNames // hard link, or a count we cannot verify
+	// wrong: `count != 1` alone was fail-open, since a platform that cannot
+	// answer would have switched the guard off silently. But the two refusals
+	// are told apart — only a count we actually obtained can be reported to
+	// the reader as a second name.
+	// Zero is not "many": it is a file unlinked while this held it open, which
+	// is a race with a cleanup, not a planted name.
+	if n, known := openLinkCount(f, st); !known || n == 0 {
+		return nil, false, scanUnusable
+	} else if n != 1 {
+		return nil, false, scanManyNames
 	}
 
 	size := st.Size()
@@ -336,12 +347,17 @@ func collectCodex() Provider {
 	p.Truncated, p.Capped = truncated, capped
 	if best == nil {
 		switch {
-		// Every file this was allowed to look at was refused for having more
-		// than one name, so nothing here is a statement about quota at all.
-		// Named on its own because the cause is somewhere else entirely — a
-		// backup, a de-duplicator or a test fixture that hard-linked the
-		// session tree — and "the scan was cut short" sends whoever reads it
-		// looking in the wrong place. Cost a day of hunting once.
+		// Every file this OPENED was refused for having more than one name, so
+		// nothing here is a statement about quota at all. Named on its own
+		// because the cause is somewhere else entirely — a backup, a
+		// de-duplicator or a test fixture that hard-linked the session tree —
+		// and "the scan was cut short" sends whoever reads it looking in the
+		// wrong place. Cost a day of hunting once.
+		//
+		// The count is what this LOOKED AT, and the sentence says exactly that:
+		// the real case had 557 files and a 400-file backstop, so "all of them"
+		// would have been a claim about 157 files nobody opened. Capped and
+		// truncated still ride along on the reading for the same reason.
 		case scanned > 0 && refusedNames == scanned:
 			p.failWith("no-readings", "sessions-linked", itoa(refusedNames))
 		case truncated || capped:
