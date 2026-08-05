@@ -172,6 +172,10 @@ func linuxNet(s *System) {
 	}
 	var rx, tx float64
 	var sawAny bool
+	// The same walk now feeds the per-interface rows too — one read of the
+	// table, two uses of it (see nicCounters).
+	perRx := make(map[string]float64, 8)
+	perTx := make(map[string]float64, 8)
 	for _, line := range strings.Split(raw, "\n") {
 		name, rest, found := strings.Cut(line, ":")
 		if !found {
@@ -193,12 +197,17 @@ func linuxNet(s *System) {
 		}
 		rx += r
 		tx += t
+		perRx[name], perTx[name] = r, t
 		sawAny = true
 	}
 	if !sawAny {
 		s.miss(mNetwork)
 		return
 	}
+	// The totals stand on their own: unlike the rate below they need no second
+	// sample, so the first push after a restart already carries them.
+	s.NetRxTotal, s.NetTxTotal = fp(rx), fp(tx)
+	nicCounters(s, perRx, perTx)
 	rxBps, txBps := netDelta(rx, tx, now())
 	if rxBps == nil {
 		// First sample since startup, or the sum went backwards (an interface

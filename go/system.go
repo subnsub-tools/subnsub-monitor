@@ -84,6 +84,28 @@ type System struct {
 	NetRxBps *float64 `json:"net_rx_bps,omitempty"`
 	NetTxBps *float64 `json:"net_tx_bps,omitempty"`
 
+	// Total bytes moved since boot, over the same interfaces as the rate above.
+	// A rate answers "is it busy now"; the total answers "how much of this
+	// month's allowance is gone", which on a metered box is the question that
+	// actually costs money. Counters reset when the machine does, and nothing
+	// here pretends otherwise — the page shows what the box reports.
+	NetRxTotal *float64 `json:"net_rx_total,omitempty"`
+	NetTxTotal *float64 `json:"net_tx_total,omitempty"`
+
+	// Every interface the machine has, with the addresses bound to it.
+	//
+	// This is the one section of this file that used to refuse to exist: the
+	// note on NetRxBps held that interface names describe what a machine is
+	// connected to, and it was right. The operator lifted the line on
+	// 2026-08-06 — a dashboard people compare against other probes has to show
+	// what those show, and anyone unwilling to send this has a self-hosted
+	// relay to point the helper at instead.
+	//
+	// It is also the only place the machine's own IPv6 can come from: the
+	// egress address on the card is what the edge observed of ONE connection,
+	// so a dual-stack box has an address the relay can never see.
+	NICs []NIC `json:"nics,omitempty"`
+
 	// Aggregate TCP health: counts and a retransmission rate, never endpoints,
 	// addresses, ports or interface names. Like network throughput, the counter
 	// rate needs two samples and is omitted on the first collection.
@@ -111,6 +133,18 @@ type System struct {
 	// running (see sampler.go) — one-shot and serve collections carry the
 	// snapshot alone, which is all a single collection can honestly claim.
 	Series *SysSeries `json:"series,omitempty"`
+}
+
+// One interface as the machine sees it: what it is called, what is bound to
+// it, and how much it has carried since boot. Built by fillNICs (nics.go);
+// the counters are attached by whichever platform collector already walks the
+// per-interface table for the whole-box sum.
+type NIC struct {
+	Name    string   `json:"name"`
+	IPs     []string `json:"ips,omitempty"`
+	RxTotal *float64 `json:"rx_total,omitempty"`
+	TxTotal *float64 `json:"tx_total,omitempty"`
+	Up      bool     `json:"up,omitempty"`
 }
 
 // One frame's worth of samples, oldest first, laid on a fixed grid.
@@ -318,7 +352,11 @@ func collectSystem() (s System) {
 }
 
 // The shell every platform collector starts from, so none of them can forget
-// the two fields that are free everywhere.
+// the fields that are free everywhere. The interface list is one of them —
+// net.Interfaces() is stdlib on every target, so a platform with no collector
+// of its own still reports its addresses rather than nothing.
 func baseSystem() System {
-	return System{Platform: runtime.GOOS, Arch: runtime.GOARCH, CPUCount: runtime.NumCPU()}
+	s := System{Platform: runtime.GOOS, Arch: runtime.GOARCH, CPUCount: runtime.NumCPU()}
+	fillNICs(&s)
+	return s
 }
