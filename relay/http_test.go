@@ -18,8 +18,9 @@ const (
 
 func testServer(t *testing.T) (*httptest.Server, *Hub) {
 	t.Helper()
-	hub := newHub("")
-	hub.tokenSplit = true
+	// Built the way the binary builds it, so the hello these tests read went
+	// through the same token_split derivation the binary ships.
+	hub := newRelayHub("", machTok, opTok)
 	srv := httptest.NewServer(routes(hub, newAuth(machTok, opTok), ""))
 	t.Cleanup(srv.Close)
 	return srv, hub
@@ -97,8 +98,8 @@ func TestSeparateTokensKeepTheTwoSidesApart(t *testing.T) {
 }
 
 func TestOneTokenModeWatchesAndPushes(t *testing.T) {
-	hub := newHub("")
 	// What `-op-token` unset produces: the push token also watches.
+	hub := newRelayHub("", machTok, machTok)
 	srv := httptest.NewServer(routes(hub, newAuth(machTok, machTok), ""))
 	t.Cleanup(srv.Close)
 	push := `{"agent_id":"machineone","providers":[{"id":"codex","ok":true,"limits":[{"used_percent":1}]}]}`
@@ -250,12 +251,14 @@ func firstFrame(t *testing.T, srv *httptest.Server, token string) map[string]any
 // command off this flag, so each mode has to say the truth about itself: with
 // one token the viewer's secret is the machine secret and prefilling is right;
 // with two, prefilling would copy the dashboard secret onto a monitored box.
+// Both hubs here come from newRelayHub — the derivation the binary runs, not
+// a field set by hand, so deleting or inverting it fails this test.
 func TestHelloSaysWhetherTheTokensAreSplit(t *testing.T) {
-	srv, _ := testServer(t) // split tokens
+	srv, _ := testServer(t) // newRelayHub with distinct tokens
 	if f := firstFrame(t, srv, opTok); f["token_split"] != true {
 		t.Fatalf("split relay said token_split=%v", f["token_split"])
 	}
-	one := newHub("")
+	one := newRelayHub("", machTok, machTok)
 	oneSrv := httptest.NewServer(routes(one, newAuth(machTok, machTok), ""))
 	t.Cleanup(oneSrv.Close)
 	if f := firstFrame(t, oneSrv, machTok); f["token_split"] != false {

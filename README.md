@@ -565,29 +565,40 @@ exactly one host, which is the one you started.
 
 By default the install command your dashboard generates fetches the installer
 and the binary from our public release host. That is a convenience, not a
-dependency you have to keep: build the helper from this same checkout, put the
-installer beside it, and hand the directory to the relay —
+dependency you have to keep: build the helper from this same checkout, stamp
+the installer to match, and hand the directory to the relay —
 
 ```sh
-cd go && sh build.sh                # → dist/subnsub-monitor-<goos>-<goarch> + SHA256SUMS
-cp ../install.sh dist/
+(cd go && sh build.sh && sh stamp.sh)   # → go/dist: binaries, SHA256SUMS,
+                                        #   a freshly-stamped install.sh, VERSION
 subnsub-monitor-relay -token … -dist go/dist
 ```
 
+(The parentheses matter: `build.sh` and `stamp.sh` run beside each other in
+`go/`, and the subshell puts you back where `-dist go/dist` is true.)
+
 The dashboard notices `/dl/` is alive and generates install commands that
-point machines at **your relay for everything** — after which a deployment
-built this way talks to no host you do not run, installer and binaries
-included.
+point machines at **your relay for everything the install touches** —
+installer and binaries included. One deliberate exception outlives the
+install: the dashboard's *remote self-update* button still fetches from the
+public release bucket, because its base URL is a compile-time constant no
+input can move — that immovability is the security property the whole update
+design stands on (see "Updating itself, and who decides what that means").
+A deployment that wants zero outside contact leaves remote update off, and
+upgrades by re-running its own install line.
 
 Two rules keep it honest:
 
-- **Build and serve from one checkout.** The installer verifies binaries
-  against the SHA-256 lines stamped inside it, and builds here are
-  reproducible — so the repository's `install.sh` matches binaries built from
-  the same commit, and a mismatch means the two came from different sources,
-  which is exactly what the check is for.
+- **Stamp what you serve.** The installer verifies binaries against the
+  SHA-256 lines carried inline — it never reads the `SHA256SUMS` file beside
+  a download, because a checksum fetched from the same host as the binary
+  proves nothing. The repository's `install.sh` is stamped for the last
+  *published* release, so `stamp.sh` writes the copy to serve: the same
+  installer, sums replaced with those of the binaries you just built.
 - `/dl/` serves a **fixed whitelist of names** (the installer, the checksum
-  list, the published binary names) and nothing else. It is unauthenticated —
+  list, the published binary names) and only plain files — a symlink or a
+  FIFO wearing a listed name is refused unopened, so nothing in or out of
+  the directory can be reached by indirection. It is unauthenticated —
   `curl | sh` cannot carry a header, and everything nameable there is public
   release material — but a stray file in the directory is not nameable, so
   state files and tokens cannot be fetched out of it.

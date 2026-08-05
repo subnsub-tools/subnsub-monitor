@@ -32,7 +32,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"syscall"
@@ -100,6 +99,20 @@ func newAuth(machineTok, opTok string) auth {
 	return auth{machine: sha256.Sum256([]byte(machineTok)), op: sha256.Sum256([]byte(opTok))}
 }
 
+// newRelayHub builds the hub the way the binary does — state, plus the one
+// derived fact hello tells the page: whether the dashboard secret differs
+// from the machine one. Split out of main so tests exercise the same
+// derivation the binary ships, not a hand-set field: this bit decides
+// whether a dashboard may prefill its own token into an install command,
+// and a test that sets it by hand would keep passing with the derivation
+// deleted or inverted. Callers pass opTok already resolved (empty means
+// "same as machine", and main resolves that before calling).
+func newRelayHub(statePath, machineTok, opTok string) *Hub {
+	h := newHub(statePath)
+	h.tokenSplit = opTok != machineTok
+	return h
+}
+
 func bearer(r *http.Request) string {
 	h := r.Header.Get("Authorization")
 	const p = "Bearer "
@@ -163,13 +176,7 @@ func main() {
 		}
 	}
 
-	hub := newHub(*statePath)
-	// Whether the dashboard secret differs from the machine one. The page
-	// needs to know because its add-machine panel prefills the token the
-	// viewer signed in with — which is exactly right when there is one token,
-	// and would hand the DASHBOARD secret to a monitored box when there are
-	// two. Written once, before anything serves.
-	hub.tokenSplit = opTok != machineTok
+	hub := newRelayHub(*statePath, machineTok, opTok)
 	az := newAuth(machineTok, opTok)
 	mux := routes(hub, az, *distDir)
 
@@ -364,17 +371,43 @@ func routes(hub *Hub, az auth, distDir string) *http.ServeMux {
 				http.NotFound(w, r)
 				return
 			}
-			p := filepath.Join(distDir, name)
-			// ServeFile answers a directory with a listing; a directory
-			// wearing a whitelisted name is a misconfiguration, not a file.
-			if st, err := os.Stat(p); err != nil || st.IsDir() {
+			// os.Root confines every resolution to the directory: a raced
+			// swap of the file for a symlink still cannot reach outside it.
+			root, err := os.OpenRoot(distDir)
+			if err != nil {
+				http.NotFound(w, r)
+				return
+			}
+			defer root.Close()
+			// Lstat, never Stat: a SYMLINK wearing a listed name must read
+			// as the symlink it is — followed, it would lend this route's
+			// unauthenticated reach to whatever it points at, the relay's
+			// own state file included. And a FIFO must be refused without
+			// being opened, because opening one blocks until a writer
+			// appears. Anything but a plain file is a misconfiguration,
+			// answered like an absent one.
+			st, err := root.Lstat(name)
+			if err != nil || !st.Mode().IsRegular() {
+				http.NotFound(w, r)
+				return
+			}
+			f, err := root.Open(name)
+			if err != nil {
+				http.NotFound(w, r)
+				return
+			}
+			defer f.Close()
+			// fstat on the opened descriptor: the Lstat above was another
+			// instant's answer, and this one is the file actually served.
+			fst, err := f.Stat()
+			if err != nil || !fst.Mode().IsRegular() {
 				http.NotFound(w, r)
 				return
 			}
 			w.Header().Set("Content-Type", ct)
 			w.Header().Set("X-Content-Type-Options", "nosniff")
 			w.Header().Set("Cache-Control", "no-store")
-			http.ServeFile(w, r, p)
+			http.ServeContent(w, r, name, fst.ModTime(), f)
 		})
 	}
 
