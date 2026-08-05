@@ -12,9 +12,22 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+// A home directory nothing else can be reached from. Both variables, because
+// os.UserHomeDir() reads HOME on unix and USERPROFILE on Windows — setting one
+// on the other platform leaves the test reading the real user's machine, where
+// it would pass or fail by accident.
+func testHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	return home
+}
 
 const oneReading = `{"timestamp":"2026-07-21T21:57:41.161Z","type":"event_msg",` +
 	`"payload":{"type":"token_count","rate_limits":{"primary":` +
@@ -35,19 +48,22 @@ func writeRollout(t *testing.T, home string) string {
 }
 
 func TestCodexReadsARollout(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := testHome(t)
 	writeRollout(t, home)
 
 	p := collectCodex()
 	if !p.OK || len(p.Limits) != 1 || p.Limits[0].UsedPercent != 12 {
 		t.Fatalf("a plain rollout did not read: %+v", p)
 	}
+	// A healthy machine must not wear the partial-scan mark: it is the whole
+	// value of the mark that it means something when it appears.
+	if p.Truncated || p.Capped {
+		t.Errorf("a complete scan reported itself partial: truncated=%v capped=%v", p.Truncated, p.Capped)
+	}
 }
 
 func TestCodexNamesAHardLinkedSessionTree(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := testHome(t)
 	file := writeRollout(t, home)
 
 	// A second name for the same inode — what a backup with --link-dest, a
@@ -78,12 +94,48 @@ func TestCodexNamesAHardLinkedSessionTree(t *testing.T) {
 	}
 }
 
+// The count is what was OPENED, and the sentence has to keep saying only that.
+// The real incident had 557 files against a 400-file backstop, so a message
+// about "all of them" would have been a claim about 157 nobody looked at.
+func TestCodexCountsOnlyWhatItOpened(t *testing.T) {
+	home := testHome(t)
+	dir := filepath.Join(home, ".codex", "sessions", "2026", "07", "22")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := t.TempDir()
+	for i := 0; i < maxFiles+1; i++ {
+		n := strconv.Itoa(i)
+		file := filepath.Join(dir, "rollout-2026-07-22T05-09-06-"+n+".jsonl")
+		if err := os.WriteFile(file, []byte(oneReading), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Link(file, filepath.Join(elsewhere, n+".jsonl")); err != nil {
+			t.Skipf("this filesystem will not hard link: %v", err)
+		}
+	}
+
+	p := collectCodex()
+	if p.DetailCode != "sessions-linked" {
+		t.Fatalf("detail code %q", p.DetailCode)
+	}
+	if p.DetailArg != strconv.Itoa(maxFiles) {
+		t.Errorf("count = %q, want the %d it opened and not the %d that exist",
+			p.DetailArg, maxFiles, maxFiles+1)
+	}
+	if !p.Capped {
+		t.Error("a scan that stopped at the backstop must say so")
+	}
+	if strings.Contains(p.Detail, "all ") {
+		t.Errorf("sentence claims more than it looked at: %q", p.Detail)
+	}
+}
+
 // One refused file among readable ones is not the same finding, and must not
 // borrow the message: the reading here is real, only the "and nothing newer
 // exists" half is weakened.
 func TestCodexKeepsReadingWhenOnlySomeFilesAreRefused(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := testHome(t)
 	writeRollout(t, home)
 
 	dir := filepath.Join(home, ".codex", "sessions", "2026", "07", "23")

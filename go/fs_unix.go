@@ -19,18 +19,21 @@ import (
 	"syscall"
 )
 
-// Whether this open file is verifiably the ONLY name for its inode.
-//
-// Refuses when the link count cannot be established, not just when it is wrong.
-// `ok && Nlink != 1` was fail-open: on any platform where the type assertion
-// misses, the hard-link guard silently switched itself off.
+// How many names this open file has, and whether that could be established at
+// all. The second return is not decoration: a count nobody could obtain and a
+// count of two both stop the read, but only one of them is evidence that
+// somebody hard-linked the tree, and saying so when it is not known would send
+// a reader off to hunt for links that do not exist.
 //
 // Takes the open FILE as well as its FileInfo because that is what Windows
 // needs; on Unix the stat result already carries the count and the handle is
 // unused.
-func singleLink(_ *os.File, st os.FileInfo) bool {
+func openLinkCount(_ *os.File, st os.FileInfo) (uint64, bool) {
 	sys, ok := st.Sys().(*syscall.Stat_t)
-	return ok && sys.Nlink == 1
+	if !ok {
+		return 0, false
+	}
+	return uint64(sys.Nlink), true
 }
 
 // The same count by path, for the selftest probe that has to SHOW the shape it

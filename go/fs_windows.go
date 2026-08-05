@@ -23,15 +23,15 @@ import (
 // redirectors) reports 1 whether or not that is true, because it cannot make
 // more than one name for a file in the first place. That is the correct answer
 // for the guard's purpose: the attack it exists to stop cannot be built there.
-func singleLink(f *os.File, st os.FileInfo) bool {
+func openLinkCount(f *os.File, _ os.FileInfo) (uint64, bool) {
 	if f == nil {
-		return false
+		return 0, false
 	}
 	var d syscall.ByHandleFileInformation
 	if err := syscall.GetFileInformationByHandle(syscall.Handle(f.Fd()), &d); err != nil {
-		return false
+		return 0, false
 	}
-	return d.NumberOfLinks == 1
+	return uint64(d.NumberOfLinks), true
 }
 
 func linkCount(path string) uint64 {
