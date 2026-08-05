@@ -34,11 +34,11 @@ are one of each:
 
 | | Codex | Antigravity | Amp | Claude Code |
 |---|---|---|---|---|
-| Source | its own session logs on disk | its language server, on loopback | `amp usage`, the vendor's own CLI | the usage endpoint, over the network |
-| Credential needed | **none** | **none** | **none — Amp's key stays inside Amp** | yes — the OAuth token Claude Code stores |
-| Network access needed | **none** | **none off this machine** | yes, but the request is Amp's, not ours | yes |
-| Freshness | only as current as your last actual Codex call | live at the moment of reading | live at the moment of reading | live at the moment of reading |
-| Reported as | `local log` | `local probe` | `via CLI` | `live query` |
+| Source | `codex app-server`, the vendor's own CLI — falling back to its session logs on disk | its language server, on loopback | `amp usage`, the vendor's own CLI | the usage endpoint, over the network |
+| Credential needed | **none — Codex's token stays inside Codex** | **none** | **none — Amp's key stays inside Amp** | yes — the OAuth token Claude Code stores |
+| Network access needed | yes, but the request is Codex's, not ours — **none** on the fallback | **none off this machine** | yes, but the request is Amp's, not ours | yes |
+| Freshness | live at the moment of reading — on the fallback, only as current as your last persisted Codex session | live at the moment of reading | live at the moment of reading | live at the moment of reading |
+| Reported as | `via CLI`, or `local log` on the fallback | `local probe` | `via CLI` | `live query` |
 
 The other ten fall onto those same four rungs:
 
@@ -71,8 +71,20 @@ dashboards) are listed, with reasons, on the dashboard's coverage card. A
 machine without a given tool reports that provider as `not signed in`, and the
 dashboard folds those into one quiet line instead of a column of empty tiles.
 
-Codex writes the rate-limit object the server hands it straight into
-`~/.codex/sessions/**/rollout-*.jsonl`, so reading a file is enough.
+Codex is asked directly: `codex app-server` speaks JSON-RPC over stdio, and
+`account/rateLimits/read` returns what the account's meters say right now —
+including the separate windows a plan can carry beyond the main one, which is
+something no file on disk offers. The credential stays inside Codex; the call
+is the CLI's, not ours.
+
+It also writes the rate-limit object the server hands it into
+`~/.codex/sessions/**/rollout-*.jsonl`, and reading that file is the fallback
+for a machine with no Codex binary anywhere this agent is willing to run from.
+The catch, and the reason it is no longer the first choice: a session run with
+`--ephemeral` writes nothing at all, so on a machine that uses Codex only that
+way the file stops moving while the account keeps draining. The dashboard names
+which of the two answered, and shows the age of a reading that has stopped
+moving.
 
 Antigravity keeps no quota on disk, but it does not need to: the language
 server it already runs will answer the question over `127.0.0.1`. That is the
@@ -124,7 +136,9 @@ Of eight AI-tool config directories examined on one developer machine, **only
 Codex persisted quota locally**. That is why tools in this space reach for OAuth
 tokens rather than reading a file — but it is not the whole story, because
 "ask the vendor's own CLI" is a third option that costs no credential at all,
-and it is the one to prefer wherever a vendor offers it.
+and it is the one to prefer wherever a vendor offers it. Codex is now its own
+best example: the file it persists turned out to record only sessions it was
+asked to persist, and its CLI answers the same question without that caveat.
 
 ### Running another program
 

@@ -9,6 +9,14 @@ package main
 //	  {"type":"event_msg","payload":{"type":"token_count","rate_limits":{…}}}
 //
 // No credential, no network.
+//
+// This is the FALLBACK leg since 2026-08-06, not the only one. What it cannot
+// do is say anything about usage that was never persisted, and `codex exec
+// --ephemeral` persists nothing: a machine doing all its Codex work that way
+// leaves this reading frozen at the last interactive session while the account
+// drains. codexlive.go asks the CLI's own app-server first and lands here when
+// that is unavailable — which is still every machine without a Codex binary in
+// a place the helper will run from, so this leg is load-bearing.
 
 import (
 	"bytes"
@@ -279,7 +287,7 @@ func splitLines(buf []byte, dropFirst bool) [][]byte {
 	return out
 }
 
-func collectCodex() Provider {
+func collectCodexLog() Provider {
 	p := Provider{ID: "codex", Name: "Codex", Source: "local-log", CapturedAt: now()}
 	root := codexSessionsDir()
 	if root == "" {

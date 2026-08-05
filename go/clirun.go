@@ -62,17 +62,15 @@ func vendorCandidates(name string) []string {
 	return out
 }
 
-// Run one vendor CLI to completion. Returns its text output, whether it
-// exited non-zero, and an error only when there is nothing usable to parse.
-// `envPrefixes` names the vendor's own variable families to pass through, on
-// top of the shared allowlist (ampEnvKeys — the list is not Amp-specific,
-// only its name is).
-func runVendorCLI(bin string, args []string, envPrefixes []string, deadline time.Duration) (string, bool, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), deadline)
-	defer cancel()
-
-	cmd := toolCommand(ctx, bin, args...)
-	cmd.Stdin = nil
+// The environment a vendor's tool is allowed to see: the shared allowlist,
+// the locale, and the vendor's own variable families. Everything else is
+// dropped — above all this helper's own relay token, which must never reach a
+// third party's address space.
+//
+// Its own function because the app-server collector needs the same environment
+// for a child it drives interactively rather than runs to completion, and the
+// second copy of an allowlist is the one that forgets an entry.
+func vendorEnv(envPrefixes []string) []string {
 	env := []string{"NO_COLOR=1"}
 	for _, k := range ampEnvKeys {
 		if v, ok := os.LookupEnv(k); ok {
@@ -96,7 +94,21 @@ func runVendorCLI(bin string, args []string, envPrefixes []string, deadline time
 			}
 		}
 	}
-	cmd.Env = env
+	return env
+}
+
+// Run one vendor CLI to completion. Returns its text output, whether it
+// exited non-zero, and an error only when there is nothing usable to parse.
+// `envPrefixes` names the vendor's own variable families to pass through, on
+// top of the shared allowlist (ampEnvKeys — the list is not Amp-specific,
+// only its name is).
+func runVendorCLI(bin string, args []string, envPrefixes []string, deadline time.Duration) (string, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	defer cancel()
+
+	cmd := toolCommand(ctx, bin, args...)
+	cmd.Stdin = nil
+	cmd.Env = vendorEnv(envPrefixes)
 	cmd.WaitDelay = 2 * time.Second
 
 	var stdout, stderr bytes.Buffer
