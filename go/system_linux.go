@@ -22,9 +22,12 @@ func systemSnapshot() System {
 
 	linuxCPU(&s)
 	linuxMem(&s)
+	linuxSwapIO(&s)
 	linuxLoad(&s)
 	linuxUptime(&s)
 	statfsRoot(&s)
+	linuxMounts(&s)
+	linuxDiskIO(&s)
 	linuxNet(&s)
 	linuxTCP(&s)
 	linuxProcs(&s)
@@ -62,6 +65,13 @@ func linuxCPU(s *System) {
 		return
 	}
 	var total, idle float64
+	// user+nice, system+irq+softirq, iowait, steal — the four the card shows.
+	// nice rides with user and the two interrupt buckets ride with system on
+	// purpose: they are the same time viewed at a finer grain than the question
+	// "where did the CPU go" is ever asked at, and four numbers that sum with
+	// idle to a hundred is a thing a reader can check at a glance. Five that
+	// nearly do is not.
+	var parts [4]float64
 	for i, v := range f[1:] {
 		if i >= 8 { // stop before guest / guest_nice
 			break
@@ -72,10 +82,25 @@ func linuxCPU(s *System) {
 			return
 		}
 		total += n
-		if i == 3 || i == 4 { // idle, iowait
+		switch i {
+		case 0, 1: // user, nice
+			parts[0] += n
+		case 2, 5, 6: // system, irq, softirq
+			parts[1] += n
+		case 3: // idle
 			idle += n
+		case 4: // iowait — idle for the purposes of CPUPercent, and its own
+			idle += n // number here, because a machine stuck on its disk is not resting
+			parts[2] += n
+		case 7: // steal
+			parts[3] += n
 		}
 	}
+	// Taken unconditionally, even on the branch that reports no percentage:
+	// this differencer holds its own previous reading, and skipping the call
+	// would leave it holding one from before whatever gap just happened.
+	split := cpuPartsDelta(parts, total)
+	s.CPUUser, s.CPUSystem, s.CPUIOWait, s.CPUSteal = split[0], split[1], split[2], split[3]
 	if p := cpuDelta(total-idle, total); p != nil {
 		s.CPUPercent = p
 	} else {
@@ -123,6 +148,8 @@ func linuxMem(s *System) {
 	if okT && okA && total > 0 && avail >= 0 && avail <= total {
 		s.MemTotal = fp(total)
 		s.MemUsedPercent = pct(total-avail, total)
+		s.MemAvailable = fp(avail)
+		s.MemCached = linuxCached(kb, total)
 	} else {
 		s.miss(mMemory)
 	}
@@ -139,6 +166,74 @@ func linuxMem(s *System) {
 	}
 	// Swap being absent entirely is a configuration, not a failure — most cloud
 	// images ship without it — so THAT case is not reported as missing.
+}
+
+// The reclaimable part of what memory is being used for, in bytes.
+//
+// Cached + Buffers + SReclaimable, MINUS Shmem, and the subtraction is the
+// whole reason this is a function rather than a lookup: tmpfs pages (a /run,
+// a /dev/shm, a container's writable layer) are counted inside Cached and are
+// NOT reclaimable — they are somebody's data with nowhere else to live. A card
+// that showed them as cache would tell an operator with a full /dev/shm that
+// the kernel could give the memory back on demand, which it cannot.
+//
+// Every part is optional and missing ones simply contribute nothing: kernels
+// disagree about which of these exist, and this is a supporting figure. It is
+// dropped entirely if it comes out impossible, which is what a disagreement
+// between the two would look like.
+func linuxCached(kb map[string]float64, total float64) *float64 {
+	cached, ok := kb["Cached"]
+	if !ok {
+		return nil
+	}
+	v := cached + kb["Buffers"] + kb["SReclaimable"] - kb["Shmem"]
+	if v < 0 || v > total || !finite(v) {
+		return nil
+	}
+	return fp(v)
+}
+
+// Swap traffic, from /proc/vmstat's cumulative page counters.
+//
+// pswpin/pswpout count PAGES, and the page size is read from the runtime
+// rather than assumed to be 4 KiB: arm64 kernels are built with 4, 16 and 64
+// KiB pages, and a Raspberry Pi reporting a sixteenth of its real swap traffic
+// would look calm while it thrashed.
+func linuxSwapIO(s *System) {
+	raw, ok := readSmall("/proc/vmstat")
+	if !ok {
+		return
+	}
+	var in, out float64
+	var okIn, okOut bool
+	for _, line := range strings.Split(raw, "\n") {
+		k, v, found := strings.Cut(line, " ")
+		if !found {
+			continue
+		}
+		n, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err != nil || n < 0 || !finite(n) {
+			continue
+		}
+		switch k {
+		case "pswpin":
+			in, okIn = n, true
+		case "pswpout":
+			out, okOut = n, true
+		}
+	}
+	if !okIn || !okOut {
+		return
+	}
+	page := float64(os.Getpagesize())
+	if page <= 0 {
+		return
+	}
+	// No `missing` entry on the first sample, unlike the network rate: swap
+	// traffic is almost always zero, so a machine that has never swapped and a
+	// machine that has not been measured yet look identical on the card either
+	// way. Saying "swap I/O not reported" about a healthy box would be noise.
+	s.SwapInBps, s.SwapOutBps = swapIOPrev.delta(in*page, out*page, now())
 }
 
 // df/statvfs scale block counts by the fundamental fragment size, not by
@@ -172,6 +267,12 @@ func linuxNet(s *System) {
 	}
 	var rx, tx float64
 	var sawAny bool
+	// Packets, errors and drops from the same rows. Summed separately from the
+	// bytes because the columns that carry them arrive later on the line and an
+	// interface driver that reports a short row must cost its error counts and
+	// not its traffic.
+	var rxPk, txPk, rxErr, txErr, rxDrop, txDrop float64
+	var sawCounts bool
 	// The same walk now feeds the per-interface rows too — one read of the
 	// table, two uses of it (see nicCounters).
 	perRx := make(map[string]float64, 8)
@@ -199,10 +300,29 @@ func linuxNet(s *System) {
 		tx += t
 		perRx[name], perTx[name] = r, t
 		sawAny = true
+
+		// Receive:  bytes packets errs drop fifo frame compressed multicast
+		// Transmit: bytes packets errs drop fifo colls carrier compressed
+		// — so packets/errs/drop are 1/2/3 on the receive side and 9/10/11 on
+		// the transmit side. All six or none: a row this cannot fully account
+		// for is a row whose columns are not where this thinks they are, and
+		// half-parsing it would add one interface's errors to another's total.
+		if len(f) >= 12 {
+			if v, okCounts := parseNonNeg(f[1], f[2], f[3], f[9], f[10], f[11]); okCounts {
+				rxPk, rxErr, rxDrop = rxPk+v[0], rxErr+v[1], rxDrop+v[2]
+				txPk, txErr, txDrop = txPk+v[3], txErr+v[4], txDrop+v[5]
+				sawCounts = true
+			}
+		}
 	}
 	if !sawAny {
 		s.miss(mNetwork)
 		return
+	}
+	if sawCounts {
+		s.NetRxPackets, s.NetTxPackets = fp(rxPk), fp(txPk)
+		s.NetRxErrs, s.NetTxErrs = fp(rxErr), fp(txErr)
+		s.NetRxDrops, s.NetTxDrops = fp(rxDrop), fp(txDrop)
 	}
 	// The totals stand on their own: unlike the rate below they need no second
 	// sample, so the first push after a restart already carries them.
@@ -216,6 +336,168 @@ func linuxNet(s *System) {
 		return
 	}
 	s.NetRxBps, s.NetTxBps = rxBps, txBps
+}
+
+// Parse a fixed group of counters, all or nothing. Whole numbers that only
+// ever grow: anything negative, non-finite or unparseable means the columns
+// are not where the caller thinks they are, and a partial answer would put one
+// column's number under another column's name.
+func parseNonNeg(fields ...string) ([]float64, bool) {
+	out := make([]float64, len(fields))
+	for i, f := range fields {
+		n, err := strconv.ParseFloat(f, 64)
+		if err != nil || n < 0 || !finite(n) {
+			return nil, false
+		}
+		out[i] = n
+	}
+	return out, true
+}
+
+// Disk throughput, from /proc/diskstats:
+//
+//	  8       0 sda 12 0 3456 78 90 0 1234 56 0 0 0
+//	major minor name reads rd_merged SECTORS_READ ms writes wr_merged SECTORS_WRITTEN ...
+//
+// Sectors, always 512 bytes here. That is not the device's sector size — a
+// modern NVMe reports 4096 — but the unit the kernel's diskstats interface is
+// specified in, and converting by the hardware's figure (which is what makes
+// this look like a bug worth fixing) overstates every reading eightfold.
+//
+// WHICH DEVICES COUNT is the other half, and getting it wrong is silent: the
+// same write appears under a partition and its whole disk, under a device
+// mapper target and the disk beneath it, under an md array and every member.
+// Summing everything /proc/diskstats lists therefore double-counts, triple-counts
+// on LVM-on-RAID, and produces a number that is never obviously wrong — just
+// always too big. So the sum is over WHOLE devices only (the ones with a
+// directory in /sys/block, which excludes partitions) minus the virtual layers
+// that stack on top of them.
+func linuxDiskIO(s *System) {
+	blocks, err := os.ReadDir("/sys/block")
+	if err != nil {
+		s.miss(mDiskIO)
+		return
+	}
+	whole := make(map[string]bool, len(blocks))
+	for _, b := range blocks {
+		name := b.Name()
+		// loop (every snap package is one), ram/zram (memory pretending to be a
+		// disk), dm- (LVM/crypt, which re-counts its backing device), md (RAID,
+		// same), sr/fd (optical, floppy — no traffic worth a card).
+		if strings.HasPrefix(name, "loop") || strings.HasPrefix(name, "ram") ||
+			strings.HasPrefix(name, "zram") || strings.HasPrefix(name, "dm-") ||
+			strings.HasPrefix(name, "md") || strings.HasPrefix(name, "sr") ||
+			strings.HasPrefix(name, "fd") {
+			continue
+		}
+		whole[name] = true
+	}
+	raw, ok := readSmall("/proc/diskstats")
+	if !ok || len(whole) == 0 {
+		s.miss(mDiskIO)
+		return
+	}
+	var read, written float64
+	var sawAny bool
+	for _, line := range strings.Split(raw, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 10 || !whole[f[2]] {
+			continue
+		}
+		v, okRow := parseNonNeg(f[5], f[9])
+		if !okRow {
+			continue
+		}
+		read += v[0] * 512
+		written += v[1] * 512
+		sawAny = true
+	}
+	if !sawAny {
+		s.miss(mDiskIO)
+		return
+	}
+	rBps, wBps := diskIOPrev.delta(read, written, now())
+	if rBps == nil {
+		// First sample since startup, or a device went away and took its
+		// counters out of the sum. Stated rather than shown as an idle disk —
+		// the same rule the network rate follows one function up.
+		s.miss(mDiskIO)
+		return
+	}
+	s.DiskReadBps, s.DiskWriteBps = rBps, wBps
+}
+
+// The filesystems other than root, from /proc/mounts.
+//
+// Read there rather than from /etc/fstab (which describes intent, not what is
+// mounted) and parsed with the kernel's own escaping in mind: a mount point
+// containing a space arrives as `\040`, and a parser that misses that reads one
+// path as two fields and measures the wrong thing.
+func linuxMounts(s *System) { fillMounts(s, scanLinuxMounts) }
+
+func scanLinuxMounts() []Mount {
+	raw, ok := readSmall("/proc/mounts")
+	if !ok {
+		return nil
+	}
+	var found []Mount
+	seenDev := make(map[string]bool, 8)
+	for _, line := range strings.Split(raw, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 3 {
+			continue
+		}
+		dev, path, fstype := unescapeMountField(f[0]), unescapeMountField(f[1]), f[2]
+		if !realFsTypes[fstype] || path == "/" {
+			continue
+		}
+		// One row per DEVICE. A btrfs volume with four subvolumes mounted is
+		// four rows with identical numbers, and a bind mount is the same
+		// filesystem seen twice — neither is a second disk, and listing them
+		// would spend the whole cap on one filesystem.
+		if dev == "" || seenDev[dev] {
+			continue
+		}
+		seenDev[dev] = true
+		total, used, usedPct, okFS := statfsUsage(path)
+		if !okFS {
+			continue
+		}
+		found = append(found, Mount{Path: path, Total: fp(total), Used: fp(used), UsedPercent: usedPct})
+		// A machine with hundreds of mounts (a Kubernetes node) must not be
+		// walked in full: every entry costs a statfs, which BLOCKS on a network
+		// filesystem whose server is away. capMounts trims the list that
+		// survives; this bounds the work done to build it.
+		if len(found) >= 4*maxMounts {
+			break
+		}
+	}
+	return found
+}
+
+// The kernel escapes space, tab, newline and backslash in mount fields as
+// three-digit OCTAL after a backslash. Anything else after a backslash is left
+// exactly as it was found: inventing an interpretation for it would be this
+// parser deciding what a path means.
+func unescapeMountField(v string) string {
+	if !strings.Contains(v, `\`) {
+		return v
+	}
+	var b strings.Builder
+	for i := 0; i < len(v); i++ {
+		if v[i] != '\\' || i+3 >= len(v) {
+			b.WriteByte(v[i])
+			continue
+		}
+		n, err := strconv.ParseUint(v[i+1:i+4], 8, 8)
+		if err != nil {
+			b.WriteByte(v[i])
+			continue
+		}
+		b.WriteByte(byte(n))
+		i += 3
+	}
+	return b.String()
 }
 
 // TCP MIB values are named by the preceding header line; their positions have

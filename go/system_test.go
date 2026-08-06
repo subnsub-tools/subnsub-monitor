@@ -11,6 +11,7 @@ package main
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"runtime"
 	"strings"
@@ -192,6 +193,30 @@ func TestSnapshotCarriesNoIdentity(t *testing.T) {
 		// they carry, with the self-hosted relay as the answer for anyone
 		// unwilling to send it.
 		"net_rx_total": true, "net_tx_total": true, "nics": true,
+		// The 2026-08-07 round, every one of them a reading about the machine's
+		// WORK rather than about who it belongs to:
+		//   cpu_*        where the CPU went (steal and iowait are the two that
+		//                explain a slow box the percentage calls idle)
+		//   mem_*        the cache/available split behind mem_used_percent
+		//   swap_*_bps   pages actually moving, which is thrashing; the
+		//                percentage alone cannot tell that from swap at rest
+		//   disk_*_bps   the only fast-moving reading the card was missing
+		//   net_*        packets, errors and drops from the row the byte
+		//                counters already came from
+		//   mounts       the OTHER filesystems. The one entry here carrying a
+		//                string from the machine, and the reason foldMountPath
+		//                exists: a path is cut to three segments and anything
+		//                under a home directory collapses to the home, so a
+		//                disk can be named without naming a person. The test
+		//                above asserts exactly that against this box's own
+		//                $HOME, and TestFoldMountPath does it exhaustively.
+		"cpu_user": true, "cpu_system": true, "cpu_iowait": true, "cpu_steal": true,
+		"mem_available": true, "mem_cached": true,
+		"swap_in_bps": true, "swap_out_bps": true,
+		"disk_read_bps": true, "disk_write_bps": true, "mounts": true,
+		"net_rx_packets": true, "net_tx_packets": true,
+		"net_rx_errs": true, "net_tx_errs": true,
+		"net_rx_drops": true, "net_tx_drops": true,
 	}
 	for _, k := range topLevelKeys(blob) {
 		if !allowed[k] {
@@ -216,18 +241,14 @@ func TestSnapshotReportsPlatform(t *testing.T) {
 	}
 	for _, m := range s.Missing {
 		switch m {
-		case mCPU, mMemory, mSwap, mDisk, mLoad, mUptime, mNetwork, mProcs:
+		case mCPU, mMemory, mSwap, mDisk, mDiskIO, mLoad, mUptime, mNetwork, mProcs:
 		default:
 			t.Errorf("unknown missing category %q", m)
 		}
 	}
 }
 
-func resetNet() {
-	netPrev.Lock()
-	netPrev.valid, netPrev.rx, netPrev.tx, netPrev.at = false, 0, 0, 0
-	netPrev.Unlock()
-}
+func resetNet() { netPrev.reset() }
 
 func TestNetDeltaNeedsTwoSamples(t *testing.T) {
 	resetNet()
@@ -307,5 +328,88 @@ func TestLinuxTCPParsersUseNamesNotPositions(t *testing.T) {
 	tw, ok := parseLinuxTCPTimeWait("sockets: used 20\nTCP: inuse 5 orphan 0 tw 13 alloc 8 mem 2\n")
 	if !ok || tw != 13 {
 		t.Fatalf("sockstat tw=%v ok=%v", tw, ok)
+	}
+}
+
+// The CPU split, which is cpuDelta's arithmetic applied four times with two
+// extra ways to be wrong: a platform that keeps only some of the counters, and
+// a bucket that outran the total it is a share of.
+func TestCPUPartsDelta(t *testing.T) {
+	resetCPUParts()
+	// user, system, iowait, steal — the same order the collectors fill.
+	if got := cpuPartsDelta([4]float64{10, 5, 1, 0}, 100); got[0] != nil {
+		t.Fatal("first sample should report nothing")
+	}
+	got := cpuPartsDelta([4]float64{30, 15, 6, 2}, 200)
+	// 20 of 100 jiffies to user, 10 to system, 5 to iowait, 2 to steal.
+	for i, want := range []float64{20, 10, 5, 2} {
+		if got[i] == nil {
+			t.Fatalf("part %d missing", i)
+		}
+		if *got[i] != want {
+			t.Errorf("part %d = %v, want %v", i, *got[i], want)
+		}
+	}
+}
+
+func TestCPUPartsDeltaOmitsWhatAPlatformCannotKeep(t *testing.T) {
+	resetCPUParts()
+	nan := math.NaN()
+	cpuPartsDelta([4]float64{10, 5, nan, nan}, 100)
+	got := cpuPartsDelta([4]float64{30, 15, nan, nan}, 200)
+	if got[0] == nil || got[1] == nil {
+		t.Fatal("the two Windows keeps should report")
+	}
+	// Not zero: "0% steal" is a claim about a hypervisor Windows cannot see.
+	if got[2] != nil || got[3] != nil {
+		t.Errorf("absent counters must stay absent, got %v/%v", got[2], got[3])
+	}
+}
+
+func TestCPUPartsDeltaRejectsResetsAndImpossibleShares(t *testing.T) {
+	resetCPUParts()
+	cpuPartsDelta([4]float64{100, 50, 10, 5}, 1000)
+	// Counters that went backwards — a reboot, or a container's view being
+	// replaced. Not a negative share of the CPU.
+	if got := cpuPartsDelta([4]float64{10, 5, 1, 0}, 2000); got[0] != nil {
+		t.Errorf("a reset counter must report nothing, got %v", *got[0])
+	}
+	resetCPUParts()
+	cpuPartsDelta([4]float64{0, 0, 0, 0}, 0)
+	// A bucket that grew more than the total it is a share of means the two
+	// were read at different instants.
+	if got := cpuPartsDelta([4]float64{500, 0, 0, 0}, 100); got[0] != nil {
+		t.Errorf("a share over 100%% must report nothing, got %v", *got[0])
+	}
+	resetCPUParts()
+	cpuPartsDelta([4]float64{10, 5, 1, 0}, 100)
+	// A total that did not move: two reads inside the same jiffy.
+	if got := cpuPartsDelta([4]float64{10, 5, 1, 0}, 100); got[0] != nil {
+		t.Errorf("a frozen total must report nothing, got %v", *got[0])
+	}
+}
+
+func resetCPUParts() {
+	cpuPartsPrev.Lock()
+	cpuPartsPrev.valid, cpuPartsPrev.parts, cpuPartsPrev.total = false, [4]float64{}, 0
+	cpuPartsPrev.Unlock()
+}
+
+// All or nothing, because a partial answer would put one column's number under
+// another column's name.
+func TestParseNonNeg(t *testing.T) {
+	if v, ok := parseNonNeg("1", "2", "3"); !ok || v[0] != 1 || v[2] != 3 {
+		t.Fatalf("got %v/%v", v, ok)
+	}
+	for _, in := range [][]string{
+		{"1", "-2"},
+		{"1", "two"},
+		{"1", ""},
+		{"1", "NaN"},
+		{"1", "Inf"},
+	} {
+		if _, ok := parseNonNeg(in...); ok {
+			t.Errorf("parseNonNeg(%q) should refuse", in)
+		}
 	}
 }

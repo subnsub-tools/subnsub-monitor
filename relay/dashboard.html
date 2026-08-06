@@ -158,6 +158,15 @@ main { padding: 20px; max-width: 1400px; margin: 0 auto; }
 .bar { height: 6px; border-radius: 4px; background: var(--inset); overflow: hidden; }
 .bar i { display: block; height: 100%; border-radius: 4px; background: var(--accent); width: 0; transition: width .5s ease; }
 .bar.ok i { background: var(--ok); } .bar.warn i { background: var(--warn); } .bar.bad i { background: var(--bad); }
+/* A filesystem row is a vitals row with a wider label: the four fixed ones are
+   called CPU/Mem/Swap/Disk and fit in 44px, while a mount point is a folded
+   path of up to 40 characters. It gets the room and, past that, an ellipsis —
+   the full path is on the row's title. */
+.vrow.mrow { grid-template-columns: 122px 1fr 44px 110px; }
+.vrow.mrow .lab {
+  font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .vna { color: var(--mute); font-size: 11.5px; margin-top: 8px; }
 
 .spark { margin-top: 10px; }
@@ -464,8 +473,13 @@ function buildCard(m) {
     ui.vrows[key] = { row, bar, fill, pct, abs };
     ui.vitals.append(row);
   }
+  /* The non-root filesystems live in their own container because there is a
+     variable number of them — see mountRows. */
+  ui.mounts = el('div', 'vitals');
+  ui.mrows = [];
+  ui.mountSig = '';
   ui.vna = el('div', 'vna');
-  card.append(ui.vitals, ui.vna);
+  card.append(ui.vitals, ui.mounts, ui.vna);
 
   const spark = el('div', 'spark');
   const NS = 'http://www.w3.org/2000/svg';
@@ -584,6 +598,59 @@ function vitalRow(ui, key, pctVal, absText, neutral) {
   r.bar.className = cls;
 }
 
+/* The filesystems other than root, one row each, in the same shape as the four
+   fixed vitals above.
+   Built rather than pre-made because the SET moves: a disk gets mounted, a
+   container host tears one down. Rebuilt only when the paths change, so the
+   bar widths a browser is mid-transition on survive an ordinary refresh — the
+   rows are patched in place otherwise.
+   The paths arrived folded (three segments, home directories collapsed to the
+   home) and are rendered as TEXT: el() sets textContent, and a mount point is
+   a string a machine chose. */
+function mountRows(ui, list) {
+  /* An empty container is not free: .vitals carries a top margin and a grid
+     gap, so a machine with one filesystem would get the blank strip of a
+     section it does not have. */
+  ui.mounts.style.display = list.length ? '' : 'none';
+  const sig = list.map(m => m && m.path).join('\n');
+  if (sig !== ui.mountSig) {
+    ui.mountSig = sig;
+    ui.mounts.textContent = '';
+    ui.mrows = [];
+    for (const m of list) {
+      if (!m || typeof m.path !== 'string') continue;
+      const row = el('div', 'vrow mrow');
+      const lab = el('span', 'lab', m.path);
+      lab.title = m.path;
+      const bar = el('div', 'bar'); const fill = el('i'); bar.append(fill);
+      const pct = el('span', 'pct num');
+      const abs = el('span', 'abs num');
+      row.append(lab, bar, pct, abs);
+      ui.mounts.append(row);
+      ui.mrows.push({ row, bar, fill, pct, abs });
+    }
+  }
+  list.forEach((m, i) => {
+    const r = ui.mrows[i];
+    if (!r || !m) return;
+    if (typeof m.used_percent !== 'number') {
+      /* A filesystem that reported no percentage still has a row, because the
+         path itself is the news — the machine has this disk. What it does not
+         get is a bar drawn at zero, which would read as an empty disk. */
+      r.row.style.display = '';
+      r.bar.style.visibility = 'hidden';
+      r.pct.textContent = '—';
+    } else {
+      r.bar.style.visibility = '';
+      r.fill.style.width = Math.min(100, m.used_percent) + '%';
+      r.pct.textContent = fmt.pct(m.used_percent);
+      r.bar.className = 'bar' + (m.used_percent >= 90 ? ' bad' : m.used_percent >= 75 ? ' warn' : ' ok');
+    }
+    r.abs.textContent = (typeof m.used === 'number' && m.total)
+      ? fmt.bytes(m.used) + ' / ' + fmt.bytes(m.total) : '';
+  });
+}
+
 function limitTone(l) {
   if (l.severity === 'critical') return 'bad';
   if (l.severity === 'warning') return 'warn';
@@ -663,11 +730,60 @@ function patchCard(m) {
       ui.chips.append(el('span', 'chip num',
         'load ' + sys.load1.toFixed(2) + ' ' + (sys.load5 ?? 0).toFixed(2) + ' ' + (sys.load15 ?? 0).toFixed(2)));
     }
+    /* Where the CPU went. Two of these four answer the question a single
+       percentage cannot: iowait is a processor idle on a disk, and steal is
+       time the hypervisor gave to somebody else — the whole explanation for a
+       VPS that is slow while reporting spare capacity. Only the buckets this
+       platform keeps are shown; macOS has user and sys and nothing else. */
+    const split = [['us', sys.cpu_user], ['sy', sys.cpu_system],
+                   ['wa', sys.cpu_iowait], ['st', sys.cpu_steal]]
+      .filter(p => typeof p[1] === 'number');
+    if (split.length) {
+      ui.chips.append(el('span', 'chip num',
+        split.map(p => p[0] + ' ' + fmt.pct(p[1])).join('  ')));
+    }
+    /* What the memory percentage is made of. Cached is what the kernel would
+       hand back under pressure — without it, a reader cannot tell a machine
+       that is full from one that is merely using its page cache properly. */
+    const memParts = [];
+    if (typeof sys.mem_available === 'number') memParts.push(fmt.bytes(sys.mem_available) + ' avail');
+    if (typeof sys.mem_cached === 'number') memParts.push(fmt.bytes(sys.mem_cached) + ' cached');
+    if (memParts.length) ui.chips.append(el('span', 'chip num', memParts.join('  ')));
+    /* Pages moving, which is thrashing — a different question from how much
+       swap is held, and the urgent one. Shown only when something is actually
+       moving: on a healthy machine both are zero forever. */
+    if (sys.swap_in_bps > 0 || sys.swap_out_bps > 0) {
+      ui.chips.append(el('span', 'chip num',
+        'swap ↓ ' + fmt.rate(sys.swap_in_bps) + '  ↑ ' + fmt.rate(sys.swap_out_bps)));
+    }
+    if (typeof sys.disk_read_bps === 'number' || typeof sys.disk_write_bps === 'number') {
+      ui.chips.append(el('span', 'chip num',
+        'disk r ' + fmt.rate(sys.disk_read_bps) + '  w ' + fmt.rate(sys.disk_write_bps)));
+    }
     if (typeof sys.net_rx_bps === 'number' || typeof sys.net_tx_bps === 'number') {
       /* Each side stands alone: the cleaners allow rx without tx, and a
          missing side reads as a dash, never as zero traffic. */
       ui.chips.append(el('span', 'chip num',
         '↓ ' + fmt.rate(sys.net_rx_bps) + '  ↑ ' + fmt.rate(sys.net_tx_bps)));
+    }
+    /* Errors and drops, when there are any. A link losing traffic keeps its
+       byte rate looking healthy, so this is the only place it shows — and it
+       stays hidden while the counters are zero, which is nearly always. */
+    const lost = ['net_rx_errs', 'net_tx_errs', 'net_rx_drops', 'net_tx_drops']
+      .some(k => sys[k] > 0);
+    if (lost) {
+      const n = k => (typeof sys[k] === 'number' ? Math.round(sys[k]) : '—');
+      const c = el('span', 'chip num',
+        'errs ↓ ' + n('net_rx_errs') + ' ↑ ' + n('net_tx_errs') +
+        '  drops ↓ ' + n('net_rx_drops') + ' ↑ ' + n('net_tx_drops'));
+      /* Against the packet totals, because a thousand drops is a catastrophe
+         on a machine that sent ten thousand and a rounding error on one that
+         sent ten billion. */
+      if (typeof sys.net_rx_packets === 'number' || typeof sys.net_tx_packets === 'number') {
+        c.title = 'packets ↓ ' + (sys.net_rx_packets || 0).toLocaleString() +
+          '  ↑ ' + (sys.net_tx_packets || 0).toLocaleString();
+      }
+      ui.chips.append(c);
     }
     /* Cumulative bytes, which a rate cannot answer: on a metered box the
        question is how much of the month is gone, not how busy it is now. */
@@ -703,10 +819,12 @@ function patchCard(m) {
       sys.swap_total ? fmt.bytes(sys.swap_total * (sys.swap_used_percent || 0) / 100) + ' / ' + fmt.bytes(sys.swap_total) : '');
     vitalRow(ui, 'disk', sys.disk_used_percent,
       sys.disk_used != null && sys.disk_total ? fmt.bytes(sys.disk_used) + ' / ' + fmt.bytes(sys.disk_total) : '');
+    mountRows(ui, Array.isArray(sys.mounts) ? sys.mounts : []);
     ui.vna.textContent = sys.missing && sys.missing.length
       ? 'not measured here: ' + sys.missing.join(', ') : '';
   } else {
     ui.vitals.style.display = 'none';
+    ui.mounts.style.display = 'none';
     ui.vna.textContent = r ? 'no system readings from this helper' : '';
   }
 

@@ -29,8 +29,17 @@ import (
 const (
 	maxProviders = 12 // more than the helper has collectors, with room
 	maxLimits    = 8
-	maxMissing   = 8
+	// Sized to the vocabulary itself: a helper that could measure nothing at
+	// all names every category, and a cap below that count would drop the last
+	// row on exactly the machine with the most to say.
+	maxMissing   = 9
 	maxNameRunes = 24
+	// The non-root filesystems, bounded exactly as the helper bounds them
+	// (mounts.go): eight rows, and a folded path of at most three short
+	// segments.
+	maxMounts     = 8
+	maxMountPath  = 40
+	maxMountDepth = 3
 	// The interface list, bounded exactly as the helper bounds it (nics.go):
 	// more rows than this is a container host whose list is bridge noise, and
 	// eight addresses covers a v4, a global v6, a privacy v6 and aliases.
@@ -80,9 +89,13 @@ var knownArches = map[string]bool{
 }
 
 var knownMissing = map[string]bool{
-	"cpu": true, "memory": true, "swap": true, "disk": true, "load": true, "uptime": true,
-	"network": true, "procs": true,
+	"cpu": true, "memory": true, "swap": true, "disk": true, "diskio": true,
+	"load": true, "uptime": true, "network": true, "procs": true,
 }
+
+// Where a user's own directory lives. A mount point under one of these keeps
+// the home and drops everything below it — see cleanMountPath.
+var mountHomeRoots = map[string]bool{"home": true, "Users": true}
 
 // One reading as this relay is willing to hold it. Pointers where absent and
 // zero are different claims, exactly as in the helper's own types.
@@ -94,11 +107,6 @@ type reading struct {
 	HelperVersion string      `json:"helper_version,omitempty"`
 	Exec          bool        `json:"exec"`
 	Upd           bool        `json:"upd"`
-	// Whether the machine has been told WHO may command it: at least one
-	// pinned dashboard key, so a command must carry a signature no relay can
-	// produce. Carried so a dashboard can draw the difference — a machine with
-	// nothing pinned runs what it is handed, and the two are not equally safe.
-	Sgn           bool        `json:"sgn"`
 	System        *system     `json:"system,omitempty"`
 }
 
@@ -168,19 +176,47 @@ type system struct {
 	OSVersion string   `json:"os_version,omitempty"`
 	CPUCount  int      `json:"cpu_count,omitempty"`
 	CPUPct    *float64 `json:"cpu_percent,omitempty"`
+	// Where that percentage went. iowait is a CPU idle on a disk, and steal is
+	// time the hypervisor gave to somebody else — the two readings that explain
+	// a machine which is slow while reporting spare capacity. Admitted one by
+	// one: a platform reports the buckets it keeps, and an absent one must stay
+	// absent rather than become a zero that claims a measurement.
+	CPUUser   *float64 `json:"cpu_user,omitempty"`
+	CPUSys    *float64 `json:"cpu_system,omitempty"`
+	CPUIOWait *float64 `json:"cpu_iowait,omitempty"`
+	CPUSteal  *float64 `json:"cpu_steal,omitempty"`
 	Load1     *float64 `json:"load1,omitempty"`
 	Load5     *float64 `json:"load5,omitempty"`
 	Load15    *float64 `json:"load15,omitempty"`
 	MemTotal  *float64 `json:"mem_total,omitempty"`
 	MemPct    *float64 `json:"mem_used_percent,omitempty"`
+	// The two figures behind that percentage: what the kernel would hand back
+	// under pressure, and what it promises it can. One percentage cannot say
+	// whether the missing memory is a process or a page cache.
+	MemAvail  *float64 `json:"mem_available,omitempty"`
+	MemCached *float64 `json:"mem_cached,omitempty"`
 	SwapTotal *float64 `json:"swap_total,omitempty"`
 	SwapPct   *float64 `json:"swap_used_percent,omitempty"`
-	DiskTotal *float64 `json:"disk_total,omitempty"`
-	DiskUsed  *float64 `json:"disk_used,omitempty"`
-	DiskPct   *float64 `json:"disk_used_percent,omitempty"`
-	UptimeSec *float64 `json:"uptime_sec,omitempty"`
-	NetRxBps  *float64 `json:"net_rx_bps,omitempty"`
-	NetTxBps  *float64 `json:"net_tx_bps,omitempty"`
+	// Pages MOVING, which is thrashing. Swap written days ago and never touched
+	// costs nothing, so the percentage alone cannot tell a healthy box at 80%
+	// swap from one that is grinding.
+	SwapInBps  *float64 `json:"swap_in_bps,omitempty"`
+	SwapOutBps *float64 `json:"swap_out_bps,omitempty"`
+	DiskTotal  *float64 `json:"disk_total,omitempty"`
+	DiskUsed   *float64 `json:"disk_used,omitempty"`
+	DiskPct    *float64 `json:"disk_used_percent,omitempty"`
+	// The other filesystems. On a server with a data disk, "is it about to run
+	// out of room" is nearly always about the data disk, and a card showing a
+	// comfortable root is confidently wrong. Paths arrive folded and are folded
+	// AGAIN here — see cleanMountPath for what that means and why.
+	Mounts []mount `json:"mounts,omitempty"`
+	// Disk throughput, the one fast-moving reading these cards used to lack:
+	// a machine pinned by its disk looked idle in every field it sent.
+	DiskReadBps  *float64 `json:"disk_read_bps,omitempty"`
+	DiskWriteBps *float64 `json:"disk_write_bps,omitempty"`
+	UptimeSec    *float64 `json:"uptime_sec,omitempty"`
+	NetRxBps     *float64 `json:"net_rx_bps,omitempty"`
+	NetTxBps     *float64 `json:"net_tx_bps,omitempty"`
 	// Cumulative bytes since the machine booted, and the machine's own
 	// interfaces. A rate says whether a box is busy; a total says how much of
 	// a metered allowance is gone. The interface list is the only place a
@@ -188,11 +224,30 @@ type system struct {
 	// of ONE connection and cannot see the other family at all.
 	NetRxTotal *float64 `json:"net_rx_total,omitempty"`
 	NetTxTotal *float64 `json:"net_tx_total,omitempty"`
-	NICs       []nic    `json:"nics,omitempty"`
-	Procs      *float64 `json:"procs,omitempty"`
-	TempC      *float64 `json:"temp_c,omitempty"`
-	Missing    []string `json:"missing,omitempty"`
-	Series     *series  `json:"series,omitempty"`
+	// Packets, errors and drops over the same interfaces. A link that is losing
+	// traffic keeps its byte rate looking healthy right up until somebody asks
+	// why everything feels slow; the packet totals ride along so a drop count
+	// can be read as a proportion rather than as a bare number.
+	NetRxPackets *float64 `json:"net_rx_packets,omitempty"`
+	NetTxPackets *float64 `json:"net_tx_packets,omitempty"`
+	NetRxErrs    *float64 `json:"net_rx_errs,omitempty"`
+	NetTxErrs    *float64 `json:"net_tx_errs,omitempty"`
+	NetRxDrops   *float64 `json:"net_rx_drops,omitempty"`
+	NetTxDrops   *float64 `json:"net_tx_drops,omitempty"`
+	NICs         []nic    `json:"nics,omitempty"`
+	Procs        *float64 `json:"procs,omitempty"`
+	TempC        *float64 `json:"temp_c,omitempty"`
+	Missing      []string `json:"missing,omitempty"`
+	Series       *series  `json:"series,omitempty"`
+}
+
+// One filesystem other than root, and the only place in this block where a
+// STRING comes off the machine. See cleanMountPath.
+type mount struct {
+	Path    string   `json:"path"`
+	Total   *float64 `json:"total,omitempty"`
+	Used    *float64 `json:"used,omitempty"`
+	UsedPct *float64 `json:"used_percent,omitempty"`
 }
 
 // One frame's worth of samples for the readings that move fast enough to draw
@@ -255,6 +310,98 @@ func displayText(s string, maxRunes int) string {
 	return strings.TrimSpace(b.String())
 }
 
+// Fold a mount point down to the disk it describes, and refuse anything that
+// is not one.
+//
+// The helper already does this before it sends (helper/go/mounts.go): at most
+// three segments, and anything under a home directory collapses to the home
+// itself, so `/mnt/backup` survives whole and `/home/alice/projects` becomes
+// `/home`. Doing it again here is the entire job of this file — the helper's
+// rule binds the helper, while anything else pushing at this relay is bound by
+// nothing but what is written here.
+//
+// The control-character and bidi cleanup runs FIRST, so a path cannot use an
+// override to make its folded form render as something else.
+func cleanMountPath(v string) string {
+	s := displayText(v, 512)
+	if s == "" || s == "/" {
+		return ""
+	}
+	// No leading slash means no segments to walk and no home to hide: a Windows
+	// volume root (`D:\`) is the shape that arrives this way.
+	if !strings.HasPrefix(s, "/") {
+		return capMountPath(s)
+	}
+	segs := make([]string, 0, maxMountDepth)
+	for _, seg := range strings.Split(s, "/") {
+		if seg == "" || seg == "." {
+			continue
+		}
+		// A mount table cannot contain "..", and a path that walks upwards is
+		// not one this can reason about. Refused, never resolved.
+		if seg == ".." {
+			return ""
+		}
+		segs = append(segs, seg)
+		if mountHomeRoots[seg] || len(segs) >= maxMountDepth {
+			break
+		}
+	}
+	if len(segs) == 0 {
+		return ""
+	}
+	return capMountPath("/" + strings.Join(segs, "/"))
+}
+
+// Cut to the cap on a RUNE boundary: a byte-level cut can split a multi-byte
+// character and put an invalid sequence on the wire.
+func capMountPath(p string) string {
+	if len([]rune(p)) <= maxMountPath {
+		return p
+	}
+	return string([]rune(p)[:maxMountPath-1]) + "…"
+}
+
+// The filesystem list, rebuilt row by row. Deduplicated on the FOLDED path —
+// folding is lossy on purpose, so two users' home directories and four btrfs
+// subvolumes all arrive as rows that mean the same thing.
+func cleanMounts(body json.RawMessage) []mount {
+	// Decoded here for the reason cleanNICs spells out: a list that is not a
+	// list must cost the list and nothing else.
+	var raw []json.RawMessage
+	if len(body) == 0 || json.Unmarshal(body, &raw) != nil {
+		return nil
+	}
+	var out []mount
+	seen := map[string]bool{}
+	for _, item := range raw {
+		if len(out) >= maxMounts {
+			break
+		}
+		var m struct {
+			Path    *string         `json:"path"`
+			Total   json.RawMessage `json:"total"`
+			Used    json.RawMessage `json:"used"`
+			UsedPct json.RawMessage `json:"used_percent"`
+		}
+		if json.Unmarshal(item, &m) != nil || m.Path == nil {
+			continue
+		}
+		path := cleanMountPath(*m.Path)
+		if path == "" || seen[path] {
+			continue
+		}
+		seen[path] = true
+		out = append(out, mount{
+			Path:    path,
+			Total:   cleanNonNeg(looseNum(m.Total), 1e18),
+			Used:    cleanNonNeg(looseNum(m.Used), 1e18),
+			UsedPct: cleanPctPtr(looseNum(m.UsedPct)),
+		})
+	}
+	return out
+}
+
 func cleanEpoch(v *float64) *float64 {
 	if v == nil || *v < epochMin || *v > epochMax {
 		return nil
@@ -308,8 +455,14 @@ func cleanNicName(v string) string {
 	return s
 }
 
-func cleanNICs(raw []json.RawMessage) []nic {
-	if len(raw) == 0 {
+func cleanNICs(body json.RawMessage) []nic {
+	// Decoded HERE rather than in the caller's struct, and the difference is
+	// the same compatibility promise the scalar fields get: a typed
+	// `[]json.RawMessage` field turns `"nics":"whatever"` into an Unmarshal
+	// error that throws away the WHOLE system block, so one malformed list
+	// would cost a machine its CPU and memory readings too.
+	var raw []json.RawMessage
+	if len(body) == 0 || json.Unmarshal(body, &raw) != nil || len(raw) == 0 {
 		return nil
 	}
 	out := make([]nic, 0, len(raw))
@@ -460,7 +613,6 @@ func cleanReading(body []byte) (string, *reading, bool) {
 	// === true, in Go clothing: only an explicit boolean turns these on.
 	out.Exec = raw.Exec != nil && *raw.Exec
 	out.Upd = raw.Upd != nil && *raw.Upd
-	out.Sgn = raw.Sgn != nil && *raw.Sgn
 	if len(raw.System) > 0 {
 		out.System = cleanSystem(raw.System, capturedAt)
 	}
@@ -778,13 +930,34 @@ func cleanSystem(body json.RawMessage, capturedAt *float64) *system {
 		// these keys were unknown to every deployed relay until 2026-08-06,
 		// so a rejection here has to stay field-local rather than costing the
 		// whole system block.
-		NetRxTotal json.RawMessage   `json:"net_rx_total"`
-		NetTxTotal json.RawMessage   `json:"net_tx_total"`
-		NICs       []json.RawMessage `json:"nics"`
-		Procs      json.RawMessage   `json:"procs"`
-		TempC      json.RawMessage   `json:"temp_c"`
-		Series     json.RawMessage   `json:"series"`
-		Missing    []string          `json:"missing"`
+		NetRxTotal json.RawMessage `json:"net_rx_total"`
+		NetTxTotal json.RawMessage `json:"net_tx_total"`
+		NICs       json.RawMessage `json:"nics"`
+		Procs      json.RawMessage `json:"procs"`
+		TempC      json.RawMessage `json:"temp_c"`
+		Series     json.RawMessage `json:"series"`
+		Missing    []string        `json:"missing"`
+		// The 2026-08-07 round, RawMessage for the same compatibility promise
+		// the note above makes: every one of these keys was unknown to every
+		// deployed relay before that date, so a rejection has to stay
+		// field-local rather than costing the whole system block.
+		CPUUser      json.RawMessage `json:"cpu_user"`
+		CPUSys       json.RawMessage `json:"cpu_system"`
+		CPUIOWait    json.RawMessage `json:"cpu_iowait"`
+		CPUSteal     json.RawMessage `json:"cpu_steal"`
+		MemAvail     json.RawMessage `json:"mem_available"`
+		MemCached    json.RawMessage `json:"mem_cached"`
+		SwapInBps    json.RawMessage `json:"swap_in_bps"`
+		SwapOutBps   json.RawMessage `json:"swap_out_bps"`
+		Mounts       json.RawMessage `json:"mounts"`
+		DiskReadBps  json.RawMessage `json:"disk_read_bps"`
+		DiskWriteBps json.RawMessage `json:"disk_write_bps"`
+		NetRxPackets json.RawMessage `json:"net_rx_packets"`
+		NetTxPackets json.RawMessage `json:"net_tx_packets"`
+		NetRxErrs    json.RawMessage `json:"net_rx_errs"`
+		NetTxErrs    json.RawMessage `json:"net_tx_errs"`
+		NetRxDrops   json.RawMessage `json:"net_rx_drops"`
+		NetTxDrops   json.RawMessage `json:"net_tx_drops"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil
@@ -805,16 +978,29 @@ func cleanSystem(body json.RawMessage, capturedAt *float64) *system {
 		s.CPUCount = int(*raw.CPUCount)
 	}
 	s.CPUPct = cleanPctPtr(raw.CPUPct)
+	s.CPUUser = cleanPctPtr(looseNum(raw.CPUUser))
+	s.CPUSys = cleanPctPtr(looseNum(raw.CPUSys))
+	s.CPUIOWait = cleanPctPtr(looseNum(raw.CPUIOWait))
+	s.CPUSteal = cleanPctPtr(looseNum(raw.CPUSteal))
 	s.Load1 = cleanNonNeg(raw.Load1, 1e18)
 	s.Load5 = cleanNonNeg(raw.Load5, 1e18)
 	s.Load15 = cleanNonNeg(raw.Load15, 1e18)
 	s.MemTotal = cleanNonNeg(raw.MemTotal, 1e18)
 	s.MemPct = cleanPctPtr(raw.MemPct)
+	s.MemAvail = cleanNonNeg(looseNum(raw.MemAvail), 1e18)
+	s.MemCached = cleanNonNeg(looseNum(raw.MemCached), 1e18)
 	s.SwapTotal = cleanNonNeg(raw.SwapTotal, 1e18)
 	s.SwapPct = cleanPctPtr(raw.SwapPct)
+	// Rates, so the tighter of the two ceilings — same bound as the network
+	// rates below, for the same reason.
+	s.SwapInBps = cleanNonNeg(looseNum(raw.SwapInBps), 1e15)
+	s.SwapOutBps = cleanNonNeg(looseNum(raw.SwapOutBps), 1e15)
 	s.DiskTotal = cleanNonNeg(raw.DiskTotal, 1e18)
 	s.DiskUsed = cleanNonNeg(raw.DiskUsed, 1e18)
 	s.DiskPct = cleanPctPtr(raw.DiskPct)
+	s.Mounts = cleanMounts(raw.Mounts)
+	s.DiskReadBps = cleanNonNeg(looseNum(raw.DiskReadBps), 1e15)
+	s.DiskWriteBps = cleanNonNeg(looseNum(raw.DiskWriteBps), 1e15)
 	s.UptimeSec = cleanNonNeg(raw.UptimeSec, 3.2e9)
 	// Rates in bytes/second: a petabyte a second is already past any link, and
 	// the tighter ceiling catches a cumulative counter pushed as a rate.
@@ -826,6 +1012,15 @@ func cleanSystem(body json.RawMessage, capturedAt *float64) *system {
 	// in, so that is the bound.
 	s.NetRxTotal = cleanNonNeg(looseNum(raw.NetRxTotal), counterMax)
 	s.NetTxTotal = cleanNonNeg(looseNum(raw.NetTxTotal), counterMax)
+	// Packets, errors and drops: counters like the byte totals, under the same
+	// uint64 bound. A packet count on a long-lived router walks past an
+	// exabyte-shaped ceiling for the same reason a byte counter does.
+	s.NetRxPackets = cleanNonNeg(looseNum(raw.NetRxPackets), counterMax)
+	s.NetTxPackets = cleanNonNeg(looseNum(raw.NetTxPackets), counterMax)
+	s.NetRxErrs = cleanNonNeg(looseNum(raw.NetRxErrs), counterMax)
+	s.NetTxErrs = cleanNonNeg(looseNum(raw.NetTxErrs), counterMax)
+	s.NetRxDrops = cleanNonNeg(looseNum(raw.NetRxDrops), counterMax)
+	s.NetTxDrops = cleanNonNeg(looseNum(raw.NetTxDrops), counterMax)
 	s.NICs = cleanNICs(raw.NICs)
 	if v := looseNum(raw.Procs); v != nil && *v >= 1 && *v <= 1e7 {
 		n := float64(int64(*v))

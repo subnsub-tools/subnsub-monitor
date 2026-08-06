@@ -464,3 +464,38 @@ func TestCountMacPIDs(t *testing.T) {
 		}
 	}
 }
+
+// The split off the same line the busy figure comes from. `top -l 2` prints
+// two frames and the first is the since-boot average — the reading system.go
+// refuses — so the LAST one is the one that counts.
+func TestParseMacTopSplit(t *testing.T) {
+	out := `Processes: 512 total, 2 running, 510 sleeping
+CPU usage: 40.00% user, 20.00% sys, 40.00% idle
+Processes: 512 total, 2 running, 510 sleeping
+CPU usage: 3.44% user, 6.89% sys, 89.65% idle
+`
+	user, sys := parseMacTopSplit(out)
+	if user == nil || sys == nil {
+		t.Fatal("want both shares")
+	}
+	if *user != 3.44 || *sys != 6.89 {
+		t.Fatalf("got %v/%v, want 3.44/6.89 from the LAST frame", *user, *sys)
+	}
+}
+
+// Half a split is not a split: a line this cannot fully account for is a line
+// whose format moved, and reporting the half that parsed would put a number
+// under a heading that no longer means what it says.
+func TestParseMacTopSplitRefusesPartialAndAbsent(t *testing.T) {
+	for _, in := range []string{
+		"CPU usage: 40.00% user, 40.00% idle\n",
+		"CPU usage: unavailable\n",
+		"CPU usage: 40.00% user, 900.00% sys, 40.00% idle\n",
+		"Processes: 512 total\n",
+		"",
+	} {
+		if user, sys := parseMacTopSplit(in); user != nil || sys != nil {
+			t.Errorf("parseMacTopSplit(%q) should refuse, got %v/%v", in, user, sys)
+		}
+	}
+}

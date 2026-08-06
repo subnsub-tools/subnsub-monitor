@@ -282,10 +282,20 @@ func parseMacTopBusy(out string) (*float64, bool) {
 	return fp(round2(busy)), true
 }
 
-func macTopIdle(rest string) (float64, bool) {
+func macTopIdle(rest string) (float64, bool) { return macTopShare(rest, "idle") }
+
+// One named share off a `CPU usage: 3.70% user, 8.64% sys, 87.65% idle` line.
+//
+// Where Linux differences cumulative jiffies, macOS states the split outright
+// on the line the busy figure already comes from — so the two platforms reach
+// the same four fields by different routes, and this one costs nothing beyond
+// reading a line that was already read. There is no iowait or steal here and
+// none is invented: the fields stay absent, which is what every consumer on
+// this wire treats as "this platform cannot say".
+func macTopShare(rest, label string) (float64, bool) {
 	for _, part := range strings.Split(rest, ",") {
 		f := strings.Fields(part)
-		if len(f) != 2 || f[1] != "idle" || !strings.HasSuffix(f[0], "%") {
+		if len(f) != 2 || f[1] != label || !strings.HasSuffix(f[0], "%") {
 			continue
 		}
 		n, err := strconv.ParseFloat(strings.TrimSuffix(f[0], "%"), 64)
@@ -295,6 +305,32 @@ func macTopIdle(rest string) (float64, bool) {
 		return n, true
 	}
 	return 0, false
+}
+
+// user and sys off the LAST `CPU usage:` line — the same frame parseMacTopBusy
+// takes its idle figure from. `top -l 2` prints two: the first covers the whole
+// time since boot and is the average that makes a machine hammered last week
+// look permanently busy, which is exactly the reading system.go refuses.
+//
+// Anything unreadable comes back nil rather than zero, and the two travel
+// together: a split where one half parsed and the other did not is not a split.
+func parseMacTopSplit(out string) (user, sys *float64) {
+	var last string
+	for _, line := range strings.Split(out, "\n") {
+		_, rest, found := strings.Cut(line, "CPU usage:")
+		if found {
+			last = rest
+		}
+	}
+	if last == "" {
+		return nil, nil
+	}
+	u, okU := macTopShare(last, "user")
+	s, okS := macTopShare(last, "sys")
+	if !okU || !okS {
+		return nil, nil
+	}
+	return fp(round2(u)), fp(round2(s))
 }
 
 // `netstat -ibn` — the interface table with byte counters, nothing resolved.

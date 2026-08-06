@@ -47,6 +47,7 @@ package main
 //	               it does not know.
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -118,6 +119,14 @@ func systemSnapshot() System {
 	// walk) both live behind APIs this file has stayed out of; named, not faked.
 	s.miss(mNetwork)
 	s.miss(mProcs)
+	// Disk throughput needs a performance counter or an IOCTL per volume, both
+	// of them behind DLLs this file deliberately does not load (see the header
+	// on why it uses kernel32 and ntdll and nothing else). The non-root volumes
+	// are absent for a smaller reason: enumerating them is GetLogicalDriveStrings
+	// plus a GetDiskFreeSpaceEx each, which is reachable — but this platform has
+	// no published build to ship it in (2026-08-01), so it stays unwritten
+	// rather than untested.
+	s.miss(mDiskIO)
 
 	s.OK = s.CPUPercent != nil || s.MemUsedPercent != nil ||
 		s.UptimeSec != nil || s.DiskUsedPercent != nil
@@ -171,6 +180,13 @@ func winCPU(s *System) {
 	}
 	total := filetimeF(kernel) + filetimeF(user)
 	busy := total - filetimeF(idle)
+	// The same split Linux reads out of /proc/stat, as far as this API goes:
+	// user time is its own bucket, and kernel-minus-idle is what Unix calls
+	// system. NaN for the other two — Windows keeps no iowait counter, and a
+	// steal figure would be a claim about a hypervisor this cannot see.
+	split := cpuPartsDelta([4]float64{filetimeF(user), filetimeF(kernel) - filetimeF(idle),
+		math.NaN(), math.NaN()}, total)
+	s.CPUUser, s.CPUSystem = split[0], split[1]
 	if p := cpuDelta(busy, total); p != nil {
 		s.CPUPercent = p
 	} else {

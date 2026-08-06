@@ -77,6 +77,12 @@ const (
 	macNetstat = "/usr/sbin/netstat"
 )
 
+// getfsstat's MNT_NOWAIT flag, spelled out because the syscall package does
+// not export it on darwin (x/sys/unix does, and adding that dependency is the
+// thing this build will not do — see the header). 2, from <sys/mount.h>,
+// unchanged since 4.4BSD.
+const mntNoWait = 2
+
 const macMaxOut = 64 << 10 // ~10k PIDs from ps; everything else is a few lines
 
 // Darwin's statfs has no f_frsize; f_bsize IS the fundamental block size here,
@@ -118,6 +124,13 @@ func systemSnapshot() System {
 	macLoad(&s, ctl)
 	macUptime(&s, ctl)
 	statfsRoot(&s)
+	macMounts(&s)
+	// Disk THROUGHPUT is a different matter from disk capacity, and macOS has
+	// no cgo-free counter for it: the figure lives behind IOKit, and the one
+	// tool that prints it (`iostat`) has to be given a sampling window, which
+	// would put a SECOND deliberate one-second wait next to top's. Named as
+	// missing rather than left blank — an absent rate reads as a quiet disk.
+	s.miss(mDiskIO)
 	macNet(&s, net, netAt)
 	macProcs(&s, pids)
 
@@ -229,11 +242,71 @@ func runMacTool(bin string, args []string, deadline time.Duration, tolerateExit 
 }
 
 func macCPU(s *System, out string) {
+	// The split is read even when the busy figure is refused: they come off
+	// different lines of the same output, and one unreadable frame does not
+	// make the other wrong.
+	s.CPUUser, s.CPUSystem = parseMacTopSplit(out)
 	if p, ok := parseMacTopBusy(out); ok {
 		s.CPUPercent = p
 		return
 	}
 	s.miss(mCPU)
+}
+
+// The filesystems other than root, from getfsstat — one syscall that hands
+// back a full statfs per mount, so nothing here calls statfs a second time on
+// a path that might be a network volume with an absent server.
+//
+// MNT_NOWAIT for the same reason: the alternative asks every filesystem to
+// update its statistics first, which is a blocking round trip per network
+// mount. Cached figures a moment old are the right trade for a collector that
+// runs every second.
+func macMounts(s *System) { fillMounts(s, scanMacMounts) }
+
+func scanMacMounts() []Mount {
+	n, err := syscall.Getfsstat(nil, mntNoWait)
+	if err != nil || n <= 0 {
+		return nil
+	}
+	// Room for mounts that appeared between the count and the read; a list
+	// that grew past the buffer is simply truncated by the kernel.
+	buf := make([]syscall.Statfs_t, n+8)
+	n, err = syscall.Getfsstat(buf, mntNoWait)
+	if err != nil || n <= 0 {
+		return nil
+	}
+	var found []Mount
+	seenDev := make(map[string]bool, 8)
+	for i := 0; i < n && i < len(buf); i++ {
+		st := &buf[i]
+		path := cstr(st.Mntonname[:])
+		fstype := cstr(st.Fstypename[:])
+		dev := cstr(st.Mntfromname[:])
+		if path == "/" || !realFsTypes[fstype] || dev == "" || seenDev[dev] {
+			continue
+		}
+		seenDev[dev] = true
+		total, used, usedPct, okFS := statfsCalc(st)
+		if !okFS {
+			continue
+		}
+		found = append(found, Mount{Path: path, Total: fp(total), Used: fp(used), UsedPercent: usedPct})
+	}
+	return found
+}
+
+// A fixed-width C string field. Cut at the first NUL — the rest of the array is
+// whatever was in that memory, and a Go string built from the whole field
+// carries it onto the wire.
+func cstr(b []int8) string {
+	out := make([]byte, 0, len(b))
+	for _, c := range b {
+		if c == 0 {
+			break
+		}
+		out = append(out, byte(c))
+	}
+	return string(out)
 }
 
 // Total from hw.memsize (exact bytes, straight from the kernel), the available
