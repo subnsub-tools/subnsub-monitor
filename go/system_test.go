@@ -205,11 +205,15 @@ func TestSnapshotCarriesNoIdentity(t *testing.T) {
 		//                counters already came from
 		//   mounts       the OTHER filesystems. The one entry here carrying a
 		//                string from the machine, and the reason foldMountPath
-		//                exists: a path is cut to three segments and anything
-		//                under a home directory collapses to the home, so a
-		//                disk can be named without naming a person. The test
-		//                above asserts exactly that against this box's own
-		//                $HOME, and TestFoldMountPath does it exhaustively.
+		//                exists. What that fold promises is narrower than "no
+		//                identifying strings", and mounts.go says so at length:
+		//                the segments an OS GENERATES from an account — the user
+		//                under a home directory, the account under an automount
+		//                root, the label on a removable volume — are dropped,
+		//                while a mount point somebody chose the words for is
+		//                sent as written. The test above holds the first half
+		//                against this box's own $HOME; TestFoldMountPath does it
+		//                exhaustively.
 		"cpu_user": true, "cpu_system": true, "cpu_iowait": true, "cpu_steal": true,
 		"mem_available": true, "mem_cached": true,
 		"swap_in_bps": true, "swap_out_bps": true,
@@ -373,6 +377,26 @@ func TestCPUPartsDeltaRejectsResetsAndImpossibleShares(t *testing.T) {
 	// replaced. Not a negative share of the CPU.
 	if got := cpuPartsDelta([4]float64{10, 5, 1, 0}, 2000); got[0] != nil {
 		t.Errorf("a reset counter must report nothing, got %v", *got[0])
+	}
+
+	// ALL FOUR go, not just the one that went backwards. They come off a
+	// single line of a single file, so one bucket resetting means the line is
+	// from a different epoch — and the buckets whose arithmetic still works
+	// would be a split assembled from two intervals and presented as one.
+	resetCPUParts()
+	cpuPartsDelta([4]float64{100, 50, 10, 5}, 1000)
+	got := cpuPartsDelta([4]float64{200, 50, 10, 5}, 2000) // user grew, system flat, iowait…
+	if got[0] == nil {
+		t.Fatal("a clean interval should report")
+	}
+	resetCPUParts()
+	cpuPartsDelta([4]float64{100, 50, 10, 5}, 1000)
+	// …now the same interval with ONE bucket having gone backwards.
+	got = cpuPartsDelta([4]float64{200, 150, 1, 25}, 2000)
+	for i, v := range got {
+		if v != nil {
+			t.Errorf("bucket %d reported %v across a partial reset", i, *v)
+		}
 	}
 	resetCPUParts()
 	cpuPartsDelta([4]float64{0, 0, 0, 0}, 0)

@@ -527,7 +527,10 @@ func TestMountPathsAreFoldedOnArrival(t *testing.T) {
 			t.Errorf("path over the cap: %q", m.Path)
 		}
 	}
-	want := map[string]bool{"/home": true, "/mnt/backup": true, "/var/lib/docker": true, "/mnt/gnp.disk": true}
+	// The bidi path is REFUSED outright rather than cleaned and kept: stripping
+	// the override would invent a path the machine never reported, and the
+	// helper — which folds the raw string — would have folded it differently.
+	want := map[string]bool{"/home": true, "/mnt/backup": true, "/var/lib/docker": true}
 	for _, m := range r.System.Mounts {
 		// Duplicates collapse onto the WORST reading: /home/alice is at 20% and
 		// /home/bob at 97%, and which one a watcher sees must not depend on the
@@ -542,7 +545,25 @@ func TestMountPathsAreFoldedOnArrival(t *testing.T) {
 		}
 	}
 	if len(paths) != len(want) {
-		t.Errorf("want %d rows (two homes folding onto one, root and .. refused), got %v", len(want), paths)
+		t.Errorf("want %d rows (two homes folding onto one; root, .. and the bidi path refused), got %v", len(want), paths)
+	}
+
+	// Invisible characters must not be able to walk a path past an anchor.
+	// `/ho<ZWSP>me/alice` does not match /home, so a rule that stripped the
+	// character and folded what was left kept `alice`; refusing the path
+	// outright is what closes it.
+	body = `{"providers":[{"id":"codex","ok":true,"limits":[{"used_percent":1}]}],
+	  "system":{"platform":"linux","cpu_percent":40,"mounts":[
+	    {"path":"/ho\u200bme/alice","total":1000000000},
+	    {"path":"/ho\u202eme/alice","total":1000000000},
+	    {"path":"/mnt\u2028/data","total":1000000000},
+	    {"path":"/mnt/ok","total":1000000000}]}}`
+	_, r, _ = cleanReading([]byte(body))
+	if r.System == nil || r.System.CPUPct == nil {
+		t.Fatal("a refused path must not sink the system block")
+	}
+	if len(r.System.Mounts) != 1 || r.System.Mounts[0].Path != "/mnt/ok" {
+		t.Errorf("invisible characters walked a path past its anchor: %+v", r.System.Mounts)
 	}
 
 	// The cap, and a list of nothing admissible.

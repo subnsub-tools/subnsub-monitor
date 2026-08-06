@@ -488,6 +488,12 @@ CPU usage: 3.44% user, 6.89% sys, 89.65% idle
 // under a heading that no longer means what it says.
 func TestParseMacTopSplitRefusesPartialAndAbsent(t *testing.T) {
 	for _, in := range []string{
+		// The one this exists for: a COMPLETE frame, but only one of them.
+		// `top -l 2` prints the since-boot average first, so output cut short
+		// after a single frame would hand that average over as the current
+		// split — a plausible number for a machine hammered last week and idle
+		// now, and entirely wrong.
+		"Processes: 512 total\nCPU usage: 40.00% user, 20.00% sys, 40.00% idle\n",
 		"CPU usage: 40.00% user, 40.00% idle\n",
 		"CPU usage: unavailable\n",
 		"CPU usage: 40.00% user, 900.00% sys, 40.00% idle\n",

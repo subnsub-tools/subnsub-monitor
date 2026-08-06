@@ -364,18 +364,28 @@ func cpuPartsDelta(parts [4]float64, total float64) [4]*float64 {
 	if dt <= 0 {
 		return out
 	}
+	// ALL OR NOTHING across the four. They are read from one line of one file,
+	// so a bucket that went backwards means the whole line came from a
+	// different epoch — a container's view being replaced, a counter reset —
+	// and the buckets that happen to still make arithmetic sense would be a
+	// split from two different intervals presented as one.
+	var d [4]float64
+	for i, v := range parts {
+		if math.IsNaN(v) || math.IsNaN(prevParts[i]) {
+			continue // this platform does not keep this counter at all
+		}
+		d[i] = v - prevParts[i]
+		// One that outran the total means the two were read at different
+		// instants; one that went backwards is a reset.
+		if d[i] < 0 || d[i] > dt {
+			return out
+		}
+	}
 	for i, v := range parts {
 		if math.IsNaN(v) || math.IsNaN(prevParts[i]) {
 			continue
 		}
-		d := v - prevParts[i]
-		// A counter that went backwards is a reset, not a negative share of the
-		// CPU; one that outran the total means the two were read at different
-		// instants. Neither is a reading.
-		if d < 0 || d > dt {
-			continue
-		}
-		out[i] = fp(round2(d / dt * 100))
+		out[i] = fp(round2(d[i] / dt * 100))
 	}
 	return out
 }
@@ -394,16 +404,36 @@ type pairRate struct {
 	sync.Mutex
 	valid    bool
 	a, b, at float64
+	// Which population the counters were summed over, when the caller has one
+	// — see deltaOver. Empty for the callers whose set cannot change.
+	key string
 }
 
 func (p *pairRate) delta(a, b, at float64) (aps, bps *float64) {
+	return p.deltaOver("", a, b, at)
+}
+
+// The same rate, over a named POPULATION — the set of devices or interfaces the
+// two counters were summed across. A different population is a different sum,
+// and differencing across the change invents traffic that never happened: plug
+// in a disk that has served a terabyte and its whole lifetime counter lands in
+// one second of I/O.
+//
+// The key is compared, the baseline is dropped and the new one is seeded all
+// inside ONE critical section, which is the half that a first attempt at this
+// got wrong: with the membership check in its own lock, two collections can
+// interleave so that the one which noticed the change publishes the new key
+// first and the other then differences the new population against the old
+// baseline — producing exactly the spike the check exists to prevent.
+func (p *pairRate) deltaOver(key string, a, b, at float64) (aps, bps *float64) {
 	p.Lock()
 	defer p.Unlock()
 
 	prevValid, prevA, prevB, prevAt := p.valid, p.a, p.b, p.at
-	p.valid, p.a, p.b, p.at = true, a, b, at
+	sameKey := p.key == key
+	p.valid, p.a, p.b, p.at, p.key = true, a, b, at, key
 
-	if !prevValid {
+	if !prevValid || !sameKey {
 		return nil, nil
 	}
 	dt := at - prevAt
@@ -420,7 +450,7 @@ func (p *pairRate) delta(a, b, at float64) (aps, bps *float64) {
 func (p *pairRate) reset() {
 	p.Lock()
 	defer p.Unlock()
-	p.valid, p.a, p.b, p.at = false, 0, 0, 0
+	p.valid, p.a, p.b, p.at, p.key = false, 0, 0, 0, ""
 }
 
 var netPrev pairRate

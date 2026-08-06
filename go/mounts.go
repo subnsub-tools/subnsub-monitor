@@ -10,6 +10,20 @@ package main
 // real problem that a root-only card cannot show — but to FOLD the path until
 // only the disk is left in it:
 //
+// WHAT THIS DOES AND DOES NOT PROMISE, stated plainly because a review read
+// the first version as claiming more than it delivers. The fold removes the
+// segments an operating system GENERATES from an identity — the username under
+// a home directory, the account under an automount root, the label on a
+// removable volume. It does NOT redact a name somebody chose to type: a
+// machine that mounts a disk at /srv/customer-acme sends /srv/customer-acme,
+// because that string is the answer to "which disk is full" and inventing a
+// number in its place would leave the section unable to do its job.
+//
+// That is a narrower promise than "no identifying strings", and it is the one
+// the code keeps. The escape hatch for anyone who wants the stricter version
+// is the same one the interface list has: a self-hosted relay, where none of
+// this reaches us at all.
+//
 //	/data                     → /data
 //	/mnt/backup               → /mnt/backup
 //	/home/alice               → /home
@@ -111,7 +125,7 @@ var realFsTypes = map[string]bool{
 // this builds for, so there is nothing to lose by saying no.
 func foldMountPath(p string) string {
 	p = strings.TrimSpace(p)
-	if p == "" || p == "/" {
+	if p == "" || p == "/" || pathHasBadRune(p) {
 		return ""
 	}
 	if !strings.HasPrefix(p, "/") {
@@ -148,6 +162,38 @@ func foldMountPath(p string) string {
 		return ""
 	}
 	return capMountPath("/" + strings.Join(segs, "/"))
+}
+
+// Characters a mount path may not contain: the C0 and C1 controls, and every
+// invisible or direction-changing mark that can make one string render as
+// another. Exactly the set the interface-name gate already refuses, and the
+// same set on all three sides of this protocol.
+//
+// REFUSED, not stripped, and that distinction is the bug this closes. The
+// relays used to remove these characters and then fold what was left, while
+// the helper folded the raw string — so `/ho<ZWSP>me/alice` folded to /home on
+// one side and kept `alice` on the other. Worse, stripping is a rewrite: it
+// invents a path the machine never reported and then reasons about it. A path
+// with a zero-width space in it is not a path this can vouch for.
+func pathHasBadRune(p string) bool {
+	for _, r := range p {
+		switch {
+		case r < 0x20, r >= 0x7f && r <= 0x9f:
+			return true
+		case r == 0x061c, r >= 0x200b && r <= 0x200f:
+			return true
+		case r == 0x2028, r == 0x2029, r >= 0x202a && r <= 0x202e:
+			return true
+		case r >= 0x2060 && r <= 0x2064, r >= 0x2066 && r <= 0x2069, r == 0xfeff:
+			return true
+		case r == 0xfffd:
+			// A replacement character means the path already lost information
+			// somewhere upstream; what it looked like originally is not
+			// recoverable and not something to guess at.
+			return true
+		}
+	}
+	return false
 }
 
 // `D:` or `D:\` and nothing else. Deliberately not "starts with a letter and a
@@ -195,26 +241,46 @@ const mountsRefreshSec = 30
 
 var mountsCache struct {
 	sync.Mutex
-	at   float64
-	out  []Mount
-	done bool
+	at      float64 // when the cached scan FINISHED
+	started float64 // when it began — see fillMounts
+	out     []Mount
+	done    bool
 }
 
 // Run the platform's scan, or hand back the last one if it is still fresh.
 // Refusing to hold a lock across the scan is deliberate: two collections
 // racing is a wasted scan, while a scan holding the lock would make one slow
 // filesystem block every other reading in the process.
-func fillMounts(s *System, scan func() []Mount) {
-	now := now()
+//
+// That freedom needs two rules, and neither was here at first:
+//
+//	A LATER SCAN WINS, decided by when each one STARTED. Two collections can
+//	overlap, and without this the one that began first and finished last
+//	overwrites the fresher answer with its own older view of the mount table.
+//
+//	A FAILED SCAN IS NOT AN ANSWER. `scan` says whether it could read the
+//	mount table at all, because "this machine has no filesystems besides root"
+//	and "/proc/mounts could not be opened" are different facts that produce the
+//	same empty slice — and caching the second as the first would hide a masked
+//	/proc for thirty seconds at a time instead of retrying.
+func fillMounts(s *System, scan func() ([]Mount, bool)) {
+	started := now()
 	mountsCache.Lock()
-	fresh := mountsCache.done && now-mountsCache.at < mountsRefreshSec && now >= mountsCache.at
+	fresh := mountsCache.done && started-mountsCache.at < mountsRefreshSec && started >= mountsCache.at
 	out := mountsCache.out
 	mountsCache.Unlock()
 
 	if !fresh {
-		out = capMounts(scan())
+		list, ok := scan()
 		mountsCache.Lock()
-		mountsCache.at, mountsCache.out, mountsCache.done = now, out, true
+		if ok && (!mountsCache.done || started >= mountsCache.started) {
+			mountsCache.started, mountsCache.at = started, now()
+			mountsCache.out, mountsCache.done = capMounts(list), true
+		}
+		// Whatever the cache holds now: this scan's result if it won, the
+		// fresher concurrent one if it did not, the previous answer if this
+		// scan failed.
+		out = mountsCache.out
 		mountsCache.Unlock()
 	}
 	if len(out) > 0 {

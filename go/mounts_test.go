@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"runtime"
+	"sync"
+	"testing"
+)
 
 // The privacy rule, exhaustively. Every case here is a path a real machine
 // mounts something on, and the assertion is that what leaves this helper
@@ -206,9 +210,9 @@ func TestUnescapeMountField(t *testing.T) {
 func TestFillMountsThrottlesScans(t *testing.T) {
 	resetMountsCache()
 	scans := 0
-	scan := func() []Mount {
+	scan := func() ([]Mount, bool) {
 		scans++
-		return []Mount{{Path: "/mnt/data", Total: fp(10)}}
+		return []Mount{{Path: "/mnt/data", Total: fp(10)}}, true
 	}
 	var a, b System
 	fillMounts(&a, scan)
@@ -226,9 +230,7 @@ func TestFillMountsThrottlesScans(t *testing.T) {
 	if b.Mounts[0].Path != "/mnt/data" {
 		t.Fatal("snapshots share a backing array")
 	}
-	mountsCache.Lock()
-	mountsCache.at -= mountsRefreshSec + 1
-	mountsCache.Unlock()
+	expireMountsCache()
 	var c System
 	fillMounts(&c, scan)
 	if scans != 2 {
@@ -240,19 +242,116 @@ func TestFillMountsThrottlesScans(t *testing.T) {
 // the cache — an unmounted disk should disappear from the card.
 func TestFillMountsForgetsUnmounted(t *testing.T) {
 	resetMountsCache()
-	fillMounts(&System{}, func() []Mount { return []Mount{{Path: "/mnt/gone", Total: fp(1)}} })
-	mountsCache.Lock()
-	mountsCache.at -= mountsRefreshSec + 1
-	mountsCache.Unlock()
+	fillMounts(&System{}, func() ([]Mount, bool) { return []Mount{{Path: "/mnt/gone", Total: fp(1)}}, true })
+	expireMountsCache()
 	var s System
-	fillMounts(&s, func() []Mount { return nil })
+	fillMounts(&s, func() ([]Mount, bool) { return nil, true })
 	if len(s.Mounts) != 0 {
 		t.Fatalf("want no rows, got %+v", s.Mounts)
 	}
 }
 
+// A scan that could not READ the mount table is not a machine with no extra
+// filesystems. Caching the first as the second would hide a masked /proc for
+// thirty seconds at a time instead of retrying.
+func TestFillMountsKeepsTheLastGoodAnswerWhenAScanFails(t *testing.T) {
+	resetMountsCache()
+	fillMounts(&System{}, func() ([]Mount, bool) { return []Mount{{Path: "/mnt/data", Total: fp(1)}}, true })
+	expireMountsCache()
+	var s System
+	fillMounts(&s, func() ([]Mount, bool) { return nil, false })
+	if len(s.Mounts) != 1 || s.Mounts[0].Path != "/mnt/data" {
+		t.Fatalf("a failed scan replaced the last good answer: %+v", s.Mounts)
+	}
+	// …and it did not become the cached answer either, so the next collection
+	// tries again rather than serving the failure for the rest of the window.
+	mountsCache.Lock()
+	cachedAt := mountsCache.at
+	mountsCache.Unlock()
+	var s2 System
+	scans := 0
+	fillMounts(&s2, func() ([]Mount, bool) { scans++; return []Mount{{Path: "/mnt/data2"}}, true })
+	if scans != 1 {
+		t.Error("a failed scan was cached as a fresh answer")
+	}
+	mountsCache.Lock()
+	moved := mountsCache.at > cachedAt
+	mountsCache.Unlock()
+	if !moved {
+		t.Error("the successful retry did not refresh the cache")
+	}
+}
+
+// Two collections can overlap, and the one that STARTED first must not
+// overwrite the fresher answer just because it finished last.
+func TestFillMountsPrefersTheLaterScan(t *testing.T) {
+	resetMountsCache()
+	var wg sync.WaitGroup
+	release := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		var s System
+		// Starts first, finishes last.
+		fillMounts(&s, func() ([]Mount, bool) {
+			<-release
+			return []Mount{{Path: "/mnt/stale"}}, true
+		})
+	}()
+	// Let the slow scan start, then run a fast one to completion behind it.
+	for i := 0; i < 1000; i++ {
+		runtime.Gosched()
+	}
+	var fast System
+	fillMounts(&fast, func() ([]Mount, bool) { return []Mount{{Path: "/mnt/fresh"}}, true })
+	close(release)
+	wg.Wait()
+
+	mountsCache.Lock()
+	got := append([]Mount(nil), mountsCache.out...)
+	mountsCache.Unlock()
+	if len(got) != 1 || got[0].Path != "/mnt/fresh" {
+		t.Fatalf("an older scan overwrote a newer one: %+v", got)
+	}
+}
+
+// Both windows the cache checks move together — a helper so the tests do not
+// each have to know which fields those are.
+func expireMountsCache() {
+	mountsCache.Lock()
+	mountsCache.at -= mountsRefreshSec + 1
+	mountsCache.started -= mountsRefreshSec + 1
+	mountsCache.Unlock()
+}
+
 func resetMountsCache() {
 	mountsCache.Lock()
-	mountsCache.at, mountsCache.out, mountsCache.done = 0, nil, false
+	mountsCache.at, mountsCache.started, mountsCache.out, mountsCache.done = 0, 0, nil, false
 	mountsCache.Unlock()
+}
+
+// Invisible and direction-changing characters are REFUSED, not stripped. A
+// rule that removed them and folded the remainder let `/ho<ZWSP>me/alice` past
+// the /home anchor with the username intact — and it made three sides of this
+// protocol disagree about what the same string means.
+func TestFoldMountPathRefusesInvisibleCharacters(t *testing.T) {
+	for _, in := range []string{
+		"/ho\u200bme/alice", // zero-width space walks past the anchor
+		"/ho\u200dme/alice", // zero-width joiner, same trick
+		"/ho\u202eme/alice", // right-to-left override
+		"/mnt\u2028/data",   // line separator
+		"/mnt/\u061cdata",   // arabic letter mark
+		"/mnt/\u2060data",   // word joiner
+		"/mnt/\ufeffdata",   // byte order mark
+		"/mnt/data\ufffd",   // information already lost upstream
+		"/mnt/\u0007data",   // a bell, in a path
+	} {
+		if got := foldMountPath(in); got != "" {
+			t.Errorf("foldMountPath(%q) = %q, want refusal", in, got)
+		}
+	}
+	// An ordinary non-ASCII path is not affected by any of that.
+	if got := foldMountPath("/mnt/备份"); got != "/mnt/备份" {
+		t.Errorf("a legitimate non-ASCII path was refused: %q", got)
+	}
 }

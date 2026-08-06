@@ -245,8 +245,21 @@ desktop Linux automounts under, and the macOS folder where every external disk
 lands under whatever label its owner typed — rather than on depth alone, which
 cannot tell `/var/lib/docker` (a disk) from `/home/alice/projects` (a person).
 A path with no leading slash has to be a bare Windows volume root or it is
-refused outright. `/System/Volumes/Data` still goes out whole: every Mac has
-it and it names nobody.
+refused outright, and any path carrying a control character, a zero-width mark
+or a bidi override is refused rather than cleaned up — stripping those would
+invent a path the machine never reported, and the agent and the relay would
+then disagree about what the same string means.
+`/System/Volumes/Data` still goes out whole: every Mac has it and it names
+nobody.
+
+**What the fold does and does not promise.** It removes the segments an
+operating system *generates* from an identity: the username under a home
+directory, the account under an automount root, the label on a removable
+volume. It does **not** redact a name somebody chose to type — a disk mounted
+at `/srv/customer-acme` is reported as `/srv/customer-acme`, because that
+string is the answer to "which disk is full" and a number in its place would
+leave the section unable to do its job. If you want the stricter version, this
+is the same answer as for the interface list: run the relay yourself.
 
 Root has its own fields and is not repeated in the list, and the list keeps
 the FULLEST filesystems rather than the largest — a 100%-full 2 GB partition
