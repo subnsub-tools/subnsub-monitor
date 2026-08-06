@@ -315,16 +315,22 @@ func macTopShare(rest, label string) (float64, bool) {
 // Anything unreadable comes back nil rather than zero, and the two travel
 // together: a split where one half parsed and the other did not is not a split.
 func parseMacTopSplit(out string) (user, sys *float64) {
-	var last string
+	var frames []string
 	for _, line := range strings.Split(out, "\n") {
 		_, rest, found := strings.Cut(line, "CPU usage:")
 		if found {
-			last = rest
+			frames = append(frames, rest)
 		}
 	}
-	if last == "" {
+	// TWO FRAMES OR NOTHING, the same bar parseMacTopBusy sets and for the same
+	// reason: `top -l 2` prints the since-boot average first, and output cut
+	// short after one frame would hand that average over as the current split.
+	// It is a plausible number for a machine that was hammered last week and is
+	// idle now, and it is entirely wrong.
+	if len(frames) < 2 {
 		return nil, nil
 	}
+	last := frames[len(frames)-1]
 	u, okU := macTopShare(last, "user")
 	s, okS := macTopShare(last, "sys")
 	if !okU || !okS {

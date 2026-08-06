@@ -8,8 +8,10 @@ package main
 
 import (
 	"os"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 )
 
@@ -372,6 +374,15 @@ func parseNonNeg(fields ...string) ([]float64, bool) {
 // always too big. So the sum is over WHOLE devices only (the ones with a
 // directory in /sys/block, which excludes partitions) minus the virtual layers
 // that stack on top of them.
+// Which whole devices the last disk sum covered. Package state beside the
+// differencer it guards, for the same reason every other "previous reading"
+// here is: the sampler and the push loop both reach this code, and the answer
+// has to be the same one whichever calls first.
+var diskSet struct {
+	sync.Mutex
+	sig string
+}
+
 func linuxDiskIO(s *System) {
 	blocks, err := os.ReadDir("/sys/block")
 	if err != nil {
@@ -399,6 +410,9 @@ func linuxDiskIO(s *System) {
 	}
 	var read, written float64
 	var sawAny bool
+	// Which devices this sum is over, so the next one can tell whether it is
+	// comparing like with like — see below.
+	seen := make([]string, 0, len(whole))
 	for _, line := range strings.Split(raw, "\n") {
 		f := strings.Fields(line)
 		if len(f) < 10 || !whole[f[2]] {
@@ -410,9 +424,30 @@ func linuxDiskIO(s *System) {
 		}
 		read += v[0] * 512
 		written += v[1] * 512
+		seen = append(seen, f[2])
 		sawAny = true
 	}
 	if !sawAny {
+		s.miss(mDiskIO)
+		return
+	}
+	// A DIFFERENT SET OF DEVICES IS A DIFFERENT SUM, and differencing across
+	// the change invents traffic that never happened: plug in a disk that has
+	// served a terabyte since its own boot and its whole lifetime counter
+	// lands in one second's worth of I/O. The counters-went-backwards guard in
+	// pairRate catches removals only when the loss outweighs everything else's
+	// growth, and catches additions never — so the baseline is dropped
+	// outright whenever the membership changes, and the next sample starts a
+	// clean interval. One missing reading beats one fabricated spike.
+	sort.Strings(seen)
+	sig := strings.Join(seen, ",")
+	diskSet.Lock()
+	changed := diskSet.sig != sig
+	diskSet.sig = sig
+	diskSet.Unlock()
+	if changed {
+		diskIOPrev.reset()
+		diskIOPrev.delta(read, written, now())
 		s.miss(mDiskIO)
 		return
 	}
