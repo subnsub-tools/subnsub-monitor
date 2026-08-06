@@ -328,6 +328,10 @@ func macMem(s *System, ctl map[string]string, vmst string) {
 	}
 	s.MemTotal = fp(total)
 	s.MemUsedPercent = pct(total-avail, total)
+	// The same figure the percentage is computed against, sent outright: this
+	// platform can answer "how much is left" as honestly as Linux can, and only
+	// the cache half (which vm_stat splits differently) stays missing.
+	s.MemAvailable = fp(avail)
 }
 
 func macLoad(s *System, ctl map[string]string) {

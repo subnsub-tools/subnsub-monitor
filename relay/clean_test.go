@@ -505,7 +505,7 @@ func TestMountPathsAreFoldedOnArrival(t *testing.T) {
 	    {"path":"/home/alice/projects/client-acme","total":500000000000,"used":100000000000,"used_percent":20},
 	    {"path":"/mnt/backup","total":2000000000000,"used":1000000000000,"used_percent":50},
 	    {"path":"/var/lib/docker/overlay2/f3a9/merged","total":100000000000},
-	    {"path":"/home/bob","total":1000000000},
+	    {"path":"/home/bob","total":1000000000,"used_percent":97},
 	    {"path":"/a/../../etc/shadow","total":1000000000},
 	    {"path":"/","total":9000000000},
 	    {"path":"/mnt/‮gnp.disk","total":1000000000}]}}`
@@ -528,6 +528,14 @@ func TestMountPathsAreFoldedOnArrival(t *testing.T) {
 		}
 	}
 	want := map[string]bool{"/home": true, "/mnt/backup": true, "/var/lib/docker": true, "/mnt/gnp.disk": true}
+	for _, m := range r.System.Mounts {
+		// Duplicates collapse onto the WORST reading: /home/alice is at 20% and
+		// /home/bob at 97%, and which one a watcher sees must not depend on the
+		// order the machine happened to list its mounts in.
+		if m.Path == "/home" && (m.UsedPct == nil || *m.UsedPct != 97) {
+			t.Errorf("/home should carry the worst of its duplicates, got %v", m.UsedPct)
+		}
+	}
 	for _, p := range paths {
 		if !want[p] {
 			t.Errorf("unexpected path %q (all: %v)", p, paths)
@@ -547,6 +555,54 @@ func TestMountPathsAreFoldedOnArrival(t *testing.T) {
 	_, r, _ = cleanReading([]byte(body))
 	if len(r.System.Mounts) != maxMounts {
 		t.Errorf("want %d rows, got %d", maxMounts, len(r.System.Mounts))
+	}
+
+	// The cap keeps what needs attention rather than what arrived first: a
+	// 100%-full 2 GB partition behind eight healthy 4 TB volumes used to be
+	// dropped, and the dashboard's own warning went with it.
+	var crowded []string
+	for i := 0; i < maxMounts; i++ {
+		crowded = append(crowded, fmt.Sprintf(`{"path":"/mnt/big%d","total":4000000000000,"used_percent":12}`, i))
+	}
+	crowded = append(crowded, `{"path":"/mnt/tiny","total":2000000000,"used_percent":100}`)
+	body = `{"providers":[{"id":"codex","ok":true,"limits":[{"used_percent":1}]}],
+	  "system":{"platform":"linux","mounts":[` + strings.Join(crowded, ",") + `]}}`
+	_, r, _ = cleanReading([]byte(body))
+	var keptTiny bool
+	for _, m := range r.System.Mounts {
+		if m.Path == "/mnt/tiny" {
+			keptTiny = true
+		}
+	}
+	if !keptTiny {
+		t.Error("the full partition was dropped in favour of larger healthy ones")
+	}
+
+	// The anchors the first version lacked, and the shapes it let through.
+	body = `{"providers":[{"id":"codex","ok":true,"limits":[{"used_percent":1}]}],
+	  "system":{"platform":"linux","mounts":[
+	    {"path":"/root/projects/acme","total":1000000000},
+	    {"path":"/run/media/alice/usb-stick","total":1000000000},
+	    {"path":"/Volumes/Alice Tax Backup","total":1000000000},
+	    {"path":"/System/Volumes/Data","total":1000000000},
+	    {"path":"alice/private-project","total":1000000000},
+	    {"path":"C:\\Users\\alice","total":1000000000},
+	    {"path":"D:\\","total":1000000000}]}}`
+	_, r, _ = cleanReading([]byte(body))
+	got := map[string]bool{}
+	for _, m := range r.System.Mounts {
+		got[m.Path] = true
+	}
+	for _, p := range []string{"/root", "/run/media", "/Volumes", "/System/Volumes/Data", `D:\`} {
+		if !got[p] {
+			t.Errorf("want %q admitted, got %v", p, got)
+		}
+	}
+	blob2, _ := json.Marshal(r)
+	for _, leak := range []string{"alice", "Alice", "acme", "private-project", "Users"} {
+		if strings.Contains(string(blob2), leak) {
+			t.Errorf("%q survived the fold: %s", leak, blob2)
+		}
 	}
 
 	body = `{"providers":[{"id":"codex","ok":true,"limits":[{"used_percent":1}]}],

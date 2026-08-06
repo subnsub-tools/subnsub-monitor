@@ -30,11 +30,29 @@ func TestFoldMountPath(t *testing.T) {
 		{"/", ""},
 		{"", ""},
 		{"   ", ""},
-		{"relative/path", "relative/path"},
 		{"/a/../../etc", ""},
 
-		// Windows volume roots have no segments to walk and no home to hide.
+		// Anchors beyond the two home directories, all of them places where the
+		// NEXT segment is generated from an identity rather than chosen for a
+		// disk. Depth alone kept these, which is what a review caught.
+		{"/root", "/root"},
+		{"/root/projects/acme", "/root"},
+		{"/media/alice/usb-stick", "/media"},
+		{"/run/media/alice/usb-stick", "/run/media"},
+		{"/Volumes/Alice Tax Backup", "/Volumes"},
+
+		// …and the paths that still go out whole, because a mount point somebody
+		// chose for a disk is the thing this section exists to report.
+		{"/mnt/backup-acme", "/mnt/backup-acme"},
+		{"/srv/data", "/srv/data"},
+
+		// Windows volume roots, and ONLY volume roots.
 		{`D:\`, `D:\`},
+		{"D:", "D:"},
+		{`d:/`, `d:/`},
+		{`C:\Users\alice`, ""},
+		{"relative/path", ""},
+		{"alice/private-project", ""},
 
 		// Slash noise the kernel is entitled to produce.
 		{"//mnt//backup//", "/mnt/backup"},
@@ -78,37 +96,67 @@ func TestFoldMountPathCaps(t *testing.T) {
 
 // Folding is lossy on purpose, so duplicates are the normal case rather than
 // an edge one: two users' home directories and four btrfs subvolumes all
-// collapse onto one row, and the card has nothing to gain from repeating it.
-func TestCapMountsFoldsDuplicatesAndKeepsBiggest(t *testing.T) {
+// collapse onto one row. The row that survives is the FULLEST — they are not
+// necessarily the same filesystem, and first-one-wins hid a 99% disk behind a
+// 10% one depending on mount order.
+func TestCapMountsFoldsDuplicatesOntoTheWorstReading(t *testing.T) {
 	in := []Mount{
-		{Path: "/home/alice", Total: fp(100)},
-		{Path: "/home/bob", Total: fp(200)},
-		{Path: "/mnt/data", Total: fp(300)},
+		{Path: "/home/alice", Total: fp(100), UsedPercent: fp(10)},
+		{Path: "/home/bob", Total: fp(200), UsedPercent: fp(99)},
+		{Path: "/mnt/data", Total: fp(300), UsedPercent: fp(50)},
 	}
 	got := capMounts(in)
 	if len(got) != 2 {
 		t.Fatalf("want 2 rows, got %d: %+v", len(got), got)
 	}
-	// First one wins, and the rows come back alphabetically.
-	if got[0].Path != "/home" || *got[0].Total != 100 {
-		t.Errorf("want /home at 100 first, got %+v", got[0])
+	if got[0].Path != "/home" || got[0].UsedPercent == nil || *got[0].UsedPercent != 99 {
+		t.Errorf("want /home at its worst (99%%), got %+v", got[0])
 	}
 	if got[1].Path != "/mnt/data" {
 		t.Errorf("want /mnt/data second, got %+v", got[1])
 	}
+	// Order must not decide the answer.
+	rev := capMounts([]Mount{in[1], in[0], in[2]})
+	if rev[0].UsedPercent == nil || *rev[0].UsedPercent != 99 {
+		t.Errorf("mount order changed the reading: %+v", rev[0])
+	}
 }
 
-func TestCapMountsKeepsTheBiggestUnderTheCap(t *testing.T) {
-	var in []Mount
-	for i := 0; i < maxMounts+6; i++ {
-		in = append(in, Mount{Path: "/mnt/d" + string(rune('a'+i)), Total: fp(float64(i))})
+// The cap keeps what needs attention, not what is largest: a small full
+// partition is exactly the row worth sending, and eight healthy volumes used
+// to push it off the list — out of the page's hot-flag reach with it.
+func TestCapMountsKeepsTheFullestNotTheBiggest(t *testing.T) {
+	in := []Mount{{Path: "/mnt/tiny", Total: fp(2e9), UsedPercent: fp(100)}}
+	for i := 0; i < maxMounts; i++ {
+		in = append(in, Mount{
+			Path:        "/mnt/big" + string(rune('a'+i)),
+			Total:       fp(4e12),
+			UsedPercent: fp(12),
+		})
 	}
 	got := capMounts(in)
 	if len(got) != maxMounts {
 		t.Fatalf("want %d rows, got %d", maxMounts, len(got))
 	}
-	// The smallest ones are the ones that went: every survivor is larger than
-	// the number of rows that were dropped.
+	for _, m := range got {
+		if m.Path == "/mnt/tiny" {
+			return
+		}
+	}
+	t.Errorf("the full partition was dropped in favour of larger healthy ones: %+v", got)
+}
+
+func TestCapMountsRanksBySizeAmongEquals(t *testing.T) {
+	var in []Mount
+	// Same fullness across the board, so size is the tie-break that decides.
+	for i := 0; i < maxMounts+6; i++ {
+		in = append(in, Mount{Path: "/mnt/d" + string(rune('a'+i)),
+			Total: fp(float64(i)), UsedPercent: fp(40)})
+	}
+	got := capMounts(in)
+	if len(got) != maxMounts {
+		t.Fatalf("want %d rows, got %d", maxMounts, len(got))
+	}
 	for _, m := range got {
 		if m.Total == nil || *m.Total < 6 {
 			t.Errorf("kept a small filesystem over a large one: %+v", m)

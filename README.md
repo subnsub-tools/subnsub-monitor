@@ -233,14 +233,26 @@ or it can describe a person, so it is cut to three segments and anything
 under a home directory collapses to the home itself:
 
 ```
-/mnt/backup               → /mnt/backup
-/var/lib/docker/overlay2  → /var/lib/docker
-/home/alice/projects/big  → /home
+/mnt/backup                 → /mnt/backup
+/var/lib/docker/overlay2    → /var/lib/docker
+/home/alice/projects/big    → /home
+/run/media/alice/usb-stick  → /run/media
+/Volumes/Alice Tax Backup   → /Volumes
 ```
 
-Root has its own fields and is not repeated in the list. The relay applies
-the same fold again on arrival — the agent's rule binds the agent, and
-anything else pushing at a relay is bound only by the relay's own whitelist.
+The fold is anchored on whole prefixes — the login directories, the roots
+desktop Linux automounts under, and the macOS folder where every external disk
+lands under whatever label its owner typed — rather than on depth alone, which
+cannot tell `/var/lib/docker` (a disk) from `/home/alice/projects` (a person).
+A path with no leading slash has to be a bare Windows volume root or it is
+refused outright. `/System/Volumes/Data` still goes out whole: every Mac has
+it and it names nobody.
+
+Root has its own fields and is not repeated in the list, and the list keeps
+the FULLEST filesystems rather than the largest — a 100%-full 2 GB partition
+is the row worth having. The relay applies the same fold again on arrival —
+the agent's rule binds the agent, and anything else pushing at a relay is
+bound only by the relay's own whitelist.
 
 **macOS** reads most of that through Apple's own command-line tools rather
 than in-process, and the reason is structural rather than lazy.

@@ -219,6 +219,10 @@ func winMem(s *System) {
 	}
 	s.MemTotal = fp(float64(m.TotalPhys))
 	s.MemUsedPercent = pct(float64(m.TotalPhys-m.AvailPhys), float64(m.TotalPhys))
+	// AvailPhys is exactly what MemAvailable means on Linux — what the OS will
+	// hand out without paging anything — so the field is filled rather than left
+	// to look like a platform limit it is not.
+	s.MemAvailable = fp(float64(m.AvailPhys))
 }
 
 // The system volume, which is what "/" means on the platforms with one.

@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"net"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -93,9 +94,21 @@ var knownMissing = map[string]bool{
 	"load": true, "uptime": true, "network": true, "procs": true,
 }
 
-// Where a user's own directory lives. A mount point under one of these keeps
-// the home and drops everything below it — see cleanMountPath.
-var mountHomeRoots = map[string]bool{"home": true, "Users": true}
+// Whole PREFIXES whose next segment is an identity rather than a disk: the
+// login directories, the roots desktop Linux automounts under
+// (/media/<user>/<label>), and the macOS folder where every external disk lands
+// under whatever label its owner typed. The helper's own list (mounts.go).
+//
+// Prefixes rather than segment names, because /System/Volumes/Data is where
+// macOS keeps its data volume on every machine ever made and names nobody.
+var mountAnchors = map[string]bool{
+	"/home": true, "/Users": true, "/root": true, "/export/home": true,
+	"/media": true, "/run/media": true, "/Volumes": true,
+}
+
+// `D:` or `D:\` and nothing else — deliberately not "a letter and a colon",
+// which `C:\Users\alice` also satisfies.
+var volumeRootRe = regexp.MustCompile(`^[A-Za-z]:[\\/]?$`)
 
 // One reading as this relay is willing to hold it. Pointers where absent and
 // zero are different claims, exactly as in the helper's own types.
@@ -327,10 +340,15 @@ func cleanMountPath(v string) string {
 	if s == "" || s == "/" {
 		return ""
 	}
-	// No leading slash means no segments to walk and no home to hide: a Windows
-	// volume root (`D:\`) is the shape that arrives this way.
+	// No leading slash gets exactly one shape: a Windows volume root. Anything
+	// else is refused rather than length-capped and passed through — the first
+	// version did the latter, which made `alice/private-project` a mount point
+	// as far as this relay was concerned.
 	if !strings.HasPrefix(s, "/") {
-		return capMountPath(s)
+		if volumeRootRe.MatchString(s) {
+			return s
+		}
+		return ""
 	}
 	segs := make([]string, 0, maxMountDepth)
 	for _, seg := range strings.Split(s, "/") {
@@ -343,7 +361,7 @@ func cleanMountPath(v string) string {
 			return ""
 		}
 		segs = append(segs, seg)
-		if mountHomeRoots[seg] || len(segs) >= maxMountDepth {
+		if mountAnchors["/"+strings.Join(segs, "/")] || len(segs) >= maxMountDepth {
 			break
 		}
 	}
@@ -362,9 +380,23 @@ func capMountPath(p string) string {
 	return string([]rune(p)[:maxMountPath-1]) + "…"
 }
 
-// The filesystem list, rebuilt row by row. Deduplicated on the FOLDED path —
-// folding is lossy on purpose, so two users' home directories and four btrfs
-// subvolumes all arrive as rows that mean the same thing.
+// How full a filesystem is, for RANKING only. A row with no percentage sorts
+// below every row that has one: it cannot be the answer to "what is about to
+// fill up", and calling it 0% would be that same claim in reverse.
+func mountFullness(m mount) float64 {
+	if m.UsedPct == nil {
+		return -1
+	}
+	return *m.UsedPct
+}
+
+// The filesystem list, rebuilt row by row.
+//
+// Deduplicated on the FOLDED path — folding is lossy on purpose, so two users'
+// home directories and four btrfs subvolumes all arrive as rows that mean the
+// same thing — and the survivor is the FULLEST of them rather than the first.
+// They are not necessarily the same filesystem, and first-one-wins hides a
+// 99%-full disk behind a 10%-full one depending on push order.
 func cleanMounts(body json.RawMessage) []mount {
 	// Decoded here for the reason cleanNICs spells out: a list that is not a
 	// list must cost the list and nothing else.
@@ -373,9 +405,12 @@ func cleanMounts(body json.RawMessage) []mount {
 		return nil
 	}
 	var out []mount
-	seen := map[string]bool{}
-	for _, item := range raw {
-		if len(out) >= maxMounts {
+	at := map[string]int{}
+	for i, item := range raw {
+		// Bounded before the cap rather than by it: folding every row of an
+		// arbitrarily long list is work done on a client's say-so. Generous
+		// enough that the cap below is what actually decides the list.
+		if i >= 512 {
 			break
 		}
 		var m struct {
@@ -388,17 +423,47 @@ func cleanMounts(body json.RawMessage) []mount {
 			continue
 		}
 		path := cleanMountPath(*m.Path)
-		if path == "" || seen[path] {
+		if path == "" {
 			continue
 		}
-		seen[path] = true
-		out = append(out, mount{
+		row := mount{
 			Path:    path,
 			Total:   cleanNonNeg(looseNum(m.Total), 1e18),
 			Used:    cleanNonNeg(looseNum(m.Used), 1e18),
 			UsedPct: cleanPctPtr(looseNum(m.UsedPct)),
-		})
+		}
+		if j, dup := at[path]; dup {
+			if mountFullness(row) > mountFullness(out[j]) {
+				out[j] = row
+			}
+			continue
+		}
+		at[path] = len(out)
+		out = append(out, row)
 	}
+	if len(out) > maxMounts {
+		// The cap keeps what needs attention: trimming in arrival order dropped
+		// a 100%-full partition because eight healthy volumes were listed ahead
+		// of it, and the dashboard's own warning went with it.
+		sort.SliceStable(out, func(i, j int) bool {
+			fi, fj := mountFullness(out[i]), mountFullness(out[j])
+			if fi != fj {
+				return fi > fj
+			}
+			ti, tj := 0.0, 0.0
+			if out[i].Total != nil {
+				ti = *out[i].Total
+			}
+			if out[j].Total != nil {
+				tj = *out[j].Total
+			}
+			return ti > tj
+		})
+		out = out[:maxMounts]
+	}
+	// Alphabetical for display, like the interface list: rows ordered by
+	// fullness would reshuffle whenever two disks crossed over.
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out
 }
 
