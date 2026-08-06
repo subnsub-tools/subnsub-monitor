@@ -526,6 +526,8 @@ func serveOp(hub *Hub, w http.ResponseWriter, body []byte) {
 		Agent string `json:"agent"`
 		ID    string `json:"id"`
 		Cmd   string `json:"cmd"`
+		Sig   string `json:"sig"`
+		At    int64  `json:"at"`
 		Name  string `json:"name"`
 		Open  bool   `json:"open"`
 	}
@@ -543,11 +545,18 @@ func serveOp(hub *Hub, w http.ResponseWriter, body []byte) {
 			http.Error(w, "bad id", http.StatusBadRequest)
 			return
 		}
+		// Shape only. This relay cannot check a signature — it holds no key,
+		// which is the point — but it can refuse to store something that is
+		// not one: these two ride in memory and back out to a helper.
+		sig, issuedAt := "", int64(0)
+		if sigRe.MatchString(op.Sig) && op.At >= int64(epochMin) && op.At <= int64(epochMax) {
+			sig, issuedAt = op.Sig, op.At
+		}
 		var e enqueueErr
 		if op.T == "exec" {
-			e = hub.enqueueExec(op.Agent, op.ID, op.Cmd)
+			e = hub.enqueueExec(op.Agent, op.ID, op.Cmd, sig, issuedAt)
 		} else {
-			e = hub.enqueueUpdate(op.Agent, op.ID)
+			e = hub.enqueueUpdate(op.Agent, op.ID, sig, issuedAt)
 		}
 		if e != enqOK {
 			writeJSON(w, map[string]string{"error": string(e)})

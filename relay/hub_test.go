@@ -45,7 +45,7 @@ func TestPushThenCommandRoundTrip(t *testing.T) {
 	if st := h.push(pushBody("machineone", true, false)); st != pushOK {
 		t.Fatalf("push status %v", st)
 	}
-	if e := h.enqueueExec("machineone", "cmd1", "uname -a"); e != enqOK {
+	if e := h.enqueueExec("machineone", "cmd1", "uname -a", "", 0); e != enqOK {
 		t.Fatalf("enqueue: %v", e)
 	}
 	ans := h.commands("machineone", live())
@@ -67,21 +67,21 @@ func TestPushThenCommandRoundTrip(t *testing.T) {
 func TestConsoleGateFollowsTheMachine(t *testing.T) {
 	h := newHub("")
 	h.push(pushBody("machineone", false, false))
-	if e := h.enqueueExec("machineone", "c1", "echo hi"); e != enqNoConsole {
+	if e := h.enqueueExec("machineone", "c1", "echo hi", "", 0); e != enqNoConsole {
 		t.Fatalf("a machine with the console off accepted a command: %v", e)
 	}
-	if e := h.enqueueUpdate("machineone", "u1"); e != enqNoUpdate {
+	if e := h.enqueueUpdate("machineone", "u1", "", 0); e != enqNoUpdate {
 		t.Fatalf("a machine with updates off accepted one: %v", e)
 	}
-	if e := h.enqueueExec("nosuchmachine", "c1", "echo hi"); e != enqNoMachine {
+	if e := h.enqueueExec("nosuchmachine", "c1", "echo hi", "", 0); e != enqNoMachine {
 		t.Fatalf("unknown machine: %v", e)
 	}
 	// And it follows the LATEST push, not the first one.
 	h.push(pushBody("machineone", true, true))
-	if e := h.enqueueExec("machineone", "c2", "echo hi"); e != enqOK {
+	if e := h.enqueueExec("machineone", "c2", "echo hi", "", 0); e != enqOK {
 		t.Fatalf("console on was not honoured: %v", e)
 	}
-	if e := h.enqueueUpdate("machineone", "u2"); e != enqOK {
+	if e := h.enqueueUpdate("machineone", "u2", "", 0); e != enqOK {
 		t.Fatalf("update on was not honoured: %v", e)
 	}
 }
@@ -89,14 +89,14 @@ func TestConsoleGateFollowsTheMachine(t *testing.T) {
 func TestOneUpdateAtATime(t *testing.T) {
 	h := newHub("")
 	h.push(pushBody("machineone", false, true))
-	if e := h.enqueueUpdate("machineone", "u1"); e != enqOK {
+	if e := h.enqueueUpdate("machineone", "u1", "", 0); e != enqOK {
 		t.Fatal(e)
 	}
-	if e := h.enqueueUpdate("machineone", "u2"); e != enqBusy {
+	if e := h.enqueueUpdate("machineone", "u2", "", 0); e != enqBusy {
 		t.Fatalf("second update while queued: %v", e)
 	}
 	h.commands("machineone", live()) // moves u1 into issued
-	if e := h.enqueueUpdate("machineone", "u3"); e != enqBusy {
+	if e := h.enqueueUpdate("machineone", "u3", "", 0); e != enqBusy {
 		t.Fatalf("second update while issued: %v", e)
 	}
 }
@@ -113,7 +113,7 @@ func TestResultMustAnswerAnIssuedCommand(t *testing.T) {
 		t.Fatalf("a forged result was broadcast: %v", f)
 	}
 
-	h.enqueueExec("machineone", "realcmd", "echo hi")
+	h.enqueueExec("machineone", "realcmd", "echo hi", "", 0)
 	drain(ch) // the queued frame
 	h.commands("machineone", live())
 	h.result([]byte(`{"agent":"machineone","id":"realcmd","code":0,"out":"hi"}`))
@@ -131,7 +131,7 @@ func TestResultMustAnswerAnIssuedCommand(t *testing.T) {
 func TestExpiredCommandsAreNotDelivered(t *testing.T) {
 	h := newHub("")
 	h.push(pushBody("machineone", true, false))
-	h.enqueueExec("machineone", "old", "echo hi")
+	h.enqueueExec("machineone", "old", "echo hi", "", 0)
 	// Age it past the shell-command TTL without sleeping for 90 seconds.
 	h.mu.Lock()
 	h.machines["machineone"].queue[0].at = nowMS() - cmdTTL - 1000
@@ -181,7 +181,7 @@ func TestACancelledPollDoesNotSpendACommand(t *testing.T) {
 	h := newHub("")
 	h.push(pushBody("machineone", true, false))
 	h.setTerm("machineone", true)
-	if e := h.enqueueExec("machineone", "cmd1", "echo hi"); e != enqOK {
+	if e := h.enqueueExec("machineone", "cmd1", "echo hi", "", 0); e != enqOK {
 		t.Fatal(e)
 	}
 	// The helper hung up before this poll was answered. Taking the command
@@ -455,5 +455,50 @@ func TestExpiredRecordsDoNotComeBackFromDisk(t *testing.T) {
 	}
 	if len(h2.names) != 0 {
 		t.Fatalf("an orphan name was restored: %v", h2.names)
+	}
+}
+
+// A signature has to survive the mailbox unchanged, because a machine with a
+// pinned key verifies over exactly the bytes the browser signed. This relay
+// carries it; it cannot make one, and that is the whole property.
+func TestSignatureSurvivesTheMailbox(t *testing.T) {
+	h := newHub("")
+	if st := h.push(pushBody("machineone", true, false)); st != pushOK {
+		t.Fatalf("push status %v", st)
+	}
+	const sig = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+	const at = int64(1785969600)
+
+	if e := h.enqueueExec("machineone", "c1", "uptime", sig, at); e != enqOK {
+		t.Fatalf("enqueue: %v", e)
+	}
+	ans := h.commands("machineone", live())
+	if !ans.Open || len(ans.Commands) != 1 {
+		t.Fatalf("poll answer = %+v", ans)
+	}
+	p := ans.Commands[0]
+	if p.Sig != sig || p.IssuedAt != at {
+		t.Fatalf("mailbox altered the signature: %q %d", p.Sig, p.IssuedAt)
+	}
+	// The delivery clock is ours and the signing clock is the browser's; a
+	// relay that overwrote one with the other would make every command look
+	// fresh to a machine that should have refused it.
+	if p.IssuedAt != at {
+		t.Errorf("the signing timestamp was replaced: %d", p.IssuedAt)
+	}
+	if p.Cmd != "uptime" {
+		t.Errorf("command text changed in transit: %q", p.Cmd)
+	}
+}
+
+// An unsigned command still queues: a machine that pinned nothing must keep
+// working, and this relay is not the place that decides.
+func TestUnsignedCommandsStillQueue(t *testing.T) {
+	h := newHub("")
+	if st := h.push(pushBody("machineone", true, false)); st != pushOK {
+		t.Fatalf("push status %v", st)
+	}
+	if e := h.enqueueExec("machineone", "c1", "uptime", "", 0); e != enqOK {
+		t.Fatalf("an unsigned command was refused by the relay: %v", e)
 	}
 }
