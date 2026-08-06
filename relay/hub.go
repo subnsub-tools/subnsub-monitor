@@ -85,7 +85,15 @@ type pending struct {
 	ID   string `json:"id"`
 	Kind string `json:"kind,omitempty"`
 	Cmd  string `json:"cmd"`
-	at   int64  // ms; enqueue time in queue, issue time in issued
+	// The dashboard's signature over this command, and the second it was
+	// signed. Carried, never checked here: verifying is the machine's job, and
+	// the property being bought is that this relay CANNOT produce a pair that
+	// verifies. `at` below is our own delivery clock and a different thing —
+	// a command still fresh by our reckoning may already be stale by the
+	// machine's, and the machine decides.
+	Sig      string `json:"sig,omitempty"`
+	IssuedAt int64  `json:"at,omitempty"`
+	at       int64  // ms; enqueue time in queue, issue time in issued
 }
 
 type machine struct {
@@ -292,7 +300,7 @@ const (
 // enqueueExec queues one shell line, and counts as opening the console: the
 // person typing is obviously looking, so the helper is told to stay close
 // without a separate term frame having to race this one.
-func (h *Hub) enqueueExec(agent, id, cmd string) enqueueErr {
+func (h *Hub) enqueueExec(agent, id, cmd, sig string, issuedAt int64) enqueueErr {
 	if len([]rune(cmd)) > maxCmdRunes {
 		return enqTooLong
 	}
@@ -314,7 +322,8 @@ func (h *Hub) enqueueExec(agent, id, cmd string) enqueueErr {
 	if len(m.queue) >= queueMax {
 		return enqFullQ
 	}
-	m.queue = append(m.queue, &pending{ID: id, Kind: "sh", Cmd: cmd, at: now})
+	m.queue = append(m.queue, &pending{ID: id, Kind: "sh", Cmd: cmd,
+		Sig: sig, IssuedAt: issuedAt, at: now})
 	m.termUntil = now + termTTL
 	h.broadcast(frame{"type": "queued", "agent_id": agent, "id": id,
 		"ahead": len(m.queue) - 1})
@@ -326,7 +335,7 @@ func (h *Hub) enqueueExec(agent, id, cmd string) enqueueErr {
 // checksum, so the worst a relay (this one included) can do is press the
 // button. One at a time: two updates in flight are two processes racing to
 // replace one file.
-func (h *Hub) enqueueUpdate(agent, id string) enqueueErr {
+func (h *Hub) enqueueUpdate(agent, id, sig string, issuedAt int64) enqueueErr {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	now := nowMS()
@@ -351,7 +360,8 @@ func (h *Hub) enqueueUpdate(agent, id string) enqueueErr {
 	if len(m.queue) >= queueMax {
 		return enqFullQ
 	}
-	m.queue = append(m.queue, &pending{ID: id, Kind: "update", at: now})
+	m.queue = append(m.queue, &pending{ID: id, Kind: "update",
+		Sig: sig, IssuedAt: issuedAt, at: now})
 	h.broadcast(frame{"type": "queued", "agent_id": agent, "id": id, "ahead": 0})
 	return enqOK
 }

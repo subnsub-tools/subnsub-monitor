@@ -50,6 +50,11 @@ var (
 	// Why a provider failed, in machine form — a lookup key, so a closed shape
 	// rather than a length cap.
 	detailCodeRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+	// A command's signature, checked for SHAPE only — this relay holds no key
+	// and could not verify one if it wanted to, which is the property the
+	// whole scheme buys. Ed25519 signatures are 64 bytes: 88 base64
+	// characters ending in one '='. Exported for main.go's op handler.
+	sigRe = regexp.MustCompile(`^[A-Za-z0-9+/]{86}==$`)
 	// Numbers the helper stamps as "epoch seconds". Anything outside this
 	// window is a unit mistake — milliseconds, usually — and a wrong-unit
 	// timestamp renders as a countdown of several decades, which looks
@@ -89,6 +94,11 @@ type reading struct {
 	HelperVersion string      `json:"helper_version,omitempty"`
 	Exec          bool        `json:"exec"`
 	Upd           bool        `json:"upd"`
+	// Whether the machine has been told WHO may command it: at least one
+	// pinned dashboard key, so a command must carry a signature no relay can
+	// produce. Carried so a dashboard can draw the difference — a machine with
+	// nothing pinned runs what it is handed, and the two are not equally safe.
+	Sgn           bool        `json:"sgn"`
 	System        *system     `json:"system,omitempty"`
 }
 
@@ -215,6 +225,7 @@ type rawReading struct {
 	HelperVersion *string           `json:"helper_version"`
 	Exec          *bool             `json:"exec"`
 	Upd           *bool             `json:"upd"`
+	Sgn           *bool             `json:"sgn"`
 	System        json.RawMessage   `json:"system"`
 }
 
@@ -449,6 +460,7 @@ func cleanReading(body []byte) (string, *reading, bool) {
 	// === true, in Go clothing: only an explicit boolean turns these on.
 	out.Exec = raw.Exec != nil && *raw.Exec
 	out.Upd = raw.Upd != nil && *raw.Upd
+	out.Sgn = raw.Sgn != nil && *raw.Sgn
 	if len(raw.System) > 0 {
 		out.System = cleanSystem(raw.System, capturedAt)
 	}
