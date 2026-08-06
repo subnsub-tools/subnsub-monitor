@@ -32,6 +32,7 @@ package main
 // like a healthy machine.
 
 import (
+	"math"
 	"os"
 	"runtime"
 	"strconv"
@@ -53,6 +54,27 @@ type System struct {
 	CPUCount   int      `json:"cpu_count,omitempty"`
 	CPUPercent *float64 `json:"cpu_percent,omitempty"` // 0–100, differential
 
+	// Where that percentage went, same differential and same units. One number
+	// cannot answer the question people actually bring to a busy machine, and
+	// two of these four answer it outright:
+	//
+	//	iowait  the CPU is idle and waiting for a disk. "Busy" is the wrong
+	//	        word for it, which is why it is excluded from CPUPercent above
+	//	        — but a box sitting at 40% iowait has a storage problem, and
+	//	        with only CPUPercent to look at it appears to be resting.
+	//	steal   time the hypervisor gave to somebody else. On an oversold VPS
+	//	        this is the whole explanation for a machine that is slow while
+	//	        reporting spare CPU, and it is the one number a tenant can act
+	//	        on (by leaving).
+	//
+	// Platforms that cannot split the reading omit the fields rather than
+	// reporting zeroes: "0% steal" is a claim about the hypervisor, and a Mac
+	// is in no position to make it.
+	CPUUser   *float64 `json:"cpu_user,omitempty"`
+	CPUSystem *float64 `json:"cpu_system,omitempty"`
+	CPUIOWait *float64 `json:"cpu_iowait,omitempty"`
+	CPUSteal  *float64 `json:"cpu_steal,omitempty"`
+
 	Load1  *float64 `json:"load1,omitempty"`
 	Load5  *float64 `json:"load5,omitempty"`
 	Load15 *float64 `json:"load15,omitempty"`
@@ -60,8 +82,30 @@ type System struct {
 	MemTotal       *float64 `json:"mem_total,omitempty"` // bytes
 	MemUsedPercent *float64 `json:"mem_used_percent,omitempty"`
 
+	// The two figures behind that percentage, in bytes.
+	//
+	// MemUsedPercent is already computed against MemAvailable rather than
+	// MemFree, so this helper never had the classic "Linux looks 90% full when
+	// it is fine" bug. What it did have is no way for a reader to CHECK that:
+	// a single percentage cannot say whether the missing memory is a process
+	// or a page cache, and those need different reactions. Cached is what the
+	// kernel would hand back under pressure; Available is what it promises it
+	// can hand back.
+	MemAvailable *float64 `json:"mem_available,omitempty"`
+	MemCached    *float64 `json:"mem_cached,omitempty"`
+
 	SwapTotal       *float64 `json:"swap_total,omitempty"`
 	SwapUsedPercent *float64 `json:"swap_used_percent,omitempty"`
+
+	// Swap TRAFFIC, bytes per second, differential like the network rates.
+	//
+	// Not the same question as SwapUsedPercent, and the more urgent one: swap
+	// that was written days ago and never touched since costs nothing, so a
+	// machine can sit at 80% swap used and be perfectly healthy. A machine
+	// that is moving pages in and out right now is thrashing, and that shows
+	// up here while the percentage barely moves.
+	SwapInBps  *float64 `json:"swap_in_bps,omitempty"`
+	SwapOutBps *float64 `json:"swap_out_bps,omitempty"`
 
 	// The root filesystem only. A list of every mount would be a map of
 	// somebody's machine, and the question this answers — "is it about to run
@@ -73,6 +117,30 @@ type System struct {
 	DiskTotal       *float64 `json:"disk_total,omitempty"`
 	DiskUsed        *float64 `json:"disk_used,omitempty"`
 	DiskUsedPercent *float64 `json:"disk_used_percent,omitempty"`
+
+	// The OTHER filesystems, when a machine has any. The note above is still
+	// right that "is it about to run out of room" is nearly always about /;
+	// what it missed is that on a server with a data disk the answer is nearly
+	// always about the data disk, and a card showing a comfortable root while
+	// /data sits at 99% is confidently wrong.
+	//
+	// Paths are FOLDED before they are sent (see mounts.go): two segments at
+	// most, and anything under a home directory collapses to the home itself.
+	// That keeps `/mnt/backup` — which describes a disk — and refuses
+	// `/home/alice/projects`, which describes a person. Root is not repeated
+	// here; it has its own fields above.
+	Mounts []Mount `json:"mounts,omitempty"`
+
+	// Disk THROUGHPUT for the whole machine, bytes per second, summed over
+	// physical block devices. A rate, so like every other rate here it needs
+	// two samples and reports nothing on the first.
+	//
+	// The gap this closes: CPU and network were the only two fast-moving
+	// numbers on the card, so a machine pinned by its disk looked idle in
+	// every reading it sent. Paired with cpu_iowait above, the pair says which
+	// of "waiting on the disk" and "the disk is working hard" is happening.
+	DiskReadBps  *float64 `json:"disk_read_bps,omitempty"`
+	DiskWriteBps *float64 `json:"disk_write_bps,omitempty"`
 
 	UptimeSec *float64 `json:"uptime_sec,omitempty"`
 
@@ -91,6 +159,26 @@ type System struct {
 	// here pretends otherwise — the page shows what the box reports.
 	NetRxTotal *float64 `json:"net_rx_total,omitempty"`
 	NetTxTotal *float64 `json:"net_tx_total,omitempty"`
+
+	// Packets, errors and drops over those same interfaces, cumulative.
+	//
+	// Counts rather than rates, and the packet totals are here so they can be
+	// read as a PROPORTION: a thousand dropped packets is a catastrophe on a
+	// machine that has sent ten thousand and a rounding error on one that has
+	// sent ten billion, and a bare drop count cannot tell those apart. The
+	// division is left to the reader — the helper does not send a computed
+	// ratio, because the two counters can be reset by different things (an
+	// interface disappearing takes both of ITS numbers out of the sum).
+	//
+	// What this catches that the byte counters cannot: a link that is losing
+	// traffic. Bytes keep flowing and the rate looks healthy right up until
+	// somebody asks why everything feels slow.
+	NetRxPackets *float64 `json:"net_rx_packets,omitempty"`
+	NetTxPackets *float64 `json:"net_tx_packets,omitempty"`
+	NetRxErrs    *float64 `json:"net_rx_errs,omitempty"`
+	NetTxErrs    *float64 `json:"net_tx_errs,omitempty"`
+	NetRxDrops   *float64 `json:"net_rx_drops,omitempty"`
+	NetTxDrops   *float64 `json:"net_tx_drops,omitempty"`
 
 	// Every interface the machine has, with the addresses bound to it.
 	//
@@ -147,6 +235,17 @@ type NIC struct {
 	Up      bool     `json:"up,omitempty"`
 }
 
+// One filesystem other than root. Path is already folded (foldMountPath) by
+// the time it lands here; Used and UsedPercent are split for the same reason
+// the root fields are — the percentage's denominator excludes root-reserved
+// blocks and Total includes them, so one cannot be derived from the other.
+type Mount struct {
+	Path        string   `json:"path"`
+	Total       *float64 `json:"total,omitempty"`
+	Used        *float64 `json:"used,omitempty"`
+	UsedPercent *float64 `json:"used_percent,omitempty"`
+}
+
 // One frame's worth of samples, oldest first, laid on a fixed grid.
 //
 // The last slot of every array is the snapshot this rides on — the same
@@ -182,7 +281,13 @@ const (
 	mUptime  = "uptime"
 	mNetwork = "network"
 	mProcs   = "procs"
+	// Disk THROUGHPUT, which is a separate answer from mDisk (capacity): Linux
+	// reads both, and the platforms that can only measure how full a disk is
+	// say so rather than letting the absent rate read as a quiet disk.
+	mDiskIO = "diskio"
 	// No mTemp: a sensorless machine is a configuration, not a gap — see TempC.
+	// No mMounts either, for the same reason: a machine with one filesystem is
+	// a normal machine, not one that failed to report the others.
 )
 
 func (s *System) miss(what string) { s.Missing = append(s.Missing, what) }
@@ -228,14 +333,103 @@ func cpuDelta(busy, total float64) *float64 {
 	return fp(round2(pct))
 }
 
-// Network counters are cumulative bytes, so a rate needs two samples AND the
-// wall-clock span between them — unlike cpuDelta, whose jiffies carry their own
-// time base. Same first-sample rule: the first collection reports nothing.
-var netPrev struct {
+// The same differencing cpuDelta does, applied to the counters BEHIND that
+// percentage. NaN marks a counter this platform does not keep — Windows has
+// neither iowait nor steal — and comes back nil, never as a zero that would
+// read as "measured, and none".
+//
+// Separate previous-reading state from cpuPrev rather than one struct holding
+// both: the two are always read from the same line and updated together, and
+// keeping them apart means a platform can adopt one without the other (macOS
+// reports its split as percentages that never touch this path at all).
+var cpuPartsPrev struct {
 	sync.Mutex
-	valid      bool
-	rx, tx, at float64
+	valid bool
+	parts [4]float64
+	total float64
 }
+
+func cpuPartsDelta(parts [4]float64, total float64) [4]*float64 {
+	cpuPartsPrev.Lock()
+	defer cpuPartsPrev.Unlock()
+
+	prevValid, prevParts, prevTotal := cpuPartsPrev.valid, cpuPartsPrev.parts, cpuPartsPrev.total
+	cpuPartsPrev.valid, cpuPartsPrev.parts, cpuPartsPrev.total = true, parts, total
+
+	var out [4]*float64
+	if !prevValid {
+		return out
+	}
+	dt := total - prevTotal
+	if dt <= 0 {
+		return out
+	}
+	for i, v := range parts {
+		if math.IsNaN(v) || math.IsNaN(prevParts[i]) {
+			continue
+		}
+		d := v - prevParts[i]
+		// A counter that went backwards is a reset, not a negative share of the
+		// CPU; one that outran the total means the two were read at different
+		// instants. Neither is a reading.
+		if d < 0 || d > dt {
+			continue
+		}
+		out[i] = fp(round2(d / dt * 100))
+	}
+	return out
+}
+
+// Two cumulative counters and a clock in, two per-second rates out.
+//
+// Network bytes, disk bytes and swapped pages are all this shape, and all three
+// share the traps: a rate needs two samples AND the wall-clock span between
+// them (unlike cpuDelta, whose jiffies carry their own time base), the first
+// sample can only report nothing, and a counter that went BACKWARDS is a reset
+// rather than a negative rate. That last one is not hypothetical for any of the
+// three — the network sum shrinks whenever an interface disappears (a
+// container's veth being torn down is routine), the disk sum shrinks when a
+// device is unplugged, and both counters restart from zero on a reboot.
+type pairRate struct {
+	sync.Mutex
+	valid    bool
+	a, b, at float64
+}
+
+func (p *pairRate) delta(a, b, at float64) (aps, bps *float64) {
+	p.Lock()
+	defer p.Unlock()
+
+	prevValid, prevA, prevB, prevAt := p.valid, p.a, p.b, p.at
+	p.valid, p.a, p.b, p.at = true, a, b, at
+
+	if !prevValid {
+		return nil, nil
+	}
+	dt := at - prevAt
+	if dt <= 0 {
+		return nil, nil
+	}
+	dA, dB := a-prevA, b-prevB
+	if dA < 0 || dB < 0 {
+		return nil, nil
+	}
+	return fp(round2(dA / dt)), fp(round2(dB / dt))
+}
+
+func (p *pairRate) reset() {
+	p.Lock()
+	defer p.Unlock()
+	p.valid, p.a, p.b, p.at = false, 0, 0, 0
+}
+
+var netPrev pairRate
+
+// Bytes read and written across the machine's physical block devices, and
+// bytes swapped in and out. Their own previous-reading state, because they are
+// read from different files at different times and one being unavailable must
+// not blank the other.
+var diskIOPrev, swapIOPrev pairRate
 
 var tcpPrev struct {
 	sync.Mutex
@@ -256,29 +450,10 @@ func tcpDelta(retrans, at float64) *float64 {
 }
 
 // Feed one cumulative (rx, tx) reading in, get bytes-per-second since the
-// previous one out. Nil on the first sample, on a non-advancing clock, and on
-// counters that went backwards — which happens legitimately here: the sum
-// shrinks whenever an interface disappears (a container's veth being torn down
-// is routine), and that must read as "no reading", never as a negative rate.
+// previous one out. Named rather than called through the type, because both
+// platform collectors already say netDelta and the name is the documentation.
 func netDelta(rx, tx, at float64) (rxBps, txBps *float64) {
-	netPrev.Lock()
-	defer netPrev.Unlock()
-
-	prevValid, prevRx, prevTx, prevAt := netPrev.valid, netPrev.rx, netPrev.tx, netPrev.at
-	netPrev.valid, netPrev.rx, netPrev.tx, netPrev.at = true, rx, tx, at
-
-	if !prevValid {
-		return nil, nil
-	}
-	dt := at - prevAt
-	if dt <= 0 {
-		return nil, nil
-	}
-	dRx, dTx := rx-prevRx, tx-prevTx
-	if dRx < 0 || dTx < 0 {
-		return nil, nil
-	}
-	return fp(round2(dRx / dt)), fp(round2(dTx / dt))
+	return netPrev.delta(rx, tx, at)
 }
 
 // Kernel release trimmed to major.minor: "6.8.0-1050-oracle" -> "6.8",
@@ -345,7 +520,7 @@ func collectSystem() (s System) {
 	defer func() {
 		if r := recover(); r != nil {
 			s = System{OK: false, Platform: runtime.GOOS, Arch: runtime.GOARCH,
-				Missing: []string{mCPU, mMemory, mSwap, mDisk, mLoad, mUptime, mNetwork, mProcs}}
+				Missing: []string{mCPU, mMemory, mSwap, mDisk, mDiskIO, mLoad, mUptime, mNetwork, mProcs}}
 		}
 	}()
 	return systemSnapshot()

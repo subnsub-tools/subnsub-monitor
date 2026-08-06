@@ -24,6 +24,11 @@ func systemSnapshot() System {
 	s.miss(mMemory)
 	s.miss(mSwap)
 	s.miss(mDisk)
+	// Disk throughput has the same answer as disk capacity here, and for the
+	// same reason: the counters live in a sysctl this build cannot read. Named
+	// like everything else rather than left out — an absent rate reads as a
+	// quiet disk, which is the one thing a missing measurement must not do.
+	s.miss(mDiskIO)
 	s.miss(mLoad)
 	s.miss(mUptime)
 	s.miss(mNetwork)

@@ -82,8 +82,17 @@ var tokenRe = regexp.MustCompile(`^[A-Za-z0-9_-]{24,128}$`)
 // visible only in a relay log nobody was reading. A reading now carries a
 // per-second sample series as well (four lanes, up to 72 slots), which is
 // another kilobyte or two on top of fourteen providers.
+//
+// AND THEN IT DRIFTED AGAIN, the same way, which is the argument for a test
+// rather than a comment: the interface list (2026-08-06) can add 8 KiB at its
+// own caps — sixteen interfaces, eight addresses each, an IPv6 literal is 45
+// characters — and the hosted relay went to 32 KiB for exactly that reason
+// while this one stayed at 16. A crowded container host was one valid report
+// away from a 413 here and fine there. Matched again, and
+// TestAFullFrameFitsTheBodyCeiling now builds its fixture with every list at
+// its cap so the next round cannot repeat this quietly.
 const (
-	maxPushBody   = 16 * 1024
+	maxPushBody   = 32 * 1024
 	maxResultBody = 24 * 1024
 	maxOpBody     = 8 * 1024
 )

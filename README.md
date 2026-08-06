@@ -200,15 +200,50 @@ switched on" rather than as something you can run today:
 
 | | Linux | Windows (not published) | macOS | FreeBSD |
 |---|---|---|---|---|
-| CPU % | yes (differential, `/proc/stat`) | yes (`GetSystemTimes`) | — | — |
-| Memory | yes (`MemAvailable`) | yes (`GlobalMemoryStatusEx`) | — | — |
-| Swap | yes | **cannot** | — | — |
+| CPU % | yes (differential, `/proc/stat`) | yes (`GetSystemTimes`) | yes (`top -l 2`) | — |
+| CPU split | user / system / **iowait** / **steal** | user / system only | user / sys only | — |
+| Memory | yes (`MemAvailable`) | yes (`GlobalMemoryStatusEx`) | yes (`vm_stat` + `hw.memsize`) | — |
+| — available / cached | yes (`/proc/meminfo`) | — | — | — |
+| Swap | yes | **cannot** | **cannot** | — |
+| — pages in / out | yes (`/proc/vmstat`) | — | — | — |
 | Disk (root fs) | yes | yes (system volume) | yes | — |
-| Load average | yes | **does not exist** | — | — |
-| Uptime | yes | yes (`GetTickCount64`) | — | — |
+| Other filesystems | yes (`/proc/mounts`) | — | yes (`getfsstat`) | — |
+| Disk read / write rate | yes (`/proc/diskstats`) | — | **cannot** (no cgo-free counter) | — |
+| Network rate + totals | yes (`/proc/net/dev`) | — | yes (`netstat -ibn`) | — |
+| — packets / errors / drops | yes | — | — | — |
+| Interfaces + addresses | yes | yes | yes | yes |
+| TCP established / TIME_WAIT / retransmits | yes (`/proc/net/{snmp,sockstat}`) | — | — | — |
+| Processes | yes (`/proc`) | — | yes (`ps -A`) | — |
+| Temperature | yes (`/sys/class/thermal`) | — | — | — |
+| Load average | yes | **does not exist** | yes (`vm.loadavg`) | — |
+| Uptime | yes | yes (`GetTickCount64`) | yes (`kern.boottime`) | — |
 | Cores / arch / kernel | yes | yes | yes | yes |
 
-**macOS** reports far less, and the reason is structural rather than lazy.
+**The CPU split is there for two of its four numbers.** A single "40% busy"
+cannot say whether a machine is working or waiting: `iowait` is a processor
+sitting idle on a disk (it is excluded from the busy figure, which is why a
+box at 40% iowait can look like it is resting), and `steal` is time the
+hypervisor handed to somebody else — the whole explanation for an oversold
+VPS that feels slow while reporting spare capacity. A platform that keeps
+neither counter omits the fields rather than sending zeroes: "0% steal" is a
+claim about a hypervisor a Mac is in no position to make.
+
+**Mount points are folded before they are sent.** A path can describe a disk
+or it can describe a person, so it is cut to three segments and anything
+under a home directory collapses to the home itself:
+
+```
+/mnt/backup               → /mnt/backup
+/var/lib/docker/overlay2  → /var/lib/docker
+/home/alice/projects/big  → /home
+```
+
+Root has its own fields and is not repeated in the list. The relay applies
+the same fold again on arrival — the agent's rule binds the agent, and
+anything else pushing at a relay is bound only by the relay's own whitelist.
+
+**macOS** reads most of that through Apple's own command-line tools rather
+than in-process, and the reason is structural rather than lazy.
 Without cgo the Go standard library offers exactly two ways to read a sysctl:
 `syscall.Sysctl`, which returns a string cut at the first NUL byte, and
 `syscall.SysctlUint32`, which refuses anything that is not exactly four bytes
@@ -217,16 +252,28 @@ wide. Between them that rules out `hw.memsize` (64-bit, leading zero bytes),
 what makes the Linux builds genuinely static, so the mach APIs that would
 answer these are out of reach too.
 
-There is a byte-layout trick that would usually recover the boot time. It is
-deliberately **not** taken: it depends on a layout the author cannot test on
-real hardware, and a silently wrong boot time reads as a machine that just
-crashed.
+There is a byte-layout trick that would usually recover the boot time in
+process. It is deliberately **not** taken: it depends on a layout the author
+cannot test on real hardware, and a silently wrong boot time reads as a
+machine that just crashed. What the agent does instead is ask the tools that
+already know — `sysctl`, `vm_stat`, `top`, `ps`, `netstat`, each on the
+read-only system volume, addressed by absolute path, given a four-variable
+environment, deadlined, and parsed by something that refuses every line it
+cannot fully account for. Running a subprocess was never a new capability
+here; several quota collectors have always done it.
 
-**FreeBSD** is the same story with the same cause, plus one more: the read that
-*would* work — `statfs` for the root filesystem — is written against the Linux
-and Darwin field names, and the BSDs spell them `F_bsize` and `F_blocks`. A
-version of it typed against a header nobody here can run is exactly the kind of
-guess the rest of this list refuses.
+**Swap on macOS stays unread**, and that one is not a format problem with a
+parser waiting to fix it: `vm.swapusage` is trivially readable and does not
+mean what the field means. The number could ship today and would be wrong,
+which is the one thing this collector will not do.
+
+**FreeBSD** reports its platform, architecture, core count and interfaces, and
+names everything else as missing. The sysctl limits above apply here too, and
+the route macOS took out of them does not: writing parsers for tools nobody
+here can run on real hardware is exactly the kind of guess the rest of this
+list refuses. Even the read that *would* work — `statfs` for the root
+filesystem — is written against the Linux and Darwin field names, and the BSDs
+spell them `F_bsize` and `F_blocks`.
 
 **Windows** has two entries that are not "not yet" but "no":
 

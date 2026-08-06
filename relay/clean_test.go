@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -375,20 +376,48 @@ func TestAFullFrameFitsTheBodyCeiling(t *testing.T) {
 			`"detail":"a sentence of the length these collectors actually produce when they explain themselves",`+
 			`"recorded_at":1785000000,"rate_limit_tier":"standard","truncated":false,"capped":false}`)
 	}
+	// Every list at ITS cap, because that is what "full" means and anything
+	// smaller tests a machine that was never the problem. Sixteen interfaces
+	// with eight addresses each is the shape of a container host, and an IPv6
+	// literal is 45 characters — this block alone is most of the frame.
+	var nics []string
+	for i := 0; i < maxNICs; i++ {
+		var ips []string
+		for j := 0; j < maxNICAddrs; j++ {
+			ips = append(ips, fmt.Sprintf(`"2001:0db8:85a3:%04x:8a2e:0370:7334:%04x"`, i, j))
+		}
+		nics = append(nics, fmt.Sprintf(`{"name":"br-%012x","up":true,"rx_total":9876543210,`+
+			`"tx_total":1234567890,"ips":[%s]}`, i, strings.Join(ips, ",")))
+	}
+	var mounts []string
+	for i := 0; i < maxMounts; i++ {
+		mounts = append(mounts, fmt.Sprintf(`{"path":"/mnt/volume-%02d","total":2000000000000,`+
+			`"used":1000000000000,"used_percent":50}`, i))
+	}
 	push := `{"ok":true,"captured_at":1785000000,"agent_id":"abc123XY","agent_name":"build box",` +
 		`"helper_version":"2026.08.05.2","exec":true,"upd":true,"providers":[` + strings.Join(providers, ",") + `],` +
 		`"system":{"ok":true,"platform":"linux","arch":"arm64","os_version":"6.8","cpu_count":4,` +
-		`"cpu_percent":12.5,"load1":0.4,"load5":0.4,"load15":0.4,"mem_total":8589934592,` +
-		`"mem_used_percent":61.2,"swap_total":1,"swap_used_percent":1,"disk_total":107374182400,` +
-		`"disk_used":42949672960,"disk_used_percent":40,"uptime_sec":86400,"net_rx_bps":1234567,` +
-		`"net_tx_bps":1234567,"tcp_estab":100,"tcp_time_wait":50,"tcp_retrans_ps":0.5,"procs":400,` +
+		`"cpu_percent":12.5,"cpu_user":8.1,"cpu_system":3.9,"cpu_iowait":0.4,"cpu_steal":0.1,` +
+		`"load1":0.4,"load5":0.4,"load15":0.4,"mem_total":8589934592,` +
+		`"mem_used_percent":61.2,"mem_available":3221225472,"mem_cached":2147483648,` +
+		`"swap_total":1,"swap_used_percent":1,"swap_in_bps":4096,"swap_out_bps":8192,` +
+		`"disk_total":107374182400,"disk_used":42949672960,"disk_used_percent":40,` +
+		`"mounts":[` + strings.Join(mounts, ",") + `],` +
+		`"disk_read_bps":12345678,"disk_write_bps":87654321,` +
+		`"uptime_sec":86400,"net_rx_bps":1234567,"net_tx_bps":1234567,` +
+		`"net_rx_total":98765432109876,"net_tx_total":12345678901234,` +
+		`"net_rx_packets":6144140308,"net_tx_packets":10518028036,` +
+		`"net_rx_errs":12,"net_tx_errs":3,"net_rx_drops":17,"net_tx_drops":9,` +
+		`"nics":[` + strings.Join(nics, ",") + `],` +
+		`"tcp_estab":100,"tcp_time_wait":50,"tcp_retrans_ps":0.5,"procs":400,` +
 		`"temp_c":45,"series":{"at":1785000000,"step":1,"cpu":` + lane + `,"mem":` + lane + `,"rx":` + lane + `,"tx":` + lane + `}}}`
 	t.Logf("a full frame is %d bytes against a %d-byte ceiling", len(push), maxPushBody)
-	// A frame that fits the OLD 8 KiB ceiling would pass this test without
-	// proving anything — that limit is exactly what a real fourteen-provider
-	// push with a 72-slot series went past, and nobody noticed because the
-	// answer was a 413 in a relay log.
-	if len(push) <= 8*1024 {
+	// A fixture that fits an ALREADY-RAISED ceiling proves nothing — the point
+	// is that it represents the push that broke the last one. 8 KiB was the
+	// limit a fourteen-provider push with a 72-slot series went past; 16 KiB
+	// was the limit the interface list went past on 2026-08-06 while nobody
+	// noticed, because the answer to both was a 413 in a relay log.
+	if len(push) <= 16*1024 {
 		t.Fatalf("the fixture is only %d bytes and no longer represents a full push", len(push))
 	}
 	if len(push) > maxPushBody {
@@ -396,5 +425,137 @@ func TestAFullFrameFitsTheBodyCeiling(t *testing.T) {
 	}
 	if _, _, ok := cleanReading([]byte(push)); !ok {
 		t.Fatal("a full frame was refused")
+	}
+}
+
+// The 2026-08-07 round: the CPU split, the memory split, swap and disk
+// throughput, packet/error/drop counters, and the non-root filesystems. Every
+// bound here is the hosted relay's — infra/monitor-relay-unit.mjs asserts the
+// same cases against the same values, and a helper must not be able to tell
+// the two apart.
+func TestAugustSevenHealthFields(t *testing.T) {
+	body := `{"providers":[{"id":"codex","ok":true,"limits":[{"used_percent":1}]}],
+	  "system":{"platform":"linux","cpu_percent":29.52,"cpu_user":20.36,
+	  "cpu_system":9.16,"cpu_iowait":0,"cpu_steal":1.25,
+	  "mem_available":12739096576,"mem_cached":12323344384,
+	  "swap_in_bps":4096,"swap_out_bps":0,
+	  "disk_read_bps":0,"disk_write_bps":3394428.33,
+	  "net_rx_packets":6144140308,"net_tx_packets":10518028036,
+	  "net_rx_errs":0,"net_tx_errs":3,"net_rx_drops":17,"net_tx_drops":0,
+	  "missing":["diskio"]}}`
+	_, r, ok := cleanReading([]byte(body))
+	if !ok || r.System == nil {
+		t.Fatal("frame refused")
+	}
+	s := r.System
+	for _, c := range []struct {
+		name string
+		got  *float64
+		want float64
+	}{
+		{"cpu_user", s.CPUUser, 20.36},
+		{"cpu_system", s.CPUSys, 9.16},
+		// Zero is a MEASUREMENT: a machine with no iowait is the healthy case,
+		// and nulling it would render as "not reported" on exactly the boxes
+		// that are fine.
+		{"cpu_iowait", s.CPUIOWait, 0},
+		{"cpu_steal", s.CPUSteal, 1.25},
+		{"mem_available", s.MemAvail, 12739096576},
+		{"mem_cached", s.MemCached, 12323344384},
+		{"swap_in_bps", s.SwapInBps, 4096},
+		{"disk_write_bps", s.DiskWriteBps, 3394428.33},
+		{"net_tx_packets", s.NetTxPackets, 10518028036},
+		{"net_rx_drops", s.NetRxDrops, 17},
+	} {
+		if c.got == nil || *c.got != c.want {
+			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
+		}
+	}
+	if len(s.Missing) != 1 || s.Missing[0] != "diskio" {
+		t.Errorf("diskio should be a known missing category: %v", s.Missing)
+	}
+
+	// Out of bounds, one field at a time.
+	body = `{"providers":[{"id":"codex","ok":true,"limits":[{"used_percent":1}]}],
+	  "system":{"platform":"linux","cpu_percent":40,"cpu_user":-1,"cpu_system":900,
+	  "cpu_steal":"lots","mem_available":-5,"swap_in_bps":1e16,
+	  "disk_write_bps":1e16,"net_rx_packets":-1,"net_tx_errs":1e20}}`
+	_, r, _ = cleanReading([]byte(body))
+	s = r.System
+	if s == nil || s.CPUPct == nil {
+		t.Fatalf("a malformed new field must not sink the system block: %+v", s)
+	}
+	if s.CPUUser != nil || s.CPUSteal != nil || s.MemAvail != nil ||
+		s.SwapInBps != nil || s.DiskWriteBps != nil || s.NetRxPackets != nil || s.NetTxErrs != nil {
+		t.Errorf("out-of-bounds values survived: %+v", s)
+	}
+	// Clamped rather than dropped, exactly like cpu_percent: over 100 is a real
+	// reading with a rounding problem behind it, while below zero cannot be a
+	// share of anything.
+	if s.CPUSys == nil || *s.CPUSys != 100 {
+		t.Errorf("an over-100 share should clamp to 100, got %v", s.CPUSys)
+	}
+}
+
+func TestMountPathsAreFoldedOnArrival(t *testing.T) {
+	// The helper folds these before sending; this asserts the relay does it
+	// again from scratch, because the helper's rule binds only the helper.
+	body := `{"providers":[{"id":"codex","ok":true,"limits":[{"used_percent":1}]}],
+	  "system":{"platform":"linux","mounts":[
+	    {"path":"/home/alice/projects/client-acme","total":500000000000,"used":100000000000,"used_percent":20},
+	    {"path":"/mnt/backup","total":2000000000000,"used":1000000000000,"used_percent":50},
+	    {"path":"/var/lib/docker/overlay2/f3a9/merged","total":100000000000},
+	    {"path":"/home/bob","total":1000000000},
+	    {"path":"/a/../../etc/shadow","total":1000000000},
+	    {"path":"/","total":9000000000},
+	    {"path":"/mnt/‮gnp.disk","total":1000000000}]}}`
+	_, r, ok := cleanReading([]byte(body))
+	if !ok || r.System == nil {
+		t.Fatal("frame refused")
+	}
+	blob, _ := json.Marshal(r)
+	if strings.Contains(string(blob), "alice") || strings.Contains(string(blob), "bob") {
+		t.Fatalf("a username survived the fold: %s", blob)
+	}
+	if strings.Contains(string(blob), "‮") {
+		t.Fatalf("a bidi override reached the output: %s", blob)
+	}
+	var paths []string
+	for _, m := range r.System.Mounts {
+		paths = append(paths, m.Path)
+		if len([]rune(m.Path)) > maxMountPath {
+			t.Errorf("path over the cap: %q", m.Path)
+		}
+	}
+	want := map[string]bool{"/home": true, "/mnt/backup": true, "/var/lib/docker": true, "/mnt/gnp.disk": true}
+	for _, p := range paths {
+		if !want[p] {
+			t.Errorf("unexpected path %q (all: %v)", p, paths)
+		}
+	}
+	if len(paths) != len(want) {
+		t.Errorf("want %d rows (two homes folding onto one, root and .. refused), got %v", len(want), paths)
+	}
+
+	// The cap, and a list of nothing admissible.
+	var many []string
+	for i := 0; i < 40; i++ {
+		many = append(many, fmt.Sprintf(`{"path":"/mnt/d%d","total":1000000000}`, i))
+	}
+	body = `{"providers":[{"id":"codex","ok":true,"limits":[{"used_percent":1}]}],
+	  "system":{"platform":"linux","mounts":[` + strings.Join(many, ",") + `]}}`
+	_, r, _ = cleanReading([]byte(body))
+	if len(r.System.Mounts) != maxMounts {
+		t.Errorf("want %d rows, got %d", maxMounts, len(r.System.Mounts))
+	}
+
+	body = `{"providers":[{"id":"codex","ok":true,"limits":[{"used_percent":1}]}],
+	  "system":{"platform":"linux","cpu_percent":40,"mounts":"not-an-array"}}`
+	_, r, _ = cleanReading([]byte(body))
+	if r.System == nil || r.System.CPUPct == nil {
+		t.Fatal("a malformed mount list must not sink the system block")
+	}
+	if len(r.System.Mounts) != 0 {
+		t.Errorf("a string is not a mount list: %+v", r.System.Mounts)
 	}
 }
