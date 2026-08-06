@@ -263,17 +263,23 @@ func macCPU(s *System, out string) {
 // runs every second.
 func macMounts(s *System) { fillMounts(s, scanMacMounts) }
 
-func scanMacMounts() []Mount {
+// The bool is "could the mount table be read at all" — see fillMounts.
+func scanMacMounts() ([]Mount, bool) {
 	n, err := syscall.Getfsstat(nil, mntNoWait)
-	if err != nil || n <= 0 {
-		return nil
+	if err != nil {
+		return nil, false
+	}
+	if n <= 0 {
+		// A machine with no filesystems is not a thing; treat it as a failed
+		// read rather than caching "no extra mounts" for thirty seconds.
+		return nil, false
 	}
 	// Room for mounts that appeared between the count and the read; a list
 	// that grew past the buffer is simply truncated by the kernel.
 	buf := make([]syscall.Statfs_t, n+8)
 	n, err = syscall.Getfsstat(buf, mntNoWait)
 	if err != nil || n <= 0 {
-		return nil
+		return nil, false
 	}
 	var found []Mount
 	seenDev := make(map[string]bool, 8)
@@ -292,7 +298,7 @@ func scanMacMounts() []Mount {
 		}
 		found = append(found, Mount{Path: path, Total: fp(total), Used: fp(used), UsedPercent: usedPct})
 	}
-	return found
+	return found, true
 }
 
 // A fixed-width C string field. Cut at the first NUL — the rest of the array is

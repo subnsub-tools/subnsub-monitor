@@ -106,6 +106,28 @@ var mountAnchors = map[string]bool{
 	"/media": true, "/run/media": true, "/Volumes": true,
 }
 
+// The characters a mount path may not contain — the same set cleanNicName
+// refuses, kept as its own function so the two cannot drift apart.
+func pathHasBadRune(p string) bool {
+	for _, r := range p {
+		switch {
+		case r < 0x20, r >= 0x7f && r <= 0x9f:
+			return true
+		case r == 0x061c, r >= 0x200b && r <= 0x200f:
+			return true
+		case r == 0x2028, r == 0x2029, r >= 0x202a && r <= 0x202e:
+			return true
+		case r >= 0x2060 && r <= 0x2064, r >= 0x2066 && r <= 0x2069, r == 0xfeff:
+			return true
+		case r == 0xfffd:
+			// Information was already lost upstream; what it looked like is
+			// not recoverable and not something to guess at.
+			return true
+		}
+	}
+	return false
+}
+
 // `D:` or `D:\` and nothing else — deliberately not "a letter and a colon",
 // which `C:\Users\alice` also satisfies.
 var volumeRootRe = regexp.MustCompile(`^[A-Za-z]:[\\/]?$`)
@@ -336,8 +358,19 @@ func displayText(s string, maxRunes int) string {
 // The control-character and bidi cleanup runs FIRST, so a path cannot use an
 // override to make its folded form render as something else.
 func cleanMountPath(v string) string {
-	s := displayText(v, 512)
-	if s == "" || s == "/" {
+	if len(v) > 2048 {
+		return ""
+	}
+	s := strings.TrimSpace(v)
+	// REFUSED, not stripped, and the same character class interface names are
+	// held to. Stripping was the earlier rule and it had two failures at once:
+	// the helper folds the raw path while this folded the stripped one, so
+	// `/ho<ZWSP>me/alice` folded to /home on one side and kept `alice` on the
+	// other — and the display cleaner does not remove the zero-width joiners
+	// that class does, so the bypass survived the very cleanup meant to stop
+	// it. Stripping is also a rewrite: it invents a path the machine never
+	// reported and then reasons about it.
+	if s == "" || s == "/" || pathHasBadRune(s) || len([]rune(s)) > 512 {
 		return ""
 	}
 	// No leading slash gets exactly one shape: a Windows volume root. Anything

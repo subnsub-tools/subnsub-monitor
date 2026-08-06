@@ -11,7 +11,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 )
 
@@ -275,6 +274,7 @@ func linuxNet(s *System) {
 	// not its traffic.
 	var rxPk, txPk, rxErr, txErr, rxDrop, txDrop float64
 	var sawCounts bool
+	countsWhole := true
 	// The same walk now feeds the per-interface rows too — one read of the
 	// table, two uses of it (see nicCounters).
 	perRx := make(map[string]float64, 8)
@@ -309,19 +309,29 @@ func linuxNet(s *System) {
 		// the transmit side. All six or none: a row this cannot fully account
 		// for is a row whose columns are not where this thinks they are, and
 		// half-parsing it would add one interface's errors to another's total.
-		if len(f) >= 12 {
-			if v, okCounts := parseNonNeg(f[1], f[2], f[3], f[9], f[10], f[11]); okCounts {
-				rxPk, rxErr, rxDrop = rxPk+v[0], rxErr+v[1], rxDrop+v[2]
-				txPk, txErr, txDrop = txPk+v[3], txErr+v[4], txDrop+v[5]
-				sawCounts = true
-			}
+		// EVERY interface that contributed bytes has to contribute counts too,
+		// or none of them do. An interface whose byte columns parse while its
+		// count columns are short leaves a total that covers a different set of
+		// interfaces than the byte total does — and the page divides one by the
+		// other to say how bad a drop rate is.
+		if len(f) < 12 {
+			countsWhole = false
+			continue
 		}
+		v, okCounts := parseNonNeg(f[1], f[2], f[3], f[9], f[10], f[11])
+		if !okCounts {
+			countsWhole = false
+			continue
+		}
+		rxPk, rxErr, rxDrop = rxPk+v[0], rxErr+v[1], rxDrop+v[2]
+		txPk, txErr, txDrop = txPk+v[3], txErr+v[4], txDrop+v[5]
+		sawCounts = true
 	}
 	if !sawAny {
 		s.miss(mNetwork)
 		return
 	}
-	if sawCounts {
+	if sawCounts && countsWhole {
 		s.NetRxPackets, s.NetTxPackets = fp(rxPk), fp(txPk)
 		s.NetRxErrs, s.NetTxErrs = fp(rxErr), fp(txErr)
 		s.NetRxDrops, s.NetTxDrops = fp(rxDrop), fp(txDrop)
@@ -374,15 +384,6 @@ func parseNonNeg(fields ...string) ([]float64, bool) {
 // always too big. So the sum is over WHOLE devices only (the ones with a
 // directory in /sys/block, which excludes partitions) minus the virtual layers
 // that stack on top of them.
-// Which whole devices the last disk sum covered. Package state beside the
-// differencer it guards, for the same reason every other "previous reading"
-// here is: the sampler and the push loop both reach this code, and the answer
-// has to be the same one whichever calls first.
-var diskSet struct {
-	sync.Mutex
-	sig string
-}
-
 func linuxDiskIO(s *System) {
 	blocks, err := os.ReadDir("/sys/block")
 	if err != nil {
@@ -440,18 +441,12 @@ func linuxDiskIO(s *System) {
 	// outright whenever the membership changes, and the next sample starts a
 	// clean interval. One missing reading beats one fabricated spike.
 	sort.Strings(seen)
-	sig := strings.Join(seen, ",")
-	diskSet.Lock()
-	changed := diskSet.sig != sig
-	diskSet.sig = sig
-	diskSet.Unlock()
-	if changed {
-		diskIOPrev.reset()
-		diskIOPrev.delta(read, written, now())
-		s.miss(mDiskIO)
-		return
-	}
-	rBps, wBps := diskIOPrev.delta(read, written, now())
+	// The device set travels WITH the counters into the differencer, so the
+	// membership check, the dropped baseline and the new one all happen under
+	// one lock — see deltaOver. Checking membership separately let two
+	// concurrent collections interleave into the very spike the check exists
+	// to prevent.
+	rBps, wBps := diskIOPrev.deltaOver(strings.Join(seen, ","), read, written, now())
 	if rBps == nil {
 		// First sample since startup, or a device went away and took its
 		// counters out of the sum. Stated rather than shown as an idle disk —
@@ -470,10 +465,12 @@ func linuxDiskIO(s *System) {
 // path as two fields and measures the wrong thing.
 func linuxMounts(s *System) { fillMounts(s, scanLinuxMounts) }
 
-func scanLinuxMounts() []Mount {
+// The bool is "could the mount table be read at all", not "were there any
+// extra filesystems" — see fillMounts for why the two must not collapse.
+func scanLinuxMounts() ([]Mount, bool) {
 	raw, ok := readSmall("/proc/mounts")
 	if !ok {
-		return nil
+		return nil, false
 	}
 	var found []Mount
 	seenDev := make(map[string]bool, 8)
@@ -501,13 +498,18 @@ func scanLinuxMounts() []Mount {
 		found = append(found, Mount{Path: path, Total: fp(total), Used: fp(used), UsedPercent: usedPct})
 		// A machine with hundreds of mounts (a Kubernetes node) must not be
 		// walked in full: every entry costs a statfs, which BLOCKS on a network
-		// filesystem whose server is away. capMounts trims the list that
-		// survives; this bounds the work done to build it.
-		if len(found) >= 4*maxMounts {
+		// filesystem whose server is away. This bounds the WORK, and it is not
+		// the same bound as the eight rows that get sent — capMounts picks the
+		// fullest of whatever reaches it, so a stop here can still cost a full
+		// disk its row. Eight times the row cap because the two answers are
+		// different questions: sixty-four real block-device filesystems on one
+		// machine is already beyond anything this is built for, while thirty-two
+		// was inside the range a container host can reach.
+		if len(found) >= 8*maxMounts {
 			break
 		}
 	}
-	return found
+	return found, true
 }
 
 // The kernel escapes space, tab, newline and backslash in mount fields as
