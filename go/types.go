@@ -169,6 +169,17 @@ type Snapshot struct {
 	// because neither the shell nor remote-update switches grant it. The only
 	// current target is a bounded Linux process resource summary; see inspect.go.
 	Diagnostics bool `json:"diag"`
+	// Whether this machine has been told WHO may command it, and therefore
+	// requires a signature the relay cannot produce (signing.go). True as soon
+	// as a trusted-keys file exists — including one too damaged to read, which
+	// refuses everything rather than reverting to unsigned; what this reports
+	// is what the machine will DEMAND, not how many keys it holds.
+	//
+	// Reported because the difference is invisible from the dashboard
+	// otherwise, and the two states are not equally safe: a machine with no
+	// pinned key runs what the relay hands it. A card that showed both the same
+	// way would let the weaker one pass for the stronger.
+	Signed bool `json:"sgn"`
 	// Machine health. A pointer so a platform that can measure nothing at all
 	// omits the key rather than shipping a shell of nulls — see system.go for
 	// what each platform can actually read, and why.
@@ -254,7 +265,7 @@ func collectorProvenance(providerID, method string) *CollectorProvenance {
 func collectAll() Snapshot {
 	snap := Snapshot{CapturedAt: now(), AgentID: agentID(), AgentLabel: agentLabel(),
 		HelperVersion: helperVersion, Console: consoleEnabled(), Update: updateAllowed(),
-		Diagnostics: diagnosticsEnabled()}
+		Diagnostics: diagnosticsEnabled(), Signed: loadTrust().sealed}
 	// Concurrently, holding the registry's order for the output. Serial was
 	// fine at four collectors; at eight, five of them making real requests
 	// with ten-second deadlines, a bad network day could stack past the

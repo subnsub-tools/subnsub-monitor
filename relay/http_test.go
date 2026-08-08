@@ -342,3 +342,37 @@ func TestDistIsOffByDefault(t *testing.T) {
 		t.Errorf("/dl with no -dist: %d, want 404", r.StatusCode)
 	}
 }
+
+// The push response on the wire: JSON, `ok`, and the poll bit — present on
+// every 200. A helper old enough to expect "ok" never reads the body; a new
+// one reads exactly this shape from either relay implementation.
+func TestPushResponseCarriesTheHint(t *testing.T) {
+	srv, hub := testServer(t)
+	r := do(t, srv, "POST", "/push", machTok, string(pushBody("hintone", true, false)))
+	if r.StatusCode != 200 {
+		t.Fatalf("status %d", r.StatusCode)
+	}
+	var out struct {
+		Ok   bool  `json:"ok"`
+		Poll *bool `json:"poll"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !out.Ok || out.Poll == nil || *out.Poll {
+		t.Fatalf("idle answer = %+v", out)
+	}
+	if e := hub.enqueueExec("hintone", "cmd1", "id", "", 0); e != enqOK {
+		t.Fatalf("enqueue: %v", e)
+	}
+	r = do(t, srv, "POST", "/push", machTok, string(pushBody("hintone", true, false)))
+	var out2 struct {
+		Poll *bool `json:"poll"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&out2); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out2.Poll == nil || !*out2.Poll {
+		t.Fatalf("queued answer = %+v", out2)
+	}
+}

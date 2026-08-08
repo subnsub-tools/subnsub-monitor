@@ -275,9 +275,14 @@ func routes(hub *Hub, az auth, dist *os.Root) *http.ServeMux {
 		if !ok {
 			return
 		}
-		switch hub.push(body) {
+		st, poll := hub.push(body)
+		switch st {
 		case pushOK:
-			io.WriteString(w, "ok")
+			// One bit rides back on the request the helper already made:
+			// whether /commands has (or may soon have) something for it. Read
+			// only by helpers that take instructions; everyone older ignores
+			// the body exactly as they ignored "ok".
+			writeJSON(w, map[string]any{"ok": true, "poll": poll})
 		case pushFull:
 			// Said plainly, and once per push: a silent cap reads as a broken
 			// helper on the machine that hit it.

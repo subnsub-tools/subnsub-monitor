@@ -1,0 +1,10 @@
+{
+ "pub": "zKeHocdYTsNSB7WrWqnPt7Q4WyEJtVY/ncVNFi83p98=",
+ "agent": "ho2JBnXCez_Q",
+ "id": "c7f3a1",
+ "kind": "sh",
+ "target": "",
+ "at": 1785969600,
+ "cmd": "systemctl status nginx\nuptime — ok",
+ "sig": "c58nDlJdTwMLd6SnRhd3bnVqWctQR+tqe6r22pXmDUT9YQvprDrQb5Daox6hz0KeTNkYcRUn7ZRIua9Sp4maDQ=="
+}
