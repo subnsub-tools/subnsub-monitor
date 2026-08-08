@@ -189,9 +189,11 @@ func connect(base, token string, every float64) {
 	url := strings.TrimRight(base, "/") + "/push"
 	// The token is not fixed for the life of the process: it expires, and it is
 	// traded for a fresh one before it does. See renew.go for why that happens
-	// against the site rather than against the relay, why renewal is OFF for a
-	// relay we do not issue for, and why the relay's own responses are still
-	// never parsed.
+	// against the site rather than against the relay, and why renewal never
+	// trusts anything a relay answers. The push response — once discarded
+	// unread by everyone — is now read on machines that take instructions,
+	// under the rule and the bound in hint.go; a monitoring-only machine
+	// still closes it unread.
 	renew := newRenewer(base)
 	// The console runs beside this loop, not inside it: a held poll must never
 	// delay a reading, and a command that takes 30 seconds must not make the
@@ -199,7 +201,11 @@ func connect(base, token string, every float64) {
 	// rather than a copy, because renewal rotates that string underneath it.
 	tok := &tokenBox{}
 	tok.set(token)
-	go consoleLoop(base, tok)
+	// The channel back: each push response may say whether /commands has
+	// anything, and the console loop stretches its idle timer when the relay
+	// has taken over the pacing. Written by this loop, read by that one.
+	hints := newHintBox()
+	go consoleLoop(base, tok, hints)
 	// Started before the first collection, so no push ever measures the system
 	// for itself — the first one to do that would take the baseline every
 	// subsequent sample's delta is measured against (see sampler.go).
@@ -245,9 +251,14 @@ func connect(base, token string, every float64) {
 		case err != nil:
 			fails++
 			warnf("push failed")
+			// No response, no hint — and the backoff below stretches the gap
+			// past a shell command's whole lifetime. If anything is waiting,
+			// only a poll can find it now, so the console loop is woken on
+			// every path that fails to deliver a hint (see hint.go).
+			hints.wakeNow()
 			wait = every * math.Min(math.Pow(2, float64(fails)), 10)
 		case resp.StatusCode == 200:
-			resp.Body.Close()
+			absorbHint(hints, resp.Body)
 			if fails > 0 {
 				warnf("reconnected")
 			}
@@ -264,6 +275,7 @@ func connect(base, token string, every float64) {
 			// after it, the two are no longer in step.
 			resp.Body.Close()
 			warnf("relay is pacing us; retrying shortly")
+			hints.wakeNow() // a paced push carried no hint either
 			wait = 2 + 3*jitter()
 		default:
 			// 4xx means this client is wrong (bad token, room not enabled) and
@@ -272,6 +284,7 @@ func connect(base, token string, every float64) {
 			resp.Body.Close()
 			fails++
 			warnf("push rejected: %d", code)
+			hints.wakeNow() // rejected pushes carry no hint; see the err case
 			// 401/403 is the relay saying this token is not (or is no longer)
 			// one it will take — the other moment worth asking the site for a
 			// new one. What that means for the renewal state lives in

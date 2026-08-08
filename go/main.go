@@ -31,6 +31,8 @@ const usage = `subnsub-monitor — AI coding quota for machines you can't reach
   subnsub-monitor console [on|off]       show or set whether the dashboard may run commands here
   subnsub-monitor update [on|off]        show or set whether the dashboard may replace this helper
   subnsub-monitor diagnostics [on|off]   show or set read-only on-demand diagnostics
+  subnsub-monitor trust [KEY]            list, or add, a dashboard key allowed to command this machine
+  subnsub-monitor untrust KEY            stop accepting commands signed by that key
   subnsub-monitor version                print this build's version and exit
   subnsub-monitor selftest               show what the collectors can and cannot open
 
@@ -55,6 +57,16 @@ the published checksum, so the relay cannot point this machine at anything else.
 Turning the console on implies it — a console can already run the installer —
 and 'update on' is for a machine that wants the button and no console. There is
 no timer: nothing is downloaded until somebody presses it.
+
+trust is who may command this machine, as opposed to whether it takes commands
+at all. The installer pins the dashboard's public key when you paste its line;
+after that, 'trust <key>' adds another (a second browser, a colleague) and
+'untrust' removes one. With at least one key pinned, a command must carry a
+signature made by the matching private key — which lives in a browser and never
+reaches the relay — so a relay can drop or delay a command but cannot write one.
+With no key pinned this machine behaves as it always did and runs what the relay
+hands it. Both states are shown on the dashboard, because they are not equally
+safe.
 
 diagnostics is OFF until you turn it on here. It is read-only and independent
 of the console: the dashboard may request a bounded top-process resource list,
@@ -246,6 +258,53 @@ func main() {
 			fmt.Printf("on   (%s)\n", agentID())
 		} else {
 			fmt.Printf("off  (%s)\n", agentID())
+		}
+
+	case "trust":
+		// Granting authority is a thing you do AT the machine, like every other
+		// switch here. There is deliberately no way to add a key over the
+		// network: an endpoint that could would hand back the property this
+		// whole mechanism buys.
+		if len(args) < 2 {
+			t := loadTrust()
+			keys := t.keys
+			if len(keys) == 0 {
+				if t.sealed {
+					// Not the same sentence as "nothing pinned", because this
+					// machine is refusing every command right now and the reason
+					// is a file somebody can look at.
+					fmt.Printf("a trusted-keys file exists but holds no usable key,\n"+
+						"so EVERY command is being refused. Fix or remove %s\n", trustedKeysPath())
+					break
+				}
+				fmt.Println("no keys trusted — this machine runs what the relay hands it")
+				break
+			}
+			fmt.Printf("%d key(s) trusted; commands must be signed by one of them\n", len(keys))
+			for _, k := range keys {
+				fmt.Println("  " + base64.StdEncoding.EncodeToString(k))
+			}
+			break
+		}
+		if err := trustKey(args[1]); err != nil {
+			warnf("could not trust that key: %v", err)
+			os.Exit(1)
+		}
+		fmt.Printf("trusted; this machine now runs only commands signed by a trusted key (%s)\n", agentID())
+
+	case "untrust":
+		if len(args) < 2 {
+			warnf("say 'untrust <key>' — 'trust' with no argument lists them")
+			os.Exit(2)
+		}
+		if err := untrustKey(args[1]); err != nil {
+			warnf("could not remove that key: %v", err)
+			os.Exit(1)
+		}
+		if !loadTrust().sealed {
+			fmt.Println("removed; NO keys are trusted now — this machine runs what the relay hands it")
+		} else {
+			fmt.Println("removed")
 		}
 
 	case "version":

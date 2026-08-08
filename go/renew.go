@@ -25,7 +25,8 @@ package main
 // And it does not talk to the relay. The relay has no database and no idea who
 // anyone is; entitlement lives on the site that issued the token in the first
 // place. Renewing there keeps the relay a stateless verifier that never learns
-// an identity, and keeps push responses unparsed — see transport.go.
+// an identity, and never lets a relay response steer renewal — see
+// transport.go, and hint.go for the one thing a push response now says.
 //
 // ⚠ THE TOKEN IS A BEARER SECRET AND IT BELONGS TO ONE RELAY. This file will
 // not send it anywhere the operator did not point it. Renewal is OFF unless the

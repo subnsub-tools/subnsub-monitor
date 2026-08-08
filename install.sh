@@ -37,6 +37,12 @@
 set -eu
 
 RELAY="${MON_RELAY:-https://monitor.subnsub.com}"
+# The dashboard key allowed to command this machine, if the line you copied
+# carries one. It is a PUBLIC key: the private half never leaves the browser
+# that made it, and the relay never sees either. Pinning it here is what
+# turns "the relay could tell this machine to run something" into "only a
+# browser holding that key can" — see helper/go/signing.go.
+PUBKEY="${MON_PUBKEY:-}"
 BASE="${MON_BASE:-https://tools.subnsub.com/monitor}"   # where the binaries live
 NAME=subnsub-monitor
 BINDIR="${MON_BINDIR:-$HOME/.local/bin}"
@@ -51,13 +57,13 @@ LABEL=com.subnsub.monitor   # shows up in `launchctl list`; brand domain there t
 # script that publishes the binaries. A binary that does not match is not installed, and a swapped binary
 # would otherwise be free to read ~/.claude/.credentials.json and post it
 # somewhere, which no amount of care in the Go source can prevent.
-SUM_linux_amd64=ad0307924380313cb0305a9e2ff2893046585fbff4cbe0a81936555519dda01d
-SUM_linux_arm64=c3bfb154a3eaa21d1945a21cdde51b482c181974a1aa40a823bfe887de41034c
-SUM_linux_arm=e87e823d860495ab037281429e3a3c1870f8b27ab6d5e538c4e8cc1eeadd9645
-SUM_darwin_amd64=7f460aa5e2dc0376c35c1d3714b653ec6ebe786c57a2b849e3204f304eff546f
-SUM_darwin_arm64=167a3330f6a334b7d5e3307fb5f9b69ac989306db85de8f281d944ed0b0f14e0
-SUM_freebsd_amd64=3d8cb931b7fcf4cd41d6ce790b5034cacdd08941837fdfbf5818875e7a757859
-SUM_freebsd_arm64=630559e1cbb0d17cbb9412a440756aa8bf65dd5c2bb5246d8753258154a80a6e
+SUM_linux_amd64=a16c724c3655923fec78743b8dd3fa34da2afa42872d1a473d2b37e3d25487f9
+SUM_linux_arm64=c92508a441bd032aae5d9fc416fba17d61d56582053cdb783709df5a6ce132e6
+SUM_linux_arm=da638aa698b79a6d4fe87ee736e65ce9c909a26b8f6e502c9577627d45f68041
+SUM_darwin_amd64=e94e6d9ecc67883ecebd16616cd910ec4aa9942aae55f7d38133ebfa7075da40
+SUM_darwin_arm64=8d5c12f1d5f15a26469f36937ede2b6e9aa9ddf58915f8a3b4401b6be4f08833
+SUM_freebsd_amd64=6684f7e705ad57f87ac8786bc16c987fdb0d11d8773f11515a8e5eadabc0ea4b
+SUM_freebsd_arm64=a23426ffdcc415ddb9e04d3becc358a5afa9d6b1c8e724ef29e9540c460bdb96
 
 say()  { printf '%s\n' "$*"; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -158,6 +164,30 @@ case "$TOKEN" in
 esac
 len=${#TOKEN}
 [ "$len" -ge 24 ] && [ "$len" -le 128 ] || die "token must be 24-128 characters"
+
+# Base64, and the length Ed25519 public keys have. Checked here rather than
+# only in the helper because this value is written into a config file, and
+# "whatever was in the environment" is not a thing to write into one.
+# A 32-byte key in standard base64 is exactly 43 characters and one trailing
+# '=' — nothing else is that shape. Checking the shape rather than "44 of the
+# right characters" matters because everything that gets past here is written
+# into the trusted-keys file, and a value the HELPER cannot decode leaves that
+# file existing with no usable key in it: the machine then refuses every
+# command until somebody fixes it by hand. Better to refuse the install line
+# that carried it, here, while there is a person watching.
+if [ -n "$PUBKEY" ]; then
+  case "$PUBKEY" in
+    *[!A-Za-z0-9+/=]*) die "MON_PUBKEY has characters outside base64" ;;
+  esac
+  case "$PUBKEY" in
+    *=) ;;
+    *) die "MON_PUBKEY is not a 32-byte Ed25519 key in base64" ;;
+  esac
+  case "${PUBKEY%=}" in
+    *[!A-Za-z0-9+/]*) die "MON_PUBKEY is not a 32-byte Ed25519 key in base64" ;;
+  esac
+  [ "${#PUBKEY}" -eq 44 ] || die "MON_PUBKEY is not a 32-byte Ed25519 key in base64"
+fi
 
 # The relay URL is interpolated into the same files. Keep it to an https URL
 # made of characters that cannot terminate an XML string or a unit directive.
@@ -349,6 +379,18 @@ case "$UPDATE_ARG" in
   on)  : > "$conf/update"; chmod 0600 "$conf/update" ;;
   off) rm -f "$conf/update" ;;
 esac
+
+# --------------------------------------------------------- trusted key file
+# APPENDED, never overwritten: re-running the installer from a second browser
+# is how a second key gets added, and truncating here would silently revoke the
+# first one — locking whoever is not at this keyboard out of their own machine.
+# Duplicates are harmless; the helper matches any pinned key.
+if [ -n "$PUBKEY" ]; then
+  if ! grep -qxF "$PUBKEY" "$conf/trusted-keys" 2>/dev/null; then
+    printf '%s\n' "$PUBKEY" >> "$conf/trusted-keys"
+  fi
+  chmod 0600 "$conf/trusted-keys"
+fi
 
 # Materialise this machine's dashboard id now, out here, rather than leaving it
 # to the first run of the service. The service is sandboxed (see the unit

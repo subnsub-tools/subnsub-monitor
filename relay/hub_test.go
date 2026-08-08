@@ -42,7 +42,7 @@ func hangsUp(d time.Duration) <-chan struct{} {
 
 func TestPushThenCommandRoundTrip(t *testing.T) {
 	h := newHub("")
-	if st := h.push(pushBody("machineone", true, false)); st != pushOK {
+	if st, _ := h.push(pushBody("machineone", true, false)); st != pushOK {
 		t.Fatalf("push status %v", st)
 	}
 	if e := h.enqueueExec("machineone", "cmd1", "uname -a", "", 0); e != enqOK {
@@ -206,12 +206,12 @@ func TestACancelledPollDoesNotSpendACommand(t *testing.T) {
 func TestTheCapEvictsAQuietMachineButNotALiveOne(t *testing.T) {
 	h := newHub("")
 	for i := 0; i < maxMachines; i++ {
-		if st := h.push(pushBody("machine"+itoaTest(i)+"x", false, false)); st != pushOK {
+		if st, _ := h.push(pushBody("machine"+itoaTest(i)+"x", false, false)); st != pushOK {
 			t.Fatalf("push %d: %v", i, st)
 		}
 	}
 	// Every slot is live, so the cap holds and says so.
-	if st := h.push(pushBody("newcomerone", false, false)); st != pushFull {
+	if st, _ := h.push(pushBody("newcomerone", false, false)); st != pushFull {
 		t.Fatalf("evicted a live machine: %v", st)
 	}
 	// Age one past the offline threshold; now the newcomer takes its place.
@@ -219,7 +219,7 @@ func TestTheCapEvictsAQuietMachineButNotALiveOne(t *testing.T) {
 	h.machines["machine7x"].SeenAt = nowMS() - (offlineAfter+60)*1000
 	h.mu.Unlock()
 	h.setName("machine7x", "old box")
-	if st := h.push(pushBody("newcomerone", false, false)); st != pushOK {
+	if st, _ := h.push(pushBody("newcomerone", false, false)); st != pushOK {
 		t.Fatalf("a quiet slot was not reclaimed: %v", st)
 	}
 	if h.machines["machine7x"] != nil {
@@ -275,15 +275,15 @@ func TestMachineCapIsRefusedNotSilent(t *testing.T) {
 	h := newHub("")
 	for i := 0; i < maxMachines; i++ {
 		id := "machine" + strings.Repeat("x", i%20) + itoaTest(i)
-		if st := h.push(pushBody(id, false, false)); st != pushOK {
+		if st, _ := h.push(pushBody(id, false, false)); st != pushOK {
 			t.Fatalf("push %d refused: %v", i, st)
 		}
 	}
-	if st := h.push(pushBody("onemoremachine", false, false)); st != pushFull {
+	if st, _ := h.push(pushBody("onemoremachine", false, false)); st != pushFull {
 		t.Fatalf("past the cap: %v, want pushFull", st)
 	}
 	// An existing machine still pushes fine at the cap.
-	if st := h.push(pushBody("machine0", false, false)); st != pushOK {
+	if st, _ := h.push(pushBody("machine0", false, false)); st != pushOK {
 		t.Fatalf("existing machine refused at the cap: %v", st)
 	}
 }
@@ -423,7 +423,7 @@ func TestSilentMachinesAreForgotten(t *testing.T) {
 		t.Fatal("a live machine was swept")
 	}
 	// And the freed slot is usable.
-	if st := h.push(pushBody("machineone", false, false)); st != pushOK {
+	if st, _ := h.push(pushBody("machineone", false, false)); st != pushOK {
 		t.Fatalf("the returning machine was refused: %v", st)
 	}
 }
@@ -463,7 +463,7 @@ func TestExpiredRecordsDoNotComeBackFromDisk(t *testing.T) {
 // carries it; it cannot make one, and that is the whole property.
 func TestSignatureSurvivesTheMailbox(t *testing.T) {
 	h := newHub("")
-	if st := h.push(pushBody("machineone", true, false)); st != pushOK {
+	if st, _ := h.push(pushBody("machineone", true, false)); st != pushOK {
 		t.Fatalf("push status %v", st)
 	}
 	const sig = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
@@ -495,10 +495,35 @@ func TestSignatureSurvivesTheMailbox(t *testing.T) {
 // working, and this relay is not the place that decides.
 func TestUnsignedCommandsStillQueue(t *testing.T) {
 	h := newHub("")
-	if st := h.push(pushBody("machineone", true, false)); st != pushOK {
+	if st, _ := h.push(pushBody("machineone", true, false)); st != pushOK {
 		t.Fatalf("push status %v", st)
 	}
 	if e := h.enqueueExec("machineone", "c1", "uptime", "", 0); e != enqOK {
 		t.Fatalf("an unsigned command was refused by the relay: %v", e)
+	}
+}
+
+// The push answer's second value: a machine with nothing waiting is told not
+// to poll, one with a queued command or an open console is summoned. This is
+// the bit the helper reads instead of polling on a timer; the hosted relay
+// answers it identically, which is the whole point of it being here.
+func TestPushSaysWhetherPollingIsWorthIt(t *testing.T) {
+	h := newHub("")
+	if _, poll := h.push(pushBody("machineone", true, false)); poll {
+		t.Fatal("an idle machine must not be summoned")
+	}
+	if e := h.enqueueExec("machineone", "cmd1", "uname -a", "", 0); e != enqOK {
+		t.Fatalf("enqueue: %v", e)
+	}
+	if _, poll := h.push(pushBody("machineone", true, false)); !poll {
+		t.Fatal("a queued command must summon the machine")
+	}
+	// Collected: the queue is empty again, but queuing also opened the
+	// console, and an open console is a reason to keep coming on its own.
+	if ans := h.commands("machineone", live()); len(ans.Commands) != 1 {
+		t.Fatalf("collect: %+v", ans)
+	}
+	if _, poll := h.push(pushBody("machineone", true, false)); !poll {
+		t.Fatal("an open console must keep the machine coming")
 	}
 }

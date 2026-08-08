@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -192,28 +193,52 @@ func TestBothLocalesCarryEveryDetailPhrase(t *testing.T) {
 			t.Errorf("translations.js (zh-CN) has no %q — it would show English", key)
 			continue
 		}
+		// Checked against EVERY value in the file rather than only the two packs
+		// this test can locate: the panel ships eleven locales as of 2026-08-06,
+		// and which pack a given string lives in is not something a regex over
+		// this file should have to know.
+		//
+		// The COUNT is half the check. Deleting a whole locale's line leaves the
+		// remaining ten agreeing with each other, and the page then falls back to
+		// English without saying so — the exact failure this file exists to catch,
+		// which the per-value loop alone sails straight past.
+		values := localeValues(text, key)
+		if len(values) != localePacks {
+			t.Errorf("%q is written %d times, want %d — a locale is missing it and would show English",
+				key, len(values), localePacks)
+		}
 		// An argument dropped in translation is a sentence with a hole in it:
-		// "the endpoint answered 429" becomes "the endpoint answered". Checked
-		// against EVERY value in the file rather than only the two packs this
-		// test can locate: the panel ships eleven locales as of 2026-08-06, and
-		// which pack a given string lives in is not something a regex over this
-		// file should have to know.
-		wantArg := strings.Contains(phrase, "{a}")
-		for _, v := range localeValues(text, key) {
-			if strings.Contains(v, "{a}") != wantArg {
-				t.Errorf("a translation of %q loses or invents the {a} argument: %s", key, v)
+		// "the endpoint answered 429" becomes "the endpoint answered". Counted
+		// rather than merely detected: the page splices with a string pattern,
+		// which replaces the FIRST {a} only, so a second one reaches the reader
+		// as literal "{a}".
+		wantArgs := strings.Count(phrase, "{a}")
+		for _, v := range values {
+			if got := strings.Count(v, "{a}"); got != wantArgs {
+				t.Errorf("a translation of %q carries %d {a} arguments, want %d: %s",
+					key, got, wantArgs, v)
 			}
 		}
 	}
 }
 
+// How many packs a Monitor string is expected to be written in. Every locale
+// the site ships carries its own Monitor text since 2026-08-06; a detail
+// sentence present in ten of them is a bug, not a translation backlog.
+const localePacks = 11
+
 // One key's value out of a pack. Both quote styles on the key AND on the
 // value: the hand-written packs quote keys with ', the generated blocks quote
 // them with ", and an English string containing an apostrophe has to be
 // written with double quotes either way.
+//
+// The value pattern steps over `\"` and `\'` rather than stopping there. A
+// naive [^"]* ends at the first escaped quote and hands back a prefix — which
+// would read as a translation that had lost its {a} when it had not, and
+// (worse) hide one that really had.
 var keyValueRE = func(key string) *regexp.Regexp {
 	q := regexp.QuoteMeta(key)
-	return regexp.MustCompile(`['"]` + q + `['"]:\s*(?:"([^"]*)"|'([^']*)')`)
+	return regexp.MustCompile(`['"]` + q + `['"]:\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')`)
 }
 
 func localeValue(pack, key string) string {
@@ -222,9 +247,9 @@ func localeValue(pack, key string) string {
 		return ""
 	}
 	if m[1] != "" {
-		return m[1]
+		return unescapeJS(m[1])
 	}
-	return m[2]
+	return unescapeJS(m[2])
 }
 
 // Every value written for one key, in every pack in the file.
@@ -232,10 +257,92 @@ func localeValues(text, key string) []string {
 	var out []string
 	for _, m := range keyValueRE(key).FindAllStringSubmatch(text, -1) {
 		if m[1] != "" {
-			out = append(out, m[1])
+			out = append(out, unescapeJS(m[1]))
 		} else {
-			out = append(out, m[2])
+			out = append(out, unescapeJS(m[2]))
 		}
 	}
 	return out
+}
+
+// The string a JS literal denotes. Without it a phrase written with an escaped
+// quote never equals the Go one it is supposed to match, and the mismatch looks
+// like a translation error.
+//
+// Every control escape is decoded, not just the two these packs happen to use
+// today: mapping `\r` to a plain "r" would make a value containing a carriage
+// return compare EQUAL to one without it, and a check that quietly accepts a
+// string the browser will render differently is worse than no check. Anything
+// else after a backslash is the character itself, which is what JS does too.
+func unescapeJS(s string) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\\' || i+1 >= len(s) {
+			b.WriteByte(s[i])
+			continue
+		}
+		i++
+		switch s[i] {
+		case 'n':
+			b.WriteByte('\n')
+		case 't':
+			b.WriteByte('\t')
+		case 'r':
+			b.WriteByte('\r')
+		case 'b':
+			b.WriteByte('\b')
+		case 'f':
+			b.WriteByte('\f')
+		case 'v':
+			b.WriteByte('\v')
+		case '0':
+			b.WriteByte(0)
+		case 'x', 'u':
+			// \xNN and \uNNNN (and \u{…}). Decoded properly or reported: a hex
+			// escape silently read as "x" plus digits is the same class of lie
+			// as the control characters above.
+			r, n := decodeHexEscape(s[i:])
+			if n == 0 {
+				b.WriteByte(s[i])
+				continue
+			}
+			b.WriteRune(r)
+			i += n - 1
+		default: // \" \' \\ and anything else: the character itself
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
+}
+
+// One \xNN, \uNNNN or \u{…} starting at s[0] ('x' or 'u'), and how many bytes
+// it occupies. n == 0 means it is not one this understands.
+func decodeHexEscape(s string) (rune, int) {
+	digits := 2
+	start := 1
+	if s[0] == 'u' {
+		digits = 4
+		if len(s) > 1 && s[1] == '{' {
+			end := strings.IndexByte(s, '}')
+			if end < 0 {
+				return 0, 0
+			}
+			v, err := strconv.ParseInt(s[2:end], 16, 32)
+			if err != nil || v < 0 || v > 0x10FFFF {
+				return 0, 0
+			}
+			return rune(v), end + 1
+		}
+	}
+	if len(s) < start+digits {
+		return 0, 0
+	}
+	v, err := strconv.ParseInt(s[start:start+digits], 16, 32)
+	if err != nil {
+		return 0, 0
+	}
+	return rune(v), start + digits
 }

@@ -196,10 +196,15 @@ const (
 	pushFull
 )
 
-func (h *Hub) push(body []byte) pushStatus {
+// The second return is the push response's one bit: whether /commands is
+// worth calling right now. LOCKSTEP with the hosted relay's push tail — same
+// field, same meaning, same JSON body — so the shipped helper cannot tell
+// the two apart. Recomputed on every push, which is what makes a lost
+// response harmless: the next one repeats the answer.
+func (h *Hub) push(body []byte) (pushStatus, bool) {
 	id, rd, ok := cleanReading(body)
 	if !ok {
-		return pushBad
+		return pushBad, false
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -207,7 +212,7 @@ func (h *Hub) push(body []byte) pushStatus {
 	m := h.machines[id]
 	if m == nil {
 		if len(h.machines) >= maxMachines && !h.evictLRU() {
-			return pushFull
+			return pushFull, false
 		}
 		m = &machine{issued: map[string]*pending{}}
 		h.machines[id] = m
@@ -218,7 +223,10 @@ func (h *Hub) push(body []byte) pushStatus {
 
 	h.broadcast(frame{"type": "reading", "agent_id": id, "seen_at": m.SeenAt,
 		"reading": rd, "roster": h.roster()})
-	return pushOK
+	// Swept first, like every read of the queue, so an expired command does
+	// not summon a machine for nothing.
+	m.reap(m.SeenAt)
+	return pushOK, len(m.queue) > 0 || m.termUntil > m.SeenAt
 }
 
 // evictLRU makes room for one new machine by forgetting the least recently

@@ -241,6 +241,12 @@ type consoleCmd struct {
 	Cmd  string `json:"cmd"`
 	// A closed typed diagnostic target. It is never copied into a shell line.
 	Target string `json:"target,omitempty"`
+	// Who asked for this, if anybody can prove it. Signed in the dashboard's
+	// browser over every field above; the relay carries these two and cannot
+	// produce them. Absent on a dashboard or a relay too old to sign, which is
+	// why an unpinned machine still runs what it is given — see signing.go.
+	Sig      string `json:"sig,omitempty"`
+	IssuedAt int64  `json:"at,omitempty"`
 }
 
 type consolePoll struct {
@@ -288,7 +294,11 @@ func consoleWait(next int, fallback time.Duration) time.Duration {
 
 // Ask the relay for work, run it, report back. Runs forever, alongside the
 // push loop, and never lets its own failures reach that loop.
-func consoleLoop(base string, tok *tokenBox) {
+//
+// `hints` is that loop's one channel back (see hint.go): when the relay
+// speaks the push hint and says nobody is watching, the cold timer here
+// stretches to a safety net and the actual "come now" arrives with a push.
+func consoleLoop(base string, tok *tokenBox, hints *hintBox) {
 	pollURL := strings.TrimRight(base, "/") + "/commands"
 	resultURL := strings.TrimRight(base, "/") + "/result"
 	client := &http.Client{
@@ -374,11 +384,41 @@ func consoleLoop(base string, tok *tokenBox) {
 			if !shell && diagnostics && wait > diagnosticsIdleWait {
 				wait = diagnosticsIdleWait
 			}
-			time.Sleep(wait)
+			// ...unless the relay speaks the push hint and just said nobody
+			// is watching: then the next "come now" rides a push response and
+			// the timer becomes a long safety net (see hintDormant). A first
+			// click still lands within one push interval — the enqueue makes
+			// the very next push answer `poll: true` — and every way that
+			// push could fail to deliver the hint wakes this loop instead
+			// (see wakeNow). The warm and legacy sleeps stay plain timers on
+			// purpose: warm pushes answer `true` every time, and listening
+			// to them here would compress the ten-second cadence into the
+			// push cadence.
+			if hintDormant(hints.signalMode(), poll.Next) {
+				hints.dormantAwait(hintSafetyWait)
+			} else {
+				time.Sleep(wait)
+			}
 			continue
 		}
 		for _, c := range poll.Commands {
 			if c.ID == "" {
+				continue
+			}
+			// Before the switches, not after: whether this machine takes
+			// instruction is one question, and whether THIS instruction came
+			// from someone allowed to give it is a different one. Answering the
+			// second first means a forged command is refused even for a kind
+			// this build would otherwise have run.
+			//
+			// Read per COMMAND, not per poll, like the switches: revoking a key
+			// has to be the fast direction too, and a relay is free to hand back
+			// a batch — reading once above would let everything in that batch
+			// keep verifying against a key somebody had just removed.
+			if why := verifyCommand(c, id, loadTrust(), time.Now()); why != "" {
+				consoleReport(client, resultURL, id, tok,
+					consoleResult{ID: c.ID, Kind: c.Kind, Target: c.Target,
+						Code: -1, Error: why})
 				continue
 			}
 			// Re-read the switches between the poll and the command, and again
