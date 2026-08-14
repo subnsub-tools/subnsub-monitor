@@ -20,3 +20,17 @@ pushes to a relay, so a browser can watch a machine it has no route to. No
 CodexBar source code is used or included here.
 
 Credit follows the idea, not the source tree. CodexBar got there first.
+
+--------------------------------------------------------------------------------
+
+The optional session-search feature installs AgentsView, which provides the
+per-machine index that search queries:
+
+    https://github.com/kenn-io/agentsview
+    MIT License, Copyright (c) Kenn Software LLC
+
+AgentsView is fetched at install time from its own published releases, pinned
+to a reviewed version and verified against a checksum carried in this program.
+No AgentsView source code is used or included here; it is installed as an
+unmodified upstream binary only when a machine is set up with --sessions (or
+`subnsub-monitor sessions install`).

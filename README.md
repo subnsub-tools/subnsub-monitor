@@ -891,6 +891,79 @@ because it is where the file formats, the endpoint, and every trap five review
 rounds turned up were actually found. The Go port is what ships; the Python is
 what explains it.
 
+
+
+---
+
+
+## Searching a machine's coding-agent sessions (2026.08.15, new)
+
+The dashboard can search the coding-agent sessions across every machine you
+watch — one query, answered by each box that has its console switched on — and
+show you the matching lines. This section is the machine's half of that: what
+gets installed, why it rides the console, and what does and does not leave the
+box.
+
+**It runs over the console, and only there.** The search is not a new channel.
+It is a console command like any other — the dashboard sends one, the helper
+runs it as this user, and the machine logs it before it runs, exactly as the
+console section above describes. The consequence is the whole security story:
+a machine whose console is off is never asked, and a machine whose console is
+on has *already* granted arbitrary `/bin/sh`, so the search exposes nothing
+that was not already reachable. There is deliberately no second path — no
+transcripts pushed out to a central store, no extra port, no tunnel. If you
+would not turn the console on for a machine, its sessions stay unsearchable,
+and that is the correct outcome rather than a gap.
+
+**What leaves the machine is snippets, not sessions.** The index lives here.
+A search runs here, against the local index, and what travels back to the
+browser is the same shape a grep gives you: the matching line and enough
+around it to read, tagged with which project and which agent. The full
+transcript — the code, the paths, the keys a session might contain — never
+leaves. That is the reason the feature is built this way and not by shipping
+every machine's conversations to one queryable place.
+
+**The index is [AgentsView](https://github.com/kenn-io/agentsview)** (MIT), a
+local-first session viewer that reads the on-disk history of some forty coding
+agents. The helper does not reimplement that; it installs it. Two rules govern
+the install, and they are the two the self-update section already argues for:
+
+- **We pin the version.** The helper fetches a *reviewed* AgentsView release,
+  named in `helper/go/sessions.go`, not whatever is newest. It moves when a
+  helper release moves it, so a machine never silently tracks an upstream
+  change nobody here looked at.
+- **We carry the checksum.** The expected SHA-256 of each platform's archive is
+  compiled into this binary — it is not fetched next to the download, because a
+  checksum a payload points you at proves only that the payload matches itself.
+  Bytes that do not match the pinned sum are refused, whatever host a redirect
+  led to. That pinned sum is the trust root, which is also why following
+  GitHub's release redirect to its CDN is safe here.
+
+The download is verified whole before anything is unpacked, the single binary
+is extracted to `~/.local/bin/agentsview`, it must prove it runs before it is
+installed, and telemetry is turned off in the same stroke
+(`AGENTSVIEW_TELEMETRY_ENABLED=0` in `~/.agentsview/env`) — a tool this helper
+places on someone's machine should not start phoning home on our say-so.
+
+**Two ways to install it, both explicit:**
+
+```sh
+# at install time — needs --console, since the search reaches the machine
+# only through the console:
+sh install.sh <TOKEN> --console --sessions
+
+# any time after, at the machine or from the dashboard's own console:
+subnsub-monitor sessions install
+```
+
+Re-running either is a no-op once the pinned version is present, and neither is
+implied by anything else: a machine gets the ~100 MB index because somebody
+asked for it, not because they wanted quota readings. A platform with no
+published AgentsView build (Windows, where the console's `cmd.exe` cannot carry
+the search query safely, and anything the vendor does not build) is told so
+plainly rather than left to fail at the first search.
+
+
 ## License
 
 [Apache-2.0](LICENSE). See [NOTICE](NOTICE) for attribution.
