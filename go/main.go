@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strconv"
 	"time"
 )
@@ -31,6 +32,7 @@ const usage = `subnsub-monitor — AI coding quota for machines you can't reach
   subnsub-monitor console [on|off]       show or set whether the dashboard may run commands here
   subnsub-monitor update [on|off]        show or set whether the dashboard may replace this helper
   subnsub-monitor diagnostics [on|off]   show or set read-only on-demand diagnostics
+  subnsub-monitor sessions install       install the pinned AgentsView session index here
   subnsub-monitor trust [KEY]            list, or add, a dashboard key allowed to command this machine
   subnsub-monitor untrust KEY            stop accepting commands signed by that key
   subnsub-monitor version                print this build's version and exit
@@ -305,6 +307,27 @@ func main() {
 			fmt.Println("removed; NO keys are trusted now — this machine runs what the relay hands it")
 		} else {
 			fmt.Println("removed")
+		}
+
+	case "sessions":
+		// Install (or reinstall) AgentsView, the per-machine session index the
+		// dashboard's fleet search asks. `sessions install` is the only verb;
+		// anything else prints what it does rather than guessing. See
+		// sessions.go for why WE pin the version and check the bytes.
+		if len(args) < 2 || args[1] != "install" {
+			fmt.Println("say 'sessions install' to fetch the pinned AgentsView build")
+			fmt.Println("(the session index the dashboard's fleet search runs on this machine)")
+			if !sessPlatformSupported() {
+				fmt.Printf("note: no published agentsview build for %s/%s\n", runtime.GOOS, runtime.GOARCH)
+			}
+			break
+		}
+		res, _ := runSessionsInstall()
+		if res.Out != "" {
+			fmt.Print(res.Out)
+		}
+		if res.Code != 0 {
+			os.Exit(1)
 		}
 
 	case "version":

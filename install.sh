@@ -21,6 +21,13 @@
 # there is no timer, and what gets installed comes from the release bucket and
 # is checked against its published checksum, so the dashboard chooses only WHEN.
 #
+# The dashboard can also SEARCH this machine's coding-agent sessions, if you add
+# --sessions (which needs --console — the search runs over the console channel).
+# It installs AgentsView, a session index pinned to a reviewed version and
+# checksummed the same way; the search runs on this machine and only matching
+# snippets ever leave it. Turn it on later instead with
+# `subnsub-monitor sessions install`.
+#
 # Source: https://github.com/subnsub-tools/subnsub-monitor (Apache-2.0)
 #
 # …and if you would rather look first, which is the reasonable instinct for
@@ -126,7 +133,7 @@ case "${1:-}" in
   ''|-*) TOKEN="${SUBNSUB_MONITOR_TOKEN:-}" ;;
   *)     TOKEN=$1; shift ;;
 esac
-[ -n "$TOKEN" ] || die "no token. Usage: sh install.sh <TOKEN> [--name LABEL] [--console] [--remote-update]"
+[ -n "$TOKEN" ] || die "no token. Usage: sh install.sh <TOKEN> [--name LABEL] [--console] [--remote-update] [--sessions]"
 
 # What this machine is called on the dashboard. Optional, and deliberately not
 # guessed: the helper never reads the hostname, so an unnamed machine shows up
@@ -141,6 +148,10 @@ CONSOLE_ARG=""
 # it — see helper/go/update.go. A machine that wants the button and no shell is
 # the case this exists for.
 UPDATE_ARG=""
+# Whether to also install AgentsView, the session index the dashboard's fleet
+# search reads. OFF unless asked for, and gated on --console below: the search
+# runs over the console channel, so the index is only useful where that is on.
+SESSIONS_ARG=""
 while [ $# -gt 0 ]; do
     case "$1" in
       --name) [ $# -ge 2 ] || die "--name needs a value"; NAME_ARG=$2; shift 2 ;;
@@ -151,9 +162,22 @@ while [ $# -gt 0 ]; do
       --remote-update) UPDATE_ARG=on; shift ;;
       --remote-update=on|--remote-update=yes|--remote-update=1) UPDATE_ARG=on; shift ;;
       --remote-update=off|--remote-update=no|--remote-update=0) UPDATE_ARG=off; shift ;;
+      --sessions) SESSIONS_ARG=on; shift ;;
+      --sessions=on|--sessions=yes|--sessions=1) SESSIONS_ARG=on; shift ;;
+      --sessions=off|--sessions=no|--sessions=0) SESSIONS_ARG=off; shift ;;
       *) die "unexpected argument: $1" ;;
     esac
 done
+
+# --sessions installs AgentsView, the per-machine session index the dashboard's
+# fleet search runs. The search only ever reaches a machine whose console is on
+# (it IS a console command), so asking for the index without the channel that
+# uses it would install 100 MB that nothing here can call. Required rather than
+# implied: turning the console on is a real grant and should be typed, not
+# arrive as a side effect of wanting search.
+if [ "$SESSIONS_ARG" = on ] && [ "$CONSOLE_ARG" != on ]; then
+    die "--sessions needs --console: the fleet search reaches a machine only through its console"
+fi
 
 # Same shape the relay accepts. Beyond catching typos this is what keeps a
 # token with a newline in it from adding arbitrary lines to the systemd
@@ -566,6 +590,24 @@ EOF
     ;;
 esac
 
+# ------------------------------------------------------------ session index
+# Done here, after the binary is in place and the service is up, because it
+# runs THAT binary (`sessions install`) to do the download — the same pinned,
+# checksummed fetch the dashboard would trigger, so the installer and the
+# dashboard share one code path rather than two that can drift. A failure here
+# does not fail the install: the helper is running and pushing quota; the
+# index is an add-on, and the message says how to retry.
+if [ "$SESSIONS_ARG" = on ]; then
+    say ""
+    say "installing the AgentsView session index (for the dashboard's fleet search)…"
+    if "$BINDIR/$NAME" sessions install; then
+        :
+    else
+        say "note: the session index did not install. The helper is running regardless;"
+        say "      retry later with:  $BINDIR/$NAME sessions install"
+    fi
+fi
+
 say ""
 say "pushing to $RELAY every 30s."
 say "check locally:  $BINDIR/$NAME"
@@ -603,5 +645,12 @@ else
     case "$goos" in
       linux) say "                 sandbox will not let the helper write its own binary otherwise)" ;;
     esac
+fi
+# Stated when the index is present, so the person at the machine knows the
+# dashboard's fleet search can reach it — and, when it is not, how to add it.
+if [ -x "$HOME/.local/bin/agentsview" ]; then
+    say "sessions:       index installed — the dashboard's fleet search can reach this machine."
+elif [ -f "$conf/console" ]; then
+    say "sessions:       no session index. Add one with:  $BINDIR/$NAME sessions install"
 fi
 say "uninstall:      sh install.sh --uninstall"
