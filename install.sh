@@ -597,12 +597,18 @@ esac
 # dashboard share one code path rather than two that can drift. A failure here
 # does not fail the install: the helper is running and pushing quota; the
 # index is an add-on, and the message says how to retry.
+SESSIONS_FAILED=0
 if [ "$SESSIONS_ARG" = on ]; then
     say ""
     say "installing the AgentsView session index (for the dashboard's fleet search)…"
     if "$BINDIR/$NAME" sessions install; then
         :
     else
+        # An EXPLICIT --sessions that failed is a failed request, and an
+        # automated deploy has to be able to see that. The helper itself is up
+        # and pushing, so this does not undo the install — but the script exits
+        # non-zero at the end so the failure is not reported as success.
+        SESSIONS_FAILED=1
         say "note: the session index did not install. The helper is running regardless;"
         say "      retry later with:  $BINDIR/$NAME sessions install"
     fi
@@ -648,9 +654,22 @@ else
 fi
 # Stated when the index is present, so the person at the machine knows the
 # dashboard's fleet search can reach it — and, when it is not, how to add it.
+# Reports the tool's own version rather than trusting that any executable at
+# the path is the right one.
+agentsview_ver=""
 if [ -x "$HOME/.local/bin/agentsview" ]; then
-    say "sessions:       index installed — the dashboard's fleet search can reach this machine."
+    agentsview_ver=$("$HOME/.local/bin/agentsview" --version 2>/dev/null | head -n1 || true)
+fi
+if [ -n "$agentsview_ver" ]; then
+    say "sessions:       index installed ($agentsview_ver) — the fleet search can reach this machine."
 elif [ -f "$conf/console" ]; then
     say "sessions:       no session index. Add one with:  $BINDIR/$NAME sessions install"
 fi
 say "uninstall:      sh install.sh --uninstall"
+
+# A machine explicitly asked to have the session index, but the install did
+# not take: exit non-zero so an automated run does not read as fully done. Last
+# thing in the script, after every message above has printed.
+if [ "$SESSIONS_FAILED" = 1 ]; then
+    exit 1
+fi

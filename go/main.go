@@ -311,16 +311,18 @@ func main() {
 
 	case "sessions":
 		// Install (or reinstall) AgentsView, the per-machine session index the
-		// dashboard's fleet search asks. `sessions install` is the only verb;
-		// anything else prints what it does rather than guessing. See
-		// sessions.go for why WE pin the version and check the bytes.
-		if len(args) < 2 || args[1] != "install" {
-			fmt.Println("say 'sessions install' to fetch the pinned AgentsView build")
-			fmt.Println("(the session index the dashboard's fleet search runs on this machine)")
+		// dashboard's fleet search asks. `sessions install` is the only verb,
+		// and it takes no further arguments — a mistyped verb or a stray word
+		// exits non-zero rather than silently doing nothing or installing
+		// anyway. See sessions.go for why WE pin the version and check the
+		// bytes.
+		if len(args) != 2 || args[1] != "install" {
+			warnf("usage: subnsub-monitor sessions install")
+			warnf("(installs the session index the dashboard's fleet search runs on this machine)")
 			if !sessPlatformSupported() {
-				fmt.Printf("note: no published agentsview build for %s/%s\n", runtime.GOOS, runtime.GOARCH)
+				warnf("note: no published agentsview build for %s/%s", runtime.GOOS, runtime.GOARCH)
 			}
-			break
+			os.Exit(2)
 		}
 		res, _ := runSessionsInstall()
 		if res.Out != "" {

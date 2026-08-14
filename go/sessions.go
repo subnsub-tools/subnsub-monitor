@@ -164,8 +164,8 @@ type sessConfig struct {
 	want    string // expected sha256 of the archive
 	version string // the pinned version, for the download path and no-op check
 	// probe returns the --version line of a binary, or "" — injected so a test
-	// need not carry a real 100 MB executable.
-	probe func(path string) string
+	// need not carry a real 100 MB executable. Deadline-bound through ctx.
+	probe func(ctx context.Context, path string) string
 }
 
 // Report shape mirrors consoleResult so this can ride back over the same
@@ -220,20 +220,44 @@ func sessionsInstall(cfg sessConfig) (consoleResult, bool) {
 		say("cannot create %s: %v", dir, err)
 		return fail()
 	}
+	// Security assumption, stated rather than enforced: the destination is a
+	// user-private directory (~/.local/bin). The stage-then-rename below writes
+	// through a 0600 temp file this process created, so the one way another
+	// local principal could substitute the binary between the probe and the
+	// rename is to be able to write this directory in the first place — which,
+	// on a machine whose console is on, is already a larger exposure than this
+	// install. Hardening the dir's ownership here would break the ordinary
+	// case (a group-writable ~/.local/bin is unusual but legitimate) for a
+	// threat the console grant already dwarfs.
 	dst := filepath.Join(dir, sessBinName)
 
-	// Already the pinned version? Then this is a no-op, said as one — the same
-	// distinction update.go draws, because a reinstall that changed nothing
-	// should not read as a fresh install. Any error probing just means "go
-	// ahead and install", never a hard failure: a corrupt or older binary is
-	// exactly what a reinstall is for.
-	if cur := sessVersionAt(dst, cfg.probe); cur == cfg.version {
-		say("agentsview %s is already installed at %s", cur, dst)
+	// One deadline over the whole operation — download, extraction AND the
+	// probe — so sessBudget means what its comment says. The probe derives a
+	// child deadline from it rather than starting a fresh clock.
+	ctx, cancel := context.WithTimeout(context.Background(), sessBudget)
+	defer cancel()
+
+	// Sweep stale staging files a previous run's SIGKILL or power loss may have
+	// left in the destination directory. Best effort: a file we cannot remove
+	// is not a reason to refuse the install.
+	sessSweepStaging(dir)
+
+	// Already the pinned version? Then the binary is a no-op — but the
+	// telemetry-off setting still has to be true, because a first install that
+	// wrote the binary and then died before the env file would otherwise be
+	// frozen in a "installed but still phoning home" state that every reinstall
+	// skipped straight past. So the no-op path ENSURES the setting, and only
+	// claims success when it holds. Any error probing the binary just means
+	// "go ahead and reinstall", never a hard failure.
+	if cur := sessVersionAt(ctx, dst, cfg.probe); cur == cfg.version {
+		if err := sessWriteTelemetryOff(cfg.envDir); err != nil {
+			say("agentsview %s is already installed, but the telemetry-off setting could not be written: %v", cur, err)
+			return fail()
+		}
+		say("agentsview %s is already installed at %s; telemetry is off", cur, dst)
 		return done(0, "sessions-none")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), sessBudget)
-	defer cancel()
 	client := sessClient()
 
 	url := cfg.base + "/v" + cfg.version + "/" + cfg.asset
@@ -253,7 +277,7 @@ func sessionsInstall(cfg sessConfig) (consoleResult, bool) {
 	defer arch.Close()
 
 	// Unpack the single binary to its own temp file beside the destination.
-	tmpName, err := sessExtractBinary(arch, dir, say)
+	tmpName, err := sessExtractBinary(ctx, arch, dir, say)
 	if err != nil {
 		return fail()
 	}
@@ -264,32 +288,63 @@ func sessionsInstall(cfg sessConfig) (consoleResult, bool) {
 		return fail()
 	}
 
-	// It has to prove it runs before it is installed — the same gate the
-	// updater puts on our own new binary. A download that unpacks but does not
-	// execute (wrong libc, truncated-yet-somehow-matching, an unexpected
-	// format) is caught here instead of at the first search.
-	if v := cfg.probe(tmpName); v == "" {
-		say("the downloaded binary did not run on this machine")
+	// It has to prove it runs AND reports the version we think we fetched — the
+	// same gate the updater puts on our own new binary, tightened so a
+	// mislabelled asset or checksum row cannot install something that runs but
+	// is not the pinned build. The checksum already pins the bytes; this is the
+	// belt to that suspenders.
+	if v := sessVersionFromLine(cfg.probe(ctx, tmpName)); v != cfg.version {
+		if v == "" {
+			say("the downloaded binary did not run, or did not report a version")
+		} else {
+			say("the downloaded binary reports %s, not the expected %s", v, cfg.version)
+		}
 		return fail()
-	} else {
-		say("verified it runs: reports %s", v)
+	}
+	say("verified it runs and reports %s", cfg.version)
+
+	// Telemetry off BEFORE the binary is published, so there is no window in
+	// which agentsview is installed and reachable while still able to phone
+	// home. A failure here fails the install rather than being shrugged off:
+	// the whole point of installing it ourselves is that it starts quiet.
+	if err := sessWriteTelemetryOff(cfg.envDir); err != nil {
+		say("could not write the telemetry-off setting, so refusing to publish the binary: %v", err)
+		return fail()
 	}
 
+	// Durable publish, the sequence update.go's syncFile/syncDir spell out:
+	// flush the file's bytes, rename, then flush the directory entry, so a
+	// crash cannot leave a half-written binary or a rename that did not stick.
+	if err := syncFile(tmpName); err != nil {
+		say("could not flush the binary to disk: %v", err)
+		return fail()
+	}
 	if err := os.Rename(tmpName, dst); err != nil {
 		say("cannot move the binary into place at %s: %v", dst, err)
 		return fail()
 	}
-
-	// Telemetry off, written where agentsview reads its environment. Best
-	// effort and said either way: a failure here does not undo a good install,
-	// it just means the operator should export the variable themselves.
-	if err := sessWriteTelemetryOff(cfg.envDir); err != nil {
-		say("installed, but could not write the telemetry-off setting: %v", err)
-	}
+	syncDir(dir)
 
 	say("installed agentsview %s at %s", cfg.version, dst)
 	say("telemetry is off; the dashboard's fleet search can now reach this machine")
 	return done(0, "")
+}
+
+// Staging files this feature leaves in the destination directory all share a
+// prefix; a crash between create and remove can strand one. Swept on the next
+// run so they do not accumulate, and only ours (the prefixes below) — never a
+// file somebody else put there.
+func sessSweepStaging(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		n := e.Name()
+		if strings.HasPrefix(n, ".agentsview-") || strings.HasPrefix(n, ".agentsview-dl-") {
+			os.Remove(filepath.Join(dir, n))
+		}
+	}
 }
 
 // Download to a staged file and verify the whole archive against the pinned
@@ -354,8 +409,11 @@ func sessDownloadVerified(ctx context.Context, client *http.Client, url, want, d
 }
 
 // Pull the single agentsview binary out of the verified gzip archive into a
-// temp file beside the destination.
-func sessExtractBinary(arch *os.File, dir string, say func(string, ...any)) (string, error) {
+// temp file beside the destination. Deadline-bound through ctx so extraction
+// cannot outlast the whole-operation budget, and the total number of bytes
+// read across ALL members is capped, so an archive padded with junk members
+// (which are refused below anyway) cannot decompress without bound.
+func sessExtractBinary(ctx context.Context, arch *os.File, dir string, say func(string, ...any)) (string, error) {
 	gz, err := gzip.NewReader(arch)
 	if err != nil {
 		say("the download is not a gzip archive: %v", err)
@@ -363,20 +421,50 @@ func sessExtractBinary(arch *os.File, dir string, say func(string, ...any)) (str
 	}
 	defer gz.Close()
 	tr := tar.NewReader(gz)
+	found := ""
+	var budget int64 = sessMaxBinary + 1 // shared across every member read
 	for {
+		if err := ctx.Err(); err != nil {
+			if found != "" {
+				os.Remove(found)
+			}
+			say("ran out of time unpacking the archive")
+			return "", err
+		}
 		hdr, err := tr.Next()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
+			if found != "" {
+				os.Remove(found)
+			}
 			say("the archive could not be read: %v", err)
 			return "", err
 		}
-		// The base name only, and it must be the one file we expect — an
-		// archive that carried a path (../, /etc/…) or an unexpected member is
-		// refused rather than followed. There is exactly one file to want.
-		if filepath.Base(hdr.Name) != sessBinName || hdr.Typeflag != tar.TypeReg {
+		// EXACTLY the file we expect — the whole path, not its base name, so an
+		// archive carrying "../../agentsview" or "/tmp/agentsview" is refused
+		// rather than normalised into a match. There is one file to want, and
+		// the loop keeps scanning to EOF so a second copy or a trailing member
+		// is a reason to refuse, not something silently skipped.
+		clean := strings.TrimPrefix(hdr.Name, "./")
+		if clean != sessBinName || hdr.Typeflag != tar.TypeReg {
+			// A NAMED-but-wrong member (an agentsview under a path, a second
+			// regular file) is suspicious enough to reject outright; anything
+			// truly unrelated is skipped but still counts against the budget.
+			if filepath.Base(hdr.Name) == sessBinName {
+				if found != "" {
+					os.Remove(found)
+				}
+				say("the archive carried an unexpected %q; refusing it", hdr.Name)
+				return "", fmt.Errorf("unexpected archive member")
+			}
 			continue
+		}
+		if found != "" {
+			os.Remove(found)
+			say("the archive contained more than one %s; refusing it", sessBinName)
+			return "", fmt.Errorf("duplicate archive member")
 		}
 		tmpBin, err := os.CreateTemp(dir, ".agentsview-*")
 		if err != nil {
@@ -384,30 +472,40 @@ func sessExtractBinary(arch *os.File, dir string, say func(string, ...any)) (str
 			return "", err
 		}
 		tmpName := tmpBin.Name()
-		n, err := io.Copy(tmpBin, io.LimitReader(tr, sessMaxBinary+1))
-		tmpBin.Close()
-		if err != nil {
+		n, cpErr := io.Copy(tmpBin, io.LimitReader(tr, budget))
+		budget -= n
+		closeErr := tmpBin.Close()
+		if cpErr != nil {
 			os.Remove(tmpName)
-			say("could not write the binary out: %v", err)
-			return "", err
+			say("could not write the binary out: %v", cpErr)
+			return "", cpErr
 		}
-		if n > sessMaxBinary {
+		if closeErr != nil {
+			os.Remove(tmpName)
+			say("could not finish writing the binary: %v", closeErr)
+			return "", closeErr
+		}
+		if budget <= 0 {
 			os.Remove(tmpName)
 			say("the unpacked binary was larger than expected; refusing it")
 			return "", fmt.Errorf("oversize binary")
 		}
-		return tmpName, nil
+		found = tmpName
 	}
-	say("the archive did not contain an %s binary", sessBinName)
-	return "", fmt.Errorf("binary not found in archive")
+	if found == "" {
+		say("the archive did not contain an %s binary", sessBinName)
+		return "", fmt.Errorf("binary not found in archive")
+	}
+	return found, nil
 }
 
 // What `agentsview --version` reports, or "" if it will not run. Telemetry off
-// for the probe too, so a version check never phones home.
-func sessProbe(path string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), sessProbeBudget)
+// for the probe too, so a version check never phones home. Bounded by the
+// smaller of the shared deadline and a per-probe backstop.
+func sessProbe(ctx context.Context, path string) string {
+	pctx, cancel := context.WithTimeout(ctx, sessProbeBudget)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, path, "--version")
+	cmd := exec.CommandContext(pctx, path, "--version")
 	cmd.Env = append(os.Environ(), "AGENTSVIEW_TELEMETRY_ENABLED=0")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -420,24 +518,27 @@ func sessProbe(path string) string {
 	return line
 }
 
-// The version already installed at path, parsed from its --version line, or ""
-// if there is none or it will not answer. Used only to skip a reinstall, so
-// any doubt resolves toward installing. The prober is injected so a test can
-// stand in for a real binary.
-func sessVersionAt(path string, probe func(string) string) string {
-	if _, err := os.Stat(path); err != nil {
-		return ""
-	}
-	line := probe(path)
-	// The line looks like "agentsview v0.40.1 (commit …)". Pull the token
-	// after a leading 'v' that matches our version shape rather than trusting
-	// a fixed offset.
+// The version a --version line reports, or "" — the token that is a leading
+// 'v' followed by a DIGIT, so "version" (a word starting with v) and a stray
+// "v" are not mistaken for it. agentsview prints "agentsview v0.40.1 (commit
+// …)"; this pulls "0.40.1".
+func sessVersionFromLine(line string) string {
 	for _, tok := range strings.Fields(line) {
-		if strings.HasPrefix(tok, "v") && len(tok) > 1 {
-			return strings.TrimPrefix(tok, "v")
+		if len(tok) >= 2 && tok[0] == 'v' && tok[1] >= '0' && tok[1] <= '9' {
+			return tok[1:]
 		}
 	}
 	return ""
+}
+
+// The version already installed at path, or "" if there is none or it will not
+// answer. Used only to skip a reinstall, so any doubt resolves toward
+// installing. The prober is injected so a test can stand in for a real binary.
+func sessVersionAt(ctx context.Context, path string, probe func(context.Context, string) string) string {
+	if _, err := os.Stat(path); err != nil {
+		return ""
+	}
+	return sessVersionFromLine(probe(ctx, path))
 }
 
 // AGENTSVIEW_TELEMETRY_ENABLED=0 in the env file agentsview reads. Written
@@ -454,17 +555,53 @@ func sessWriteTelemetryOff(dir string) error {
 	path := filepath.Join(dir, "env")
 	const line = "AGENTSVIEW_TELEMETRY_ENABLED=0"
 
-	existing, _ := os.ReadFile(path)
+	// A file that EXISTS but will not read is not an empty file: treating it as
+	// one would let us replace an unreadable env (or an unreadable symlink
+	// target) with a file holding only our line, wiping whatever was there. So
+	// only a genuine "not there" is an empty start; any other read error stops.
+	existing, rerr := os.ReadFile(path)
+	if rerr != nil && !os.IsNotExist(rerr) {
+		return rerr
+	}
+
+	// Rebuild the file line by line: any prior assignment to this variable —
+	// `=1`, spaced, or `export`-prefixed — is REPLACED in place with the off
+	// setting, and every other line is kept verbatim. Appending instead would
+	// leave two assignments to one key whose winner agentsview does not
+	// define, so "telemetry off" could not be guaranteed.
+	var out []string
+	replaced := false
 	for _, l := range strings.Split(string(existing), "\n") {
-		if strings.TrimSpace(l) == line {
-			return nil // already set; leave the file untouched
+		if sessIsTelemetryAssignment(l) {
+			if !replaced {
+				out = append(out, line)
+				replaced = true
+			}
+			// Drop any further assignments — one canonical line is enough.
+			continue
+		}
+		out = append(out, l)
+	}
+	if !replaced {
+		// No prior assignment: add ours. Trailing "" from the final newline is
+		// dropped so the join does not grow a blank line each run.
+		if n := len(out); n > 0 && out[n-1] == "" {
+			out[n-1] = line
+			out = append(out, "")
+		} else {
+			out = append(out, line)
 		}
 	}
-	body := string(existing)
-	if body != "" && !strings.HasSuffix(body, "\n") {
+	body := strings.Join(out, "\n")
+	if !strings.HasSuffix(body, "\n") {
 		body += "\n"
 	}
-	body += line + "\n"
+
+	// Nothing to do if the file is already exactly this — avoids a needless
+	// rewrite (and a needless temp file) on every reinstall.
+	if rerr == nil && string(existing) == body {
+		return nil
+	}
 
 	tmp, err := os.CreateTemp(dir, ".env-*")
 	if err != nil {
@@ -472,6 +609,11 @@ func sessWriteTelemetryOff(dir string) error {
 	}
 	tmpName := tmp.Name()
 	if _, err := tmp.WriteString(body); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
 		tmp.Close()
 		os.Remove(tmpName)
 		return err
@@ -484,5 +626,22 @@ func sessWriteTelemetryOff(dir string) error {
 		os.Remove(tmpName)
 		return err
 	}
+	syncDir(dir)
 	return nil
+}
+
+// Whether a line assigns AGENTSVIEW_TELEMETRY_ENABLED at all, in any of the
+// forms a shell-style env file uses: bare, `export`-prefixed, and with spaces
+// around the name. Value-agnostic, because the point is to find and replace
+// whatever it was set to.
+func sessIsTelemetryAssignment(l string) bool {
+	s := strings.TrimSpace(l)
+	s = strings.TrimPrefix(s, "export ")
+	s = strings.TrimSpace(s)
+	const key = "AGENTSVIEW_TELEMETRY_ENABLED"
+	if !strings.HasPrefix(s, key) {
+		return false
+	}
+	rest := strings.TrimSpace(s[len(key):])
+	return strings.HasPrefix(rest, "=")
 }
