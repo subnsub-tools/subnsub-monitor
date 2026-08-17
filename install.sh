@@ -21,12 +21,11 @@
 # there is no timer, and what gets installed comes from the release bucket and
 # is checked against its published checksum, so the dashboard chooses only WHEN.
 #
-# The dashboard can also SEARCH this machine's coding-agent sessions, if you add
-# --sessions (which needs --console — the search runs over the console channel).
-# It installs AgentsView, a session index pinned to a reviewed version and
-# checksummed the same way; the search runs on this machine and only matching
-# snippets ever leave it. Turn it on later instead with
-# `subnsub-monitor sessions install`.
+# The dashboard can also SEARCH this machine's coding-agent sessions — a
+# built-in part of the helper, nothing extra to install. The search runs over
+# the console channel, so it reaches this machine only when --console is on;
+# it reads the agents' own transcript files right where they are, and only
+# matching snippets ever leave the machine.
 #
 # Source: https://github.com/subnsub-tools/subnsub-monitor (Apache-2.0)
 #
@@ -133,7 +132,7 @@ case "${1:-}" in
   ''|-*) TOKEN="${SUBNSUB_MONITOR_TOKEN:-}" ;;
   *)     TOKEN=$1; shift ;;
 esac
-[ -n "$TOKEN" ] || die "no token. Usage: sh install.sh <TOKEN> [--name LABEL] [--console] [--remote-update] [--sessions]"
+[ -n "$TOKEN" ] || die "no token. Usage: sh install.sh <TOKEN> [--name LABEL] [--console] [--remote-update]"
 
 # What this machine is called on the dashboard. Optional, and deliberately not
 # guessed: the helper never reads the hostname, so an unnamed machine shows up
@@ -148,10 +147,6 @@ CONSOLE_ARG=""
 # it — see helper/go/update.go. A machine that wants the button and no shell is
 # the case this exists for.
 UPDATE_ARG=""
-# Whether to also install AgentsView, the session index the dashboard's fleet
-# search reads. OFF unless asked for, and gated on --console below: the search
-# runs over the console channel, so the index is only useful where that is on.
-SESSIONS_ARG=""
 while [ $# -gt 0 ]; do
     case "$1" in
       --name) [ $# -ge 2 ] || die "--name needs a value"; NAME_ARG=$2; shift 2 ;;
@@ -162,22 +157,10 @@ while [ $# -gt 0 ]; do
       --remote-update) UPDATE_ARG=on; shift ;;
       --remote-update=on|--remote-update=yes|--remote-update=1) UPDATE_ARG=on; shift ;;
       --remote-update=off|--remote-update=no|--remote-update=0) UPDATE_ARG=off; shift ;;
-      --sessions) SESSIONS_ARG=on; shift ;;
-      --sessions=on|--sessions=yes|--sessions=1) SESSIONS_ARG=on; shift ;;
-      --sessions=off|--sessions=no|--sessions=0) SESSIONS_ARG=off; shift ;;
+      --sessions|--sessions=*) die "--sessions is gone: session search is built into the helper now; turning --console on is all a machine needs" ;;
       *) die "unexpected argument: $1" ;;
     esac
 done
-
-# --sessions installs AgentsView, the per-machine session index the dashboard's
-# fleet search runs. The search only ever reaches a machine whose console is on
-# (it IS a console command), so asking for the index without the channel that
-# uses it would install 100 MB that nothing here can call. Required rather than
-# implied: turning the console on is a real grant and should be typed, not
-# arrive as a side effect of wanting search.
-if [ "$SESSIONS_ARG" = on ] && [ "$CONSOLE_ARG" != on ]; then
-    die "--sessions needs --console: the fleet search reaches a machine only through its console"
-fi
 
 # Same shape the relay accepts. Beyond catching typos this is what keeps a
 # token with a newline in it from adding arbitrary lines to the systemd
@@ -590,30 +573,6 @@ EOF
     ;;
 esac
 
-# ------------------------------------------------------------ session index
-# Done here, after the binary is in place and the service is up, because it
-# runs THAT binary (`sessions install`) to do the download — the same pinned,
-# checksummed fetch the dashboard would trigger, so the installer and the
-# dashboard share one code path rather than two that can drift. A failure here
-# does not fail the install: the helper is running and pushing quota; the
-# index is an add-on, and the message says how to retry.
-SESSIONS_FAILED=0
-if [ "$SESSIONS_ARG" = on ]; then
-    say ""
-    say "installing the AgentsView session index (for the dashboard's fleet search)…"
-    if "$BINDIR/$NAME" sessions install; then
-        :
-    else
-        # An EXPLICIT --sessions that failed is a failed request, and an
-        # automated deploy has to be able to see that. The helper itself is up
-        # and pushing, so this does not undo the install — but the script exits
-        # non-zero at the end so the failure is not reported as success.
-        SESSIONS_FAILED=1
-        say "note: the session index did not install. The helper is running regardless;"
-        say "      retry later with:  $BINDIR/$NAME sessions install"
-    fi
-fi
-
 say ""
 say "pushing to $RELAY every 30s."
 say "check locally:  $BINDIR/$NAME"
@@ -652,24 +611,9 @@ else
       linux) say "                 sandbox will not let the helper write its own binary otherwise)" ;;
     esac
 fi
-# Stated when the index is present, so the person at the machine knows the
-# dashboard's fleet search can reach it — and, when it is not, how to add it.
-# Reports the tool's own version rather than trusting that any executable at
-# the path is the right one.
-agentsview_ver=""
-if [ -x "$HOME/.local/bin/agentsview" ]; then
-    agentsview_ver=$("$HOME/.local/bin/agentsview" --version 2>/dev/null | head -n1 || true)
-fi
-if [ -n "$agentsview_ver" ]; then
-    say "sessions:       index installed ($agentsview_ver) — the fleet search can reach this machine."
-elif [ -f "$conf/console" ]; then
-    say "sessions:       no session index. Add one with:  $BINDIR/$NAME sessions install"
+# Session search ships inside the helper itself, so the only question is
+# whether the channel it rides is open on this machine.
+if [ -f "$conf/console" ]; then
+    say "sessions:       searchable from the dashboard (built into the helper; console is on)."
 fi
 say "uninstall:      sh install.sh --uninstall"
-
-# A machine explicitly asked to have the session index, but the install did
-# not take: exit non-zero so an automated run does not read as fully done. Last
-# thing in the script, after every message above has printed.
-if [ "$SESSIONS_FAILED" = 1 ]; then
-    exit 1
-fi

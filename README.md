@@ -898,6 +898,11 @@ what explains it.
 
 ## Searching a machine's coding-agent sessions (2026.08.15, new)
 
+> **Superseded (2026.08.18).** The search described here now lives inside the
+> helper itself and AgentsView is no longer installed — see the update at the
+> end of this file. This section is kept as the record of the 2026.08.15.x
+> design it describes.
+
 The dashboard can search the coding-agent sessions across every machine you
 watch — one query, answered by each box that has its console switched on — and
 show you the matching lines. This section is the machine's half of that: what
@@ -971,3 +976,51 @@ plainly rather than left to fail at the first search.
 Apache rather than a copyleft licence on purpose: this is a thing people run
 on work machines, and AGPL gets flagged by corporate compliance scanners in a
 way that would exclude an entire class of the people it is for.
+
+
+---
+
+
+## Update (2026.08.18): the session search is first-party now
+
+The fleet search works the same from the dashboard — one query, answered over
+the console channel by every machine whose console is on, snippets back and
+nothing else. What changed is the machine's half: `subnsub-monitor sessions
+search` is now implemented inside the helper itself, and AgentsView is no
+longer installed.
+
+The 2026.08.15 design above installed AgentsView as a pinned, checksummed
+third-party index. Before letting that reach real machines we audited its
+source, and the audit is why this update exists. The tool is not malicious —
+but answering a search meant forking a resident daemon on the machine,
+rebuilding a plaintext copy of every transcript into its own database, and
+phoning two hosts by default (a pricing fetch and a telemetry heartbeat); its
+releases are unsigned and not reproducible, so a reviewed source tree cannot
+vouch for the shipped binary; and the telemetry-off setting the installer
+wrote turned out to read only from the process environment, not from the file
+it was written to. Each of those is survivable alone; together they are a lot
+of surface for what the fleet search actually needs, which is grep with
+manners.
+
+So the helper now does the whole job in a few hundred lines of its own:
+
+- **Reads transcripts where they already are** — Claude Code's
+  `~/.claude/projects` and codex's `~/.codex/sessions` — through the same
+  `os.Root` + hard-link discipline the quota readers use. No index is built,
+  no daemon starts, no file is written, nothing is downloaded.
+- **Same answer shape** the dashboard already renders (`matches` with project,
+  agent, timestamp, session id, snippet), still capped well inside the 16 KB
+  console frame, still only snippets — and credentials that appear in a
+  matched line are best-effort redacted from the snippet before it leaves.
+- **Bounded**: the whole search runs inside a 15-second budget of the
+  console's 30-second window, newest sessions first, and an answer that could
+  not cover everything says `partial` instead of pretending it did.
+
+Nothing to install means the knobs around installing are gone too:
+`--sessions` (install-time flag) and `subnsub-monitor sessions install` were
+removed rather than kept as no-ops — a script that asks for them is told the
+world changed instead of being told yes. A machine that got AgentsView from a
+2026.08.15.x helper keeps working (the search never calls it now); if you want
+it gone, `rm ~/.local/bin/agentsview` and `rm -r ~/.agentsview` is the whole
+uninstall — it was a single static binary plus its own data directory. The
+NOTICE attribution moved to past tense accordingly.
