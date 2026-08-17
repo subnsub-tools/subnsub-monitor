@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"runtime"
 	"strconv"
 	"time"
 )
@@ -32,7 +31,7 @@ const usage = `subnsub-monitor — AI coding quota for machines you can't reach
   subnsub-monitor console [on|off]       show or set whether the dashboard may run commands here
   subnsub-monitor update [on|off]        show or set whether the dashboard may replace this helper
   subnsub-monitor diagnostics [on|off]   show or set read-only on-demand diagnostics
-  subnsub-monitor sessions install       install the pinned AgentsView session index here
+  subnsub-monitor sessions search TEXT   search this machine's coding-agent sessions
   subnsub-monitor trust [KEY]            list, or add, a dashboard key allowed to command this machine
   subnsub-monitor untrust KEY            stop accepting commands signed by that key
   subnsub-monitor version                print this build's version and exit
@@ -310,27 +309,22 @@ func main() {
 		}
 
 	case "sessions":
-		// Install (or reinstall) AgentsView, the per-machine session index the
-		// dashboard's fleet search asks. `sessions install` is the only verb,
-		// and it takes no further arguments — a mistyped verb or a stray word
-		// exits non-zero rather than silently doing nothing or installing
-		// anyway. See sessions.go for why WE pin the version and check the
-		// bytes.
-		if len(args) != 2 || args[1] != "install" {
-			warnf("usage: subnsub-monitor sessions install")
-			warnf("(installs the session index the dashboard's fleet search runs on this machine)")
-			if !sessPlatformSupported() {
-				warnf("note: no published agentsview build for %s/%s", runtime.GOOS, runtime.GOARCH)
-			}
-			os.Exit(2)
+		// The dashboard's fleet search, answered locally. `sessions search`
+		// reads the coding agents' own transcript files under this account and
+		// prints matched snippets — first-party since 2026.08.18: no index is
+		// built, no daemon starts, nothing is downloaded, and no byte of any
+		// transcript leaves this process except the snippets it prints.
+		// (Earlier builds took `sessions install` here and fetched a
+		// third-party indexer; the audit of that tool is why sessions.go now
+		// does the whole job itself. The verb is gone rather than kept as a
+		// no-op — an operator asking to install deserves "that is no longer a
+		// thing", not silent success.)
+		if len(args) >= 2 && args[1] == "search" {
+			os.Exit(runSessionsSearchCLI(args[2:]))
 		}
-		res, _ := runSessionsInstall()
-		if res.Out != "" {
-			fmt.Print(res.Out)
-		}
-		if res.Code != 0 {
-			os.Exit(1)
-		}
+		warnf("usage: subnsub-monitor sessions search [--limit N] [--json] [--] TEXT...")
+		warnf("(searches the coding-agent sessions on this machine; the dashboard's fleet search runs the same thing)")
+		os.Exit(2)
 
 	case "version":
 		// Deliberately nothing but the version, on one line. The update path
