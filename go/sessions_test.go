@@ -196,13 +196,20 @@ func TestSessionsSearchNewestFirstLimitAndPerSessionCap(t *testing.T) {
 		}
 	}
 	fromOld := 0
+	var oldTs []string
 	for _, h := range rep.Matches {
 		if h.Project == "old" {
 			fromOld++
+			oldTs = append(oldTs, h.Timestamp)
 		}
 	}
 	if fromOld != 2 {
 		t.Fatalf("the old session should contribute only up to the leftover limit, got %d", fromOld)
+	}
+	// And the two that made it are the NEWEST two of the session's last
+	// three, not the oldest (review 2026-08-18).
+	if oldTs[0] != "2026-08-16T09:08:00Z" || oldTs[1] != "2026-08-16T09:09:00Z" {
+		t.Fatalf("limit trimming kept the wrong end of the ring: %v", oldTs)
 	}
 
 	q.limit = sessMaxLimit
@@ -438,5 +445,92 @@ func TestParsePositive(t *testing.T) {
 		if _, err := parsePositive(s); err == nil {
 			t.Errorf("parsePositive(%q) should refuse", s)
 		}
+	}
+}
+
+// The review's redaction shapes (2026-08-18): env-style keys around the
+// sensitive word, quoted values, Basic auth — and the words that must NOT
+// trip it, because over-redaction of ordinary token-count talk would make
+// every snippet about usage unreadable.
+func TestSessRedactShapes(t *testing.T) {
+	redacted := map[string]string{
+		"AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENG": "AWS_SECRET_ACCESS_KEY=[redacted]",
+		"DB_PASSWORD='two words here'":               "DB_PASSWORD=[redacted]",
+		"CLIENT_SECRET: abc123def456":                "CLIENT_SECRET: [redacted]",
+		"MY_API_KEY=supersecretvalue":                "MY_API_KEY=[redacted]",
+		"Authorization: Basic dXNlcjpwYXNzd29yZA==":  "Authorization: [redacted]",
+	}
+	for in, want := range redacted {
+		if got := sessRedact(in); got != want {
+			t.Errorf("sessRedact(%q) = %q, want %q", in, got, want)
+		}
+	}
+	for _, in := range []string{
+		"tokens: 117476 used this hour",
+		"token_count=42",
+		"the tokens used block at the tail",
+	} {
+		if got := sessRedact(in); strings.Contains(got, "[redacted]") {
+			t.Errorf("sessRedact(%q) over-redacted to %q", in, got)
+		}
+	}
+}
+
+// A term that JSON escaping disguises in the raw line (embedded quotes) must
+// still match — the raw gate steps aside for it (review 2026-08-18).
+func TestSessionsSearchFindsQuotedTerm(t *testing.T) {
+	claude, _, sources := sessTestWorld(t)
+	sessWrite(t, filepath.Join(claude, "p", "a.jsonl"), time.Now(),
+		claudeLine("2026-08-17T10:00:00Z", "/p", `say "hello" to the world`))
+	q := sessQuery{terms: sessTerms(`"hello"`), limit: sessDefaultLimit, deadline: time.Now().Add(time.Minute)}
+	if rep := sessionsSearch(sources, q); len(rep.Matches) != 1 {
+		t.Fatalf("quoted term lost to the raw gate: %+v", rep.Matches)
+	}
+}
+
+// Query folding is the same ASCII-only folding the matcher uses: a non-ASCII
+// letter keeps its case and matches its own exact bytes (review 2026-08-18).
+func TestSessTermsFoldASCIIOnly(t *testing.T) {
+	claude, _, sources := sessTestWorld(t)
+	sessWrite(t, filepath.Join(claude, "p", "a.jsonl"), time.Now(),
+		claudeLine("2026-08-17T10:00:00Z", "/p", "Ärger im Getriebe"))
+	q := sessQuery{terms: sessTerms("Ärger"), limit: 12, deadline: time.Now().Add(time.Minute)}
+	if rep := sessionsSearch(sources, q); len(rep.Matches) != 1 {
+		t.Fatal("a query's non-ASCII letter must match its own bytes")
+	}
+	q.terms = sessTerms("ärger")
+	if rep := sessionsSearch(sources, q); len(rep.Matches) != 0 {
+		t.Fatal("ASCII-only folding must not equate Ä and ä")
+	}
+	if got := sessTerms("MiXed Ärger")[0]; got != "mixed" {
+		t.Fatalf("ASCII letters still fold: %q", got)
+	}
+}
+
+// The encoded answer fits the channel no matter how fat the hits are, and a
+// drop for size says so in partial (review 2026-08-18).
+func TestSessEncodeCapped(t *testing.T) {
+	rep := sessReport{Matches: []sessHit{}}
+	for i := 0; i < sessMaxLimit; i++ {
+		rep.Matches = append(rep.Matches, sessHit{
+			Project: "project", Agent: "claude",
+			Timestamp: "2026-08-17T10:00:00Z",
+			SessionID: "11111111-2222-3333-4444-555555555555",
+			Snippet:   strings.Repeat("多", sessSnippetRunes),
+		})
+	}
+	out, err := sessEncodeCapped(&rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) > sessMaxJSONBytes {
+		t.Fatalf("encoded answer still %d bytes", len(out))
+	}
+	if !rep.Partial || len(rep.Matches) == 0 || len(rep.Matches) >= sessMaxLimit {
+		t.Fatalf("capping should drop some hits and say so: %d left, partial=%v", len(rep.Matches), rep.Partial)
+	}
+	var back sessReport
+	if err := json.Unmarshal(out, &back); err != nil || len(back.Matches) != len(rep.Matches) {
+		t.Fatalf("capped document must still parse whole: %v", err)
 	}
 }
