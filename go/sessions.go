@@ -73,6 +73,15 @@ const (
 	// Snippet length, in runes — what one hit contributes to the 16 KB pipe.
 	sessSnippetRunes = 200
 
+	// The ENCODED answer's ceiling, under the console's 16 KiB output cap
+	// with room to spare. Runes are not bytes — 200 runes of CJK is 600
+	// bytes, and encoding/json turns `<` into six — so the only honest
+	// budget is on the marshalled document itself (review 2026-08-18). A
+	// document over this drops its newest-last hits until it fits, marked
+	// partial, rather than letting the channel cut it mid-JSON into
+	// something the dashboard cannot read at all.
+	sessMaxJSONBytes = 15 << 10
+
 	// How deep sessCollectText follows nested structure before deciding the
 	// line is not a transcript message. Real messages sit three or four
 	// levels down; forty levels is a crafted file, not a conversation.
@@ -208,7 +217,7 @@ func runSessionsSearchCLI(rest []string) int {
 	})
 
 	if asJSON {
-		out, err := json.Marshal(rep)
+		out, err := sessEncodeCapped(&rep)
 		if err != nil {
 			// Nothing in the report can fail to marshal; saying so beats
 			// printing half a document.
@@ -242,6 +251,19 @@ func runSessionsSearchCLI(rest []string) int {
 	return 0
 }
 
+// The report as JSON, guaranteed to fit the channel. Hits leave from the end
+// — the end is the oldest-file tail of the list, so what survives is what the
+// ordering already ranked first — and any drop is declared in `partial`.
+func sessEncodeCapped(rep *sessReport) ([]byte, error) {
+	out, err := json.Marshal(rep)
+	for err == nil && len(out) > sessMaxJSONBytes && len(rep.Matches) > 0 {
+		rep.Matches = rep.Matches[:len(rep.Matches)-1]
+		rep.Partial = true
+		out, err = json.Marshal(rep)
+	}
+	return out, err
+}
+
 // A small positive integer out of a flag value. strconv.Atoi accepts "+12"
 // and "-3"; a limit does not.
 func parsePositive(s string) (int, error) {
@@ -258,14 +280,47 @@ func parsePositive(s string) (int, error) {
 	return n, nil
 }
 
-// Query text into search terms: split on whitespace, lowercased. ASCII-only
-// folding, deliberately — see sessContainsFold — so the lowering here matches
-// the comparison there.
+// Query text into search terms: split on whitespace, lowercased ASCII-only —
+// the SAME folding sessContainsFold applies, which is the point. A Unicode
+// lower here would turn a query's Ärger into ärger and then match neither
+// spelling, because the comparison below folds nothing outside A–Z (review
+// 2026-08-18).
 func sessTerms(q string) []string {
 	fields := strings.Fields(q)
 	out := make([]string, 0, len(fields))
 	for _, f := range fields {
-		out = append(out, strings.ToLower(f))
+		out = append(out, sessLowerASCII(f))
+	}
+	return out
+}
+
+func sessLowerASCII(s string) string {
+	b := []byte(s)
+	changed := false
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + ('a' - 'A')
+			changed = true
+		}
+	}
+	if !changed {
+		return s
+	}
+	return string(b)
+}
+
+// The terms the RAW-BYTE gate may use. A term holding a quote or a backslash
+// can appear JSON-escaped in the file (`"foo"` as \"foo\", C:\tmp as
+// C:\\tmp), so testing the raw line for it would throw away real hits before
+// they were ever parsed (review 2026-08-18). Those terms are still enforced —
+// on the extracted text, where escapes are gone — they just cannot serve as
+// the cheap gate.
+func sessGateTerms(terms []string) []string {
+	out := make([]string, 0, len(terms))
+	for _, t := range terms {
+		if !strings.ContainsAny(t, "\"\\") {
+			out = append(out, t)
+		}
 	}
 	return out
 }
@@ -282,9 +337,16 @@ type sessFile struct {
 // Every transcript under one source, unordered. The walk pattern (and the
 // reason `partial` exists) is codexCandidates': an unreadable directory means
 // the list is incomplete, and an incomplete list must not become a confident
-// "nothing here".
-func sessCandidates(src sessSource, srcIdx int) (out []sessFile, partial bool) {
+// "nothing here". The deadline covers the walk itself, because the budget is
+// over the whole search and a tree pathological enough to take seconds to
+// LIST would otherwise spend the scan's time before a single file was read
+// (review 2026-08-18).
+func sessCandidates(src sessSource, srcIdx int, deadline time.Time) (out []sessFile, partial bool) {
 	filepath.WalkDir(src.root, func(p string, d fs.DirEntry, err error) error {
+		if time.Now().After(deadline) {
+			partial = true
+			return fs.SkipAll
+		}
 		if err != nil {
 			partial = true
 			return nil
@@ -337,7 +399,7 @@ func sessionsSearch(sources []sessSource, q sessQuery) sessReport {
 		}
 		defer r.Close()
 		roots[i] = r
-		cs, partial := sessCandidates(src, i)
+		cs, partial := sessCandidates(src, i, q.deadline)
 		if partial {
 			rep.Partial = true
 		}
@@ -355,6 +417,7 @@ func sessionsSearch(sources []sessSource, q sessQuery) sessReport {
 	})
 	rep.Files = len(files)
 
+	gate := sessGateTerms(q.terms)
 	for _, f := range files {
 		if len(rep.Matches) >= q.limit {
 			break
@@ -363,17 +426,18 @@ func sessionsSearch(sources []sessSource, q sessQuery) sessReport {
 			rep.Partial = true
 			break
 		}
-		hits, trouble := sessScanFile(roots[f.src], sources[f.src], f, q)
+		hits, trouble := sessScanFile(roots[f.src], sources[f.src], f, q, gate)
 		if trouble {
 			rep.Partial = true
 		}
 		rep.Scanned++
-		for _, h := range hits {
-			if len(rep.Matches) >= q.limit {
-				break
-			}
-			rep.Matches = append(rep.Matches, h)
+		// When the limit has room for only part of this file's hits, keep the
+		// TAIL: hits are chronological, so the tail is the newest, and newest
+		// is the promise the whole ordering makes (review 2026-08-18).
+		if remaining := q.limit - len(rep.Matches); len(hits) > remaining {
+			hits = hits[len(hits)-remaining:]
 		}
+		rep.Matches = append(rep.Matches, hits...)
 	}
 	rep.Ms = time.Since(started).Milliseconds()
 	return rep
@@ -384,7 +448,7 @@ func sessionsSearch(sources []sessSource, q sessQuery) sessReport {
 // complete. The open goes through os.Root and the link-count guard for the
 // reasons codexScanFile spells out; a file that fails either is reported as
 // trouble, never read.
-func sessScanFile(root *os.Root, src sessSource, f sessFile, q sessQuery) (hits []sessHit, trouble bool) {
+func sessScanFile(root *os.Root, src sessSource, f sessFile, q sessQuery, gate []string) (hits []sessHit, trouble bool) {
 	if root == nil {
 		return nil, true
 	}
@@ -411,8 +475,15 @@ func sessScanFile(root *os.Root, src sessSource, f sessFile, q sessQuery) (hits 
 	lineNo := 0
 	for sc.Scan() {
 		lineNo++
-		if lineNo%256 == 0 && time.Now().After(q.deadline) {
-			return hits, true
+		// Every few lines rather than every few hundred: lines here can be
+		// megabytes each, and a check that comes around only after 256 of
+		// them can overshoot the budget so far the console's own timeout
+		// kills the command — which returns NOTHING, where this returns a
+		// partial answer (review 2026-08-18). Break, not return: the hits
+		// already found still deserve their timestamps and project below.
+		if lineNo%16 == 0 && time.Now().After(q.deadline) {
+			trouble = true
+			break
 		}
 		line := sc.Bytes()
 		if fileCwd == "" && lineNo <= 4 && len(line) < 512*1024 && bytes.Contains(line, []byte(`"cwd"`)) {
@@ -431,11 +502,14 @@ func sessScanFile(root *os.Root, src sessSource, f sessFile, q sessQuery) (hits 
 			}
 		}
 
-		// Cheap gate first: a line whose raw bytes do not hold every term
-		// cannot produce a message text that does, and almost every line of
-		// almost every file stops here without being parsed.
+		// Cheap gate first: a line whose raw bytes do not hold every GATE
+		// term cannot produce a message text that does, and almost every
+		// line of almost every file stops here without being parsed. Terms
+		// that JSON escaping could disguise are not in the gate (see
+		// sessGateTerms) — a query made only of those parses every line,
+		// which is slower and correct.
 		ok := true
-		for _, t := range q.terms {
+		for _, t := range gate {
 			if !sessContainsFold(line, t) {
 				ok = false
 				break
@@ -491,17 +565,32 @@ func sessScanFile(root *os.Root, src sessSource, f sessFile, q sessQuery) (hits 
 	if sc.Err() != nil {
 		trouble = true
 	}
+	project := ""
+	if fileCwd != "" {
+		// Bounded like everything else that rides the pipe: a directory can
+		// be NAMED five kilobytes, and one hit must not be able to spend the
+		// whole frame on its label.
+		project = sessCapRunes(filepath.Base(fileCwd), 64)
+	}
 	for i := range hits {
 		if hits[i].Timestamp == "" {
 			hits[i].Timestamp = f.mtime.UTC().Format(time.RFC3339)
 		}
-		if fileCwd != "" {
-			hits[i].Project = filepath.Base(fileCwd)
-		} else {
-			hits[i].Project = ""
-		}
+		hits[i].Project = project
 	}
 	return hits, trouble
+}
+
+// The first n runes of s, whole runes only.
+func sessCapRunes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[:n])
 }
 
 // The human-readable text out of one parsed transcript line. Collection is by
@@ -703,20 +792,26 @@ var sessRedactRes = []*regexp.Regexp{
 	regexp.MustCompile(`xox[abprs]-[A-Za-z0-9-]{10,}`),
 	regexp.MustCompile(`eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}[A-Za-z0-9_.-]*`),
 	regexp.MustCompile(`-----BEGIN[A-Z ]{0,32}PRIVATE KEY-----[^-]*(?:-----END[A-Z ]{0,32}PRIVATE KEY-----)?`),
-	regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}`),
+	regexp.MustCompile(`(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{16,}`),
 }
 
 // Assignments keep their key and lose their value, so the snippet still shows
 // WHAT was set — which is usually why the line matched — without showing what
-// it was set to.
+// it was set to. The key may carry prefixes and suffixes around the sensitive
+// word (AWS_SECRET_ACCESS_KEY, DB_PASSWORD, CLIENT_SECRET) — a plain \b
+// before the word would miss all of those, because an underscore IS a word
+// character (review 2026-08-18). RE2 has no lookaround, so the shape is
+// spelled out: optional `..._`-style prefix, the word, optional `_...`-style
+// suffix. `tokens:` stays untouched — a bare `s` fits neither the suffix nor
+// the separator. Values may be quoted (spaces and all) or bare.
 var sessRedactAssign = regexp.MustCompile(
-	`(?i)\b((?:api[_-]?key|secret|token|passw(?:or)?d|authorization)["']?\s*[:=]\s*)["']?[^\s"']{6,}`)
+	`(?i)((?:[A-Za-z0-9_-]*[_-])?(?:api[_-]?key|apikey|access[_-]?key|secret|token|passw(?:or)?d|credentials?|authorization)(?:[_-][A-Za-z0-9_-]*)?["']?\s*[:=]\s*)("[^"]{4,}"|'[^']{4,}'|[^\s"']{6,})`)
 
 func sessRedact(s string) string {
 	for _, re := range sessRedactRes {
 		s = re.ReplaceAllString(s, "[redacted]")
 	}
-	return sessRedactAssign.ReplaceAllString(s, "$1[redacted]")
+	return sessRedactAssign.ReplaceAllString(s, "${1}[redacted]")
 }
 
 // The id worth showing for a transcript file. Claude names files by the
