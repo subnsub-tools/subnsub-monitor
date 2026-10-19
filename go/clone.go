@@ -1,6 +1,6 @@
 package main
 
-/* ── portable copies of a dashboard (operator ruling 2026-10-17: a copy with an expiry of its own) ──
+/* ── portable copies of a dashboard ──
 
    A dashboard can lend its access to a command line for a while. It makes a
    fresh pair of keys — a tailcat node key for the tunnel and an Ed25519 key
@@ -55,7 +55,7 @@ const (
 	// Ids revoked here, one "<id> <unix until>" per line, appended and never
 	// rewritten by a reader: what makes a revocation stick when a revoke at
 	// the keyboard and an enrolment over the tunnel rewrite the clones file at
-	// the same moment (review 2026-10-17: the enrolment could write back the
+	// the same moment (the enrolment could write back the
 	// copy the revoke had just removed). A revoked id never counts again,
 	// whatever the clones file says.
 	clonesRevokedFile = "clones.revoked"

@@ -624,10 +624,10 @@ func sessRecentFor(root *os.Root, src sessSource, f sessFile, pathCwd string, de
 
 // The machinery that poses as the first user message of a transcript, by its
 // EXACT openings — claude's slash-command wrappers and local-command caveat,
-// codex's tag-wrapped context blocks. Matching precisely is the point: an
-// earlier build skipped anything starting with `<` or `Caveat:`, and a user
-// whose genuine first words were "<div> is overflowing…" lost their title to
-// it (review 2026-08-18, round 2). The list will trail new wrappers slightly;
+// codex's tag-wrapped context blocks. Matching precisely is the point:
+// skipping anything starting with `<` or `Caveat:` would drop a user
+// whose genuine first words were "<div> is overflowing…".
+// The list will trail new wrappers slightly;
 // a machinery title for a while beats stealing titles from real prompts.
 // Compared ASCII-lowercased, the same folding everything here searches by.
 var sessTitlePreludes = []string{
@@ -709,7 +709,7 @@ func sessionsOpen(sources []sessSource, id, mode string, anchor int, deadline ti
 	// The walk's own troubles are NOT this answer's `partial`: partial here
 	// means "this session's page may be missing lines", and an unlistable
 	// directory in some other agent's tree says nothing about the file that
-	// WAS found and read whole (review 2026-08-18, round 2). The walk's
+	// WAS found and read whole. The walk's
 	// incompleteness matters only below, where it forbids the not-found
 	// verdict.
 	roots, files, walkPartial := sessAllCandidates(sources, deadline)
@@ -728,8 +728,7 @@ func sessionsOpen(sources []sessSource, id, mode string, anchor int, deadline ti
 		// "Not found" is a verdict, and a verdict needs the whole candidate
 		// list to have been seen. Off an incomplete walk the honest answer
 		// is an empty partial page, which the dashboard shows as a failed
-		// read — not as this session having ceased to exist (review
-		// 2026-08-18).
+		// read — not as this session having ceased to exist.
 		if walkPartial {
 			rep.Partial = true
 		} else {
@@ -748,7 +747,7 @@ func sessionsOpen(sources []sessSource, id, mode string, anchor int, deadline ti
 	// A scan that never reached the end of the file cannot testify that
 	// nothing follows: without this, a timed-out tail passes its prefix off
 	// as the real end and the rest of the transcript becomes unreachable
-	// from the UI (review 2026-08-18). The deliberate early stop sets its
+	// from the UI. The deliberate early stop sets its
 	// own more_after through the window's counts; this covers the
 	// involuntary ones.
 	if !sawEnd {
@@ -757,7 +756,7 @@ func sessionsOpen(sources []sessSource, id, mode string, anchor int, deadline ti
 	// An anchored scan that was cut BEFORE it ever reached its anchor has a
 	// window from somewhere far short of the page it was asked for; handing
 	// that over would let the dashboard stitch a distant prefix onto the
-	// transcript and orphan everything between (review 2026-08-18, round 2).
+	// transcript and orphan everything between.
 	// The page comes back empty and partial instead — the edges on screen
 	// stay where they were, and the same button asks again.
 	if (mode == "before" || mode == "around") && !sawEnd && !msgs.anchorSeen {

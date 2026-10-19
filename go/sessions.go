@@ -3,25 +3,19 @@ package main
 // Searching THIS machine's coding-agent sessions, when the dashboard's fleet
 // search asks over the console channel — `subnsub-monitor sessions search`.
 //
-// The whole feature exists because of one ruling: a machine that granted the
-// console has already granted arbitrary /bin/sh as this user, so the fleet
-// search rides that one channel and nothing more sensitive is exposed by it.
-// What leaves the machine is the snippets this prints — never a transcript.
+// A machine that granted the console has already granted arbitrary /bin/sh as
+// this user, so the fleet search rides that one channel and nothing more
+// sensitive is exposed by it. What leaves the machine is the snippets this
+// prints — never a transcript.
 //
-// An earlier build of this file installed a third-party indexer instead, and
-// the audit of that tool is why this is now a few hundred lines of our own:
-// the indexer answered one narrow question — "which recent sessions mention
-// this text" — by forking a resident daemon, rebuilding a plaintext copy of
-// every transcript into its own database, and phoning two hosts by default.
-// This file answers the same question by READING THE TRANSCRIPTS WHERE THEY
+// This file answers the question by READING THE TRANSCRIPTS WHERE THEY
 // ALREADY ARE. No index is built, no daemon starts, nothing is downloaded,
 // no file is written, and the only network anywhere near this path is the
 // console channel that carried the question in.
 //
-// The shape of the answer is the one the dashboard already renders: a JSON
+// The shape of the answer is a JSON
 // object with a `matches` list of {project, agent, timestamp, session_id,
-// snippet}. Holding that shape is what let the indexer be swapped out without
-// the far end noticing.
+// snippet}.
 //
 // Reading discipline is codex.go's, because the trees are the same kind of
 // place: every open goes through os.Root so a symlinked component cannot walk
@@ -210,7 +204,7 @@ func (q sessQuery) first() string {
 // Counted in code points rather than bytes because the panel and the relay
 // count that way too, and a limit that means three different lengths would
 // accept a hundred Chinese characters in the browser and report this helper as
-// too old to run it (review 2026-08-19).
+// too old to run it.
 const sessMaxPattern = 200
 
 // One search pattern, compiled the way both ends of this feature agree to read
@@ -418,10 +412,10 @@ func runSessionsSearchCLI(rest []string) int {
 
 // What this document will cost inside the console result frame, where it
 // travels as ONE escaped JSON string. This — not len(doc) — is the number the
-// far end's 20 KiB body cap judges, and the difference is not pedantry: a
+// far end's 20 KiB body cap judges: a
 // transcript full of code doubles its quotes and backslashes again at that
-// second encoding, and a document sized only by its own bytes sails through
-// here and comes back halved (review 2026-08-18).
+// second encoding, and a document sized only by its own bytes would sail through
+// here and come back halved.
 func sessFrameCost(doc []byte) int {
 	esc, err := json.Marshal(string(doc))
 	if err != nil {
@@ -491,7 +485,7 @@ func sessLowerASCII(s string) string {
 // The terms the RAW-BYTE gate may use. A term holding a quote or a backslash
 // can appear JSON-escaped in the file (`"foo"` as \"foo\", C:\tmp as
 // C:\\tmp), so testing the raw line for it would throw away real hits before
-// they were ever parsed (review 2026-08-18). Those terms are still enforced —
+// they were ever parsed. Those terms are still enforced —
 // on the extracted text, where escapes are gone — they just cannot serve as
 // the cheap gate.
 func sessGateTerms(terms []string) []string {
@@ -575,8 +569,7 @@ type sessFile struct {
 // the list is incomplete, and an incomplete list must not become a confident
 // "nothing here". The deadline covers the walk itself, because the budget is
 // over the whole search and a tree pathological enough to take seconds to
-// LIST would otherwise spend the scan's time before a single file was read
-// (review 2026-08-18).
+// LIST would otherwise spend the scan's time before a single file was read.
 func sessCandidates(src sessSource, srcIdx int, deadline time.Time) (out []sessFile, partial bool) {
 	filepath.WalkDir(src.root, func(p string, d fs.DirEntry, err error) error {
 		if time.Now().After(deadline) {
@@ -680,7 +673,7 @@ func sessionsSearch(sources []sessSource, q sessQuery) sessReport {
 		rep.Scanned++
 		// When the limit has room for only part of this file's hits, keep the
 		// TAIL: hits are chronological, so the tail is the newest, and newest
-		// is the promise the whole ordering makes (review 2026-08-18).
+		// is the promise the whole ordering makes.
 		if remaining := q.limit - len(rep.Matches); len(hits) > remaining {
 			hits = hits[len(hits)-remaining:]
 		}
@@ -824,7 +817,7 @@ func sessScanFile(root *os.Root, src sessSource, f sessFile, pathCwd string, q s
 		// megabytes each, and a check that comes around only after 256 of
 		// them can overshoot the budget so far the console's own timeout
 		// kills the command — which returns NOTHING, where this returns a
-		// partial answer (review 2026-08-18). Stop, not abandon: the hits
+		// partial answer. Stop, not abandon: the hits
 		// already found still deserve their timestamps and project below.
 		if lineNo%16 == 0 && time.Now().After(q.deadline) {
 			trouble = true
@@ -947,7 +940,7 @@ func sessScanFile(root *os.Root, src sessSource, f sessFile, pathCwd string, q s
 // A working directory's base name, fit to ride the pipe: redacted FIRST —
 // a directory really can be named DB_PASSWORD=..., and a label that skips
 // the mask the message text wears would be the one unredacted string in the
-// answer (review 2026-08-18, round 2) — then capped, because a directory can
+// answer — then capped, because a directory can
 // also be NAMED five kilobytes and one row must not spend the frame on its
 // label.
 func sessProjectLabel(cwd string) string {
@@ -1008,7 +1001,7 @@ func sessCollectText(v any, depth int, out *[]string) {
 					// machinery. A tool call's arguments really do contain keys
 					// called `text` and `content` — an editor's replacement
 					// string, a fetch's prompt — and quoting those would answer
-					// searches with things nobody said (review 2026-08-19).
+					// searches with things nobody said.
 					sessCollectText(val, depth+1, out)
 				}
 			case "text", "thinking":
@@ -1196,7 +1189,7 @@ var sessRedactRes = []*regexp.Regexp{
 // it was set to. The key may carry prefixes and suffixes around the sensitive
 // word (AWS_SECRET_ACCESS_KEY, DB_PASSWORD, CLIENT_SECRET) — a plain \b
 // before the word would miss all of those, because an underscore IS a word
-// character (review 2026-08-18). RE2 has no lookaround, so the shape is
+// character. RE2 has no lookaround, so the shape is
 // spelled out: optional `..._`-style prefix, the word, optional `_...`-style
 // suffix. `tokens:` stays untouched — a bare `s` fits neither the suffix nor
 // the separator. Values may be quoted (spaces and all) or bare.

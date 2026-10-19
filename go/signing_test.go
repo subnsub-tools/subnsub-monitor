@@ -317,9 +317,9 @@ func TestTrustFileIgnoresJunkLines(t *testing.T) {
 // signing input on either side fails HERE rather than in the field, where the
 // symptom would be every command refused as bad-signature.
 //
-// Regenerate deliberately, never to make this pass. From the repo root:
+// Regenerate deliberately, never to make this pass:
 //
-//	node helper/go/testdata/gen-browser-signature.mjs > helper/go/testdata/browser-signature.json
+//	node go/testdata/gen-browser-signature.mjs > go/testdata/browser-signature.json
 func TestAWebCryptoSignatureVerifiesHere(t *testing.T) {
 	body, err := os.ReadFile(filepath.Join("testdata", "browser-signature.json"))
 	if err != nil {

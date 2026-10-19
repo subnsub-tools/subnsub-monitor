@@ -61,17 +61,17 @@ const (
 	// TypeCommand is the dashboard asking the machine to do something over
 	// the tunnel — the same envelope the relay's mailbox carries (kind, the
 	// line or target, the browser's signature), so the machine judges it
-	// with the same code (helper/go/signing.go) whichever road it came by.
+	// with the same code (signing.go) whichever road it came by.
 	// Its body is Command. POSTed, never streamed.
 	TypeCommand = "command"
 	// TypeResult is the machine's answer to one TypeCommand: the console
 	// result document the relay's /result already carries, unchanged.
 	TypeResult = "result"
-	// TypeHistory is the machine's own trend archive (helper/go/history.go),
+	// TypeHistory is the machine's own trend archive (history.go),
 	// in the dashboard's bucket-row shape; served on request, never streamed.
 	TypeHistory = "history"
 	// TypePipe is the Transfer tool asking this machine to couple two browsers
-	// for one file transfer (helper/go/pipe.go): an allowed browser POSTs an
+	// for one file transfer (pipe.go): an allowed browser POSTs an
 	// invite naming a session id and the OTHER browser's node key, and the
 	// machine answers with the same type. Its body is Pipe. The bytes that
 	// then flow are NOT frames — they are the Transfer tool's own encrypted
@@ -170,7 +170,7 @@ type Error struct {
 }
 
 // Command is the body of a TypeCommand frame: the relay mailbox's wire shape
-// (monitor-worker /commands), field for field, so one verifier serves both
+// (/commands), field for field, so one verifier serves both
 // roads. The frame's own ID is the command id the signature covers.
 type Command struct {
 	// Kind includes "sh", "update", "inspect", "allow", "refresh", "rename",

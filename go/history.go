@@ -1,20 +1,17 @@
 package main
 
 // The machine's own history — kept HERE, on the box that produced it, and
-// served over the tunnel on request (operator ruling 2026-09-01: history can
-// live entirely on the helper, and is asked of the helper when needed). The relay used to be
+// served over the tunnel on request. The relay used to be
 // the only place a trend survived a page reload; now a machine on the direct
 // road carries its own, and better: the helper is always running, so the
 // strip fills in whether or not anybody was watching.
 //
-// The rows are the dashboard's own bucket shape (monitor.js foldIntoPersist,
-// monitor-worker _foldHistory), fold for fold — peak of the sampled lanes for
+// The rows are the dashboard's own bucket shape,
+// fold for fold — peak of the sampled lanes for
 // cpu/mem/rx/tx, latest for disk/swap, the worst used-percent per provider,
 // and each service's state — so the page renders them with the code it has.
 //
-// THE GRAIN (operator ruling 2026-10-11: thirty days, all at one minute,
-// five-minute granularity loaded by default and one-minute on demand — and
-// later the same day: make it thirty seconds, still thirty days): the archive is THIRTY-SECOND buckets — one per
+// THE GRAIN: the archive is THIRTY-SECOND buckets — one per
 // reading, the sampler's own cadence — for THIRTY DAYS. The relay's copy and
 // the page's default view stay at five minutes, so the page asks for
 // `step=300` by default and the helper folds the rows on the way out
@@ -47,7 +44,7 @@ import (
 )
 
 const (
-	histBucketSec  = 30              // the archive's grain: one reading (operator ruling 2026-10-11: thirty-second buckets, thirty days)
+	histBucketSec  = 30              // the archive's grain: one reading (thirty-second buckets, thirty days)
 	histMinuteSec  = 60              // the middle step a reader may ask for
 	histCoarseSec  = 300             // the page's default step, folded on request
 	histKeepSec    = 30 * 24 * 3600  // thirty days
@@ -133,7 +130,7 @@ var hist struct {
 	// the file has been read or written by this process. fileBytes is the
 	// file's size as this process knows it (read, written, appended): the
 	// second trigger for a rewrite, so the file never outgrows what the
-	// loader will read back (review 2026-10-11: a month of wide rows near
+	// loader will read back (a month of wide rows near
 	// the ceiling plus a few hundred dead ones would have crossed it, and
 	// the next start would have thrown the whole archive away).
 	fileRows  int

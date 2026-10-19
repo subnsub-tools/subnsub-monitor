@@ -104,7 +104,7 @@ func TestEconRoundTripAndEmit(t *testing.T) {
 // The spare road refuses before it runs anything on a machine with no pinned
 // key, even with both switches on: an unsigned sealed command (what a relay
 // that kept the econ key could send after the last key was removed) must not
-// run (amp review 2026-10-10, finding 2).
+// run.
 func TestEconRefusesWhenUnpinned(t *testing.T) {
 	// A config dir with no trusted-keys file: loadTrust().sealed is false.
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())

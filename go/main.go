@@ -27,7 +27,6 @@ const usage = `subnsub-monitor — AI coding quota for machines you can't reach
   subnsub-monitor                        one snapshot as JSON, exit
   subnsub-monitor watch [SEC]            reprint every SEC seconds
   subnsub-monitor serve [PORT]           serve /quota + /events on 127.0.0.1
-  subnsub-monitor token                  mint a relay token
   subnsub-monitor connect URL [TOKEN]    dial out and push to the relay
   subnsub-monitor unregister URL         archive this installed machine at the relay
   subnsub-monitor name [LABEL]           show or set this machine's dashboard name
@@ -55,6 +54,10 @@ const usage = `subnsub-monitor — AI coding quota for machines you can't reach
   subnsub-monitor address                print this machine's direct address and node key
   subnsub-monitor transfer [on|off]      show or set whether an allowed browser may route one of its
                                          own file transfers through this machine's tunnel
+  subnsub-monitor clone [use|forget]     show, save, or delete a portable terminal access copy
+  subnsub-monitor run MACHINE -- CMD     run a command on a machine using a portable copy
+  subnsub-monitor shell MACHINE          open an interactive terminal on a machine using a portable copy
+  subnsub-monitor clones [revoke ID]     list or revoke portable copies admitted on this machine
   subnsub-monitor version                print this build's version and exit
   subnsub-monitor selftest               show what the collectors can and cannot open
 
@@ -100,7 +103,7 @@ or root) and is not a switch. It is read-only and independent of the console:
 the dashboard may request a bounded top-process resource list, but receives no
 command lines, environment, working directories or open files. The helper also
 keeps the five busiest program names beside each five-minute bucket of this
-machine's own history (seven days, in history.json here), so the CPU chart can
+machine's own history (30 days, in history.jsonl here), so the CPU chart can
 say whose CPU it was. Names only, served over the direct tunnel to browsers you
 allowed, never sent to the relay.
 
@@ -125,7 +128,7 @@ beside the relay push when there is a token and alone when there is not;
 MON_TRANSPORT=relay or =tailcat forces one or the other.
 
 A portable copy is a dashboard's access lent to a command line for a while
-(the Monitor page: Manage → tailcat → Create and copy). On the computer that
+(the Monitor page: a machine's terminal → Create a copy). On the computer that
 should have it: 'clone use' keeps the copied line, 'run <machine> -- <command>'
 runs one console line there and returns its output and exit status, 'shell
 <machine>' opens a terminal, 'clone' says what it covers and until when, and
@@ -462,8 +465,7 @@ func main() {
 	case "diagnostics":
 		// Not a switch any more: `on` is what it already is, `off` is
 		// refused out loud so an old script or note does not believe it
-		// did something (operator ruling 2026-10-13: any machine that can
-		// read process names must read them).
+		// did something.
 		if len(args) > 1 && (args[1] == "off" || args[1] == "0" || args[1] == "false" || args[1] == "no") {
 			warnf("diagnostics cannot be turned off: program names are read wherever /proc shows other processes")
 			os.Exit(1)
@@ -590,18 +592,11 @@ func main() {
 		// files under this account and prints matched snippets; `recent` lists
 		// the newest transcripts; `open` prints one bounded page of a single
 		// transcript's messages; `where` names the directory one ran in, so
-		// the dashboard's terminal can resume it there. All first-party since
-		// 2026.08.18: no index is
+		// the dashboard's terminal can resume it there. No index is
 		// built, no daemon starts, nothing is downloaded, and no byte of any
 		// transcript leaves this process except what these verbs print. Which
-		// tools are read is sessionsources.go's list — six of them as of
-		// 2026.08.19, every one a local transcript tree this machine already
-		// has.
-		// (Earlier builds took `sessions install` here and fetched a
-		// third-party indexer; the audit of that tool is why sessions.go now
-		// does the whole job itself. The verb is gone rather than kept as a
-		// no-op — an operator asking to install deserves "that is no longer a
-		// thing", not silent success.)
+		// tools are read is sessionsources.go's list, every one a local
+		// transcript tree this machine already has.
 		if len(args) >= 2 {
 			switch args[1] {
 			case "search":

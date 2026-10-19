@@ -2,7 +2,7 @@ package transport
 
 // The tailcat carrier: a WireGuard tunnel with DERP as the rendezvous and
 // relay of last resort, no Tailscale account or control plane involved
-// (github.com/tailscale/tailcat, BSD-3-Clause — see helper/NOTICE).
+// (github.com/tailscale/tailcat, BSD-3-Clause — see NOTICE).
 //
 // Shape, and why it is a SERVER here even though the helper's whole design
 // is "nothing listens": the tunnel's listening side opens no TCP port on
@@ -14,8 +14,7 @@ package transport
 // one TCP port INSIDE that tunnel, served by an http.Handler the caller
 // supplies, and only to clients whose node key is on the allowlist.
 //
-// UDP first, DERP when it must (operator ruling 2026-10-16: it is UDP first by nature,
-// and TCP only when it has no choice but DERP). magicsock binds one UDP socket on an
+// UDP first, DERP when it must. magicsock binds one UDP socket on an
 // ephemeral port and tries a direct path to every peer that can take one;
 // DERP — always TCP, TLS on 443 — carries whatever no direct path forms
 // for. Every browser is such a peer (a browser has no UDP), so browsers
@@ -30,11 +29,9 @@ package transport
 // read them. That is how a direct path forms at all, and upstream has no
 // per-peer filter. Watchers are the machine's owner; a transfer guest
 // (pipe.go) is whoever the owner's browser was sending a file to, and it
-// learns them too. From 2026-09-05 until this ruling the carrier was pinned
-// to DERP (TS_DEBUG_ALWAYS_USE_DERP + TS_DEBUG_OMIT_LOCAL_ADDRS) to keep
-// exactly that away from guests, at the cost of never going direct.
+// learns them too.
 //
-// Three boundaries the plan draws, and where each is enforced:
+// Three boundaries, and where each is enforced:
 //
 //   - WireGuard-level admission (Server.AllowedClients): a key not on the
 //     list is silently ignored at the handshake — it cannot even learn that
@@ -42,13 +39,11 @@ package transport
 //   - Application-level admission (Gate): every HTTP request is mapped back
 //     to the node key that sent it and checked against the CURRENT list, the
 //     one the caller re-reads from disk. This is the online revocation point:
-//     the upstream library can add an allowed client but cannot remove one
-//     (helper/tailcat-lab findings, 2026-08-31), so a key struck from the
+//     the upstream library can add an allowed client but cannot remove one,
+//     so a key struck from the
 //     file stops being served here, on its next request, without a restart.
 //   - Capability (the handler): being admitted grants OBSERVE and nothing
-//     else. Console, update, sessions and archive do not exist on this
-//     carrier in this generation, so there is no frame a tunnel peer can
-//     send that runs anything (plan invariant 3).
+//     else.
 
 import (
 	"context"
@@ -225,8 +220,8 @@ func StartTailcat(cfg TailcatConfig) (*Tailcat, error) {
 // and ParseAddr numbers the regions it decodes from 1, so the ID taken off the
 // started server's address was 1 on every machine — a region the public map
 // does not have. Each restart found that pin gone and picked again; a machine
-// that cannot measure latency picked at random (muse, 2026-10-17: a new
-// address on every restart, and every pick probed all four regions' relays).
+// that cannot measure latency picked at random, producing a new
+// address on every restart and probing all regions' relays on every pick.
 func chooseRegion(derpMapURL string, pinned tailcfg.DERPRegionID, logf logger.Logf) (*tailcfg.DERPRegion, bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -237,8 +232,7 @@ func chooseRegion(derpMapURL string, pinned tailcfg.DERPRegionID, logf logger.Lo
 	dm, err := tailcat.FetchDERPMap(ctx, opts...)
 	if err != nil {
 		// The pin survives a failed fetch: the caller retries, and picking
-		// afresh over a blip would rotate the address every watcher holds
-		// (review 2026-08-31).
+		// afresh over a blip would rotate the address every watcher holds.
 		return nil, false, fmt.Errorf("tailcat: DERP map: %w", err)
 	}
 	return pickRegion(ctx, dm, pinned, tailcat.PickBestRegion, lookupIPv4, logf)
@@ -251,8 +245,8 @@ func chooseRegion(derpMapURL string, pinned tailcfg.DERPRegionID, logf logger.Lo
 //
 // When it has to measure, the rewrite runs first and over every region:
 // netcheck probes the relays it is handed, and probing a sandbox's relays by
-// IP is the very approval request the rewrite exists to avoid (review
-// 2026-10-17). In such a sandbox the relay whose name is already approved is
+// IP is the very approval request the rewrite exists to avoid.
+// In such a sandbox the relay whose name is already approved is
 // the one that answers, so that is the region it settles on.
 func pickRegion(ctx context.Context, dm *tailcfg.DERPMap, pinned tailcfg.DERPRegionID,
 	best func(context.Context, *tailcfg.DERPMap) (tailcfg.DERPRegionID, error),
@@ -297,9 +291,9 @@ func pickRegion(ctx context.Context, dm *tailcfg.DERPMap, pinned tailcfg.DERPReg
 //
 // derphttp dials the map's IP literals and asks DNS only for a node that has
 // none. Where DNS answers with a different address, the network in between
-// routes by name: a sandbox's transparent egress (muse, 2026-10-17 — DNS hands
+// routes by name: a sandbox's transparent egress (where DNS hands
 // out its gateway, which forwards by name and asks the owner to approve every
-// bare IP, so each literal dial hung in an approval queue), or a fake-ip proxy
+// bare IP), or a fake-ip proxy
 // on a desktop. Dialing the name goes the way every HTTPS request on that
 // machine goes, and the way the watching browser reaches the same relay. Where
 // DNS agrees with the map, or does not answer, nothing changes: the literal
@@ -519,8 +513,7 @@ func addrForKey(k key.NodePublic) netip.Addr {
 // tailcat-web's client.path()), which is also the side that shows it.
 
 // ── key and region persistence ────────────────────────────────────────
-// Lifted from the Phase 0 lab, where each rule below was argued out. The
-// short version: an unreadable key must never be silently replaced (that is
+// Key persistence rules: an unreadable key must never be silently replaced (that is
 // an identity rotation every watcher would experience as the machine going
 // dark), creation is atomic, and both the file and its directory must be
 // owner-only or the whole thing is refused.
@@ -605,10 +598,10 @@ func readKeyFile(path string) (key.NodePrivate, error) {
 
 // requireOwnerOnly makes the state directory owner-only, tightening it if
 // it is wider. Tightening rather than refusing, because the directory is
-// the helper's own config dir and every install before today created it
+// the helper's own config dir and earlier installs created it
 // through the installer's mkdir under the login umask — 0755 on most
 // systems — which would otherwise leave direct mode refusing to start on
-// exactly the machines it is meant for (review 2026-08-31). Only a
+// existing installations. Only a
 // directory this user owns can be chmod'ed, so a directory that cannot be
 // tightened is still refused.
 func requireOwnerOnly(dir string) error {

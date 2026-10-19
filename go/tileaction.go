@@ -4,8 +4,7 @@ package main
 //
 // A tile in metrics.d says what a machine knows; an action on it lets the
 // dashboard change it — set a weight, restart a worker, flip a mode — without
-// a shell (operator ruling 2026-10-17: the Monitor board has to work in both
-// directions, not only display data).
+// a shell.
 //
 // What makes it safe to offer is where the command lives. Exactly as with a
 // tile's own `exec`, the command is written in metrics.d on THIS machine, by
@@ -89,8 +88,7 @@ type actionInput struct {
 }
 
 // TileAction and TileActionInput are the wire: what a dashboard needs to draw
-// the control, and not one byte of the command behind it. Mirrored in
-// monitor-worker/src/clean.js (cleanTileActions) and monitor.js (tileActions).
+// the control, and not one byte of the command behind it.
 type TileAction struct {
 	ID      string           `json:"id"`
 	Label   string           `json:"label"`
@@ -108,8 +106,7 @@ type TileActionInput struct {
 
 // TileVia points a tile at the tile that holds its actions, on another
 // machine of the same board: a recorder's weight, say, whose setting belongs
-// to the service on the machine that owns it (user 2026-10-17: the weight on
-// each recorder's card should be the press). Nothing runs on the machine that
+// to the service on the machine that owns it. Nothing runs on the machine that
 // shows it; the dashboard opens the other tile's actions and the press goes
 // to that machine, which judges it against its own metrics.d as always.
 type TileVia struct {
@@ -285,7 +282,7 @@ func actionValue(in *actionInput, raw string) (string, error) {
 		return "", errors.New("not on the step")
 	}
 	// Snapped onto the grid, then judged again: with a coarse step the
-	// nearest grid point can lie past max (review 2026-10-17).
+	// nearest grid point can lie past max.
 	f = *in.Min + math.Round(k)*in.Step
 	if f < *in.Min || f > *in.Max {
 		return "", errors.New("out of bounds")

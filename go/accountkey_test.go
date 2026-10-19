@@ -364,9 +364,8 @@ func TestAmpAccountKeyAndNameFromTheAddress(t *testing.T) {
 	}
 }
 
-// A reading that comes without an account is named by its tool's sign-in
-// (operator ruling 2026-10-18: that privacy rule no longer exists), with or
-// without a room; the key
+// A reading that comes without an account is named by its tool's sign-in,
+// with or without a room; the key
 // still comes from the identity — for Codex the ChatGPT account, never the
 // e-mail the name is.
 func TestStampAccountNames(t *testing.T) {
@@ -422,7 +421,7 @@ func TestStampAccountNames(t *testing.T) {
 // A machine signed in twice — the default directories as one account, a
 // CODEX_HOME or CLAUDE_CONFIG_DIR as another — names and keys each reading
 // by the sign-in it was taken with, and by nothing where that cannot be
-// told (review 2026-10-18: B's quota must never stand under A's address).
+// told.
 func TestStampAccountFollowsTheReadingsOwnSignIn(t *testing.T) {
 	withRoom(t, fakeToken(time.Now().Add(time.Hour)))
 	home := t.TempDir()

@@ -312,7 +312,7 @@ func syncUID(src sessSource, rel string) string {
 // sending the raw stem would have the relay refuse the batch as malformed,
 // which the helper reads as "unstorable" and skips past forever. Both the key
 // and the label go through here, so they can never disagree about which file
-// this is (review 2026-08-18, round 3).
+// this is.
 func syncSID(src sessSource, rel string) string {
 	id := sessIDFromName(src, rel)
 	if !sessValidID(id) {
@@ -352,7 +352,7 @@ func syncSig(f *os.File) (string, error) {
 // catches the case the head cannot: a transcript truncated and written past its
 // old length again, under the same first line. The head still matches, the size
 // is no longer smaller, and without this the cursor would resume in the middle
-// of a conversation it never read the beginning of (review 2026-08-18, round 3).
+// of a conversation it never read the beginning of.
 //
 // Read through ReadAt so it does not disturb the sequential read that follows.
 func syncTailSig(f *os.File, off int64) (string, error) {
@@ -367,8 +367,7 @@ func syncTailSig(f *os.File, off int64) (string, error) {
 	// A SHORT read is a failure here, not an EOF to shrug at: the window ends at
 	// a byte the cursor says was already consumed, so anything less than all of
 	// it means the file shrank underneath us — and hashing the zero bytes that
-	// were never filled would answer a question nobody asked (review
-	// 2026-08-18, round 4).
+	// were never filled would answer a question nobody asked.
 	got, err := f.ReadAt(buf, off-n)
 	if err != nil && err != io.EOF {
 		return "", err
@@ -569,7 +568,7 @@ func syncAddMsg(out *bytes.Buffer, batch *syncBatch, fs *syncFileState, m sessMs
 	if fs.Title == "" && m.Role == "user" {
 		// Unwrapped exactly as the live listing unwraps it, or the archive
 		// would show a column of `<timestamp>` where the machine itself
-		// shows what somebody typed (review 2026-08-19).
+		// shows what somebody typed.
 		t := sessTitleUnwrap(strings.TrimSpace(m.Text))
 		if t != "" && !sessTitlePrelude(t) {
 			fs.Title = sessTitleClip(t)
@@ -612,13 +611,11 @@ func syncScanFile(root *os.Root, src sessSource, f sessFile, fs *syncFileState, 
 	// cursor describes: it shrank, its opening line changed, or the bytes
 	// ending AT the cursor are no longer the bytes that were read. The third is
 	// the one that catches a truncate-and-regrow past the old length under an
-	// unchanged first line, which the other two both miss (review 2026-08-18,
-	// round 3). A state written before this field existed has no tail to
+	// unchanged first line, which the other two both miss. A state written before this field existed has no tail to
 	// compare and is trusted once, which is the same trust it already had.
 	// Ordered so the cheap, certain answers come first: a file that SHRANK is
 	// already known to be a different file, and asking for a fingerprint of
-	// bytes that are no longer there would only report an unreadable file
-	// (review 2026-08-18, round 4). Past those two, a short read really does
+	// bytes that are no longer there would only report an unreadable file. Past those two, a short read really does
 	// mean the file is being truncated underneath this pass, and the honest
 	// answer is to come back rather than to guess.
 	replaced := fs.Sig != sig || st.Size() < fs.Off
@@ -671,8 +668,7 @@ func syncScanFile(root *os.Root, src sessSource, f sessFile, fs *syncFileState, 
 		line:  fs.Line,
 		// Zero, not the running total: this counts what THIS chunk carries, and
 		// the relay sums the chunk table. Seeded from the state it would count
-		// every earlier chunk again in every later one (review 2026-08-18,
-		// round 3).
+		// every earlier chunk again in every later one.
 		msgs: 0,
 	}
 	cwd := ""
@@ -878,12 +874,11 @@ func syncPass(client *http.Client, base string, tok *tokenBox) time.Duration {
 		}
 		fs.Seen = now
 		dirty = true
-		// NO STAT-ONLY SHORTCUT. An earlier build skipped a file whose mtime and
-		// size still matched what it had consumed, which is fast and is not a
+		// NO STAT-ONLY SHORTCUT. Skipping a file whose mtime and
+		// size still matched what it had consumed is fast and is not a
 		// proof: a restore, an in-place rewrite, or a copy that preserves
-		// metadata can leave both unchanged over different content, and the
-		// skip happened before any of the identity checks that would have
-		// caught it (review 2026-08-18, round 4). syncScanFile opens the file,
+		// metadata can leave both unchanged over different content, before
+		// any of the identity checks that would catch it. syncScanFile opens the file,
 		// verifies its opening line and the bytes at the cursor, and returns
 		// immediately when there is nothing new — an open and two small reads
 		// per transcript per pass, which is not the expensive part of anything.
@@ -896,9 +891,7 @@ func syncPass(client *http.Client, base string, tok *tokenBox) time.Duration {
 		}
 		// The switch is re-read here as well as at the top of the pass. It is
 		// the one switch on this machine that decides whether a conversation
-		// leaves it, and `sessions sync off` promising "within one pass" while
-		// a pass can upload for another ninety seconds is not a promise (review
-		// 2026-08-18, round 4).
+		// leaves it, so `sessions sync off` stops uploading within the batch.
 		if !syncEnabled() {
 			saveSyncState(state)
 			return syncIdleWait
@@ -913,9 +906,8 @@ func syncPass(client *http.Client, base string, tok *tokenBox) time.Duration {
 			// ALWAYS, including the empty string. Tail describes the file at
 			// Off, so carrying an older one forward past a cursor that moved
 			// would fail its own comparison next pass and re-send the whole
-			// transcript; empty means "unknown, trust once", which is exactly
-			// the right thing to record when it could not be taken (review
-			// 2026-08-18, round 4).
+			// transcript; empty means "unknown, trust once", which is the
+			// right thing to record when it could not be taken.
 			fs.Tail = batch.tail
 		case syncSkip:
 			warnf("archive refused a chunk of %s; skipping it", batch.state.UID)

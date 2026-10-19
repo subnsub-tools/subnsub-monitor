@@ -275,7 +275,7 @@ type Snapshot struct {
 	// The direct road's address (a tailcat ConnBlob, `tc…`) while the tunnel
 	// is up, absent otherwise. It travels in the relay reading so a dashboard
 	// that already watches this machine through the relay can open the tunnel
-	// too without anybody copying a line (TODO 2026-09-01). A bearer of
+	// too without anybody copying a line. A bearer of
 	// reachability, not of access: the allowlist still decides who gets an
 	// answer, and the relay already carries everything else this machine
 	// says about itself.
@@ -401,13 +401,6 @@ func (p *Provider) setPlanDate(at *float64, kind string) {
 // Ids match CodexBar's registry on purpose — the site's coverage endpoint
 // diffs the two lists by these exact strings, and a test holds this table and
 // that endpoint's SUPPORTED array to being the same list.
-//
-// Wayfinder, Gemini, Factory and Augment were dropped on 2026-10-07 (operator
-// ruling: drop these four platforms): one reference implementation or none to follow when a
-// vendor moves a field, Wayfinder has no quota at all, and personal Gemini CLI
-// accounts were shut off on 2026-06-18 in favour of Antigravity's CLI. Doubao
-// followed the same day (operator ruling: drop Doubao too): the one collector with no upstream
-// implementation to follow at all.
 var collectors = []struct {
 	id string
 	fn func() Provider
@@ -590,9 +583,7 @@ func collectAllOpts(consumeSeries bool) Snapshot {
 // A vendor CPA knows nothing about keeps its native collector. When CPA
 // itself could not be asked, nothing native moves and nothing is added: the
 // proxy is a channel, and its trouble goes to this program's log (cpaSay),
-// not onto the board (operator ruling 2026-09-09: what CPA supports is read the CPA way
-// first and the rest fall back; CPA is only an underlying channel for data
-// and must not be something the user perceives).
+// not onto the board.
 func mergeCPA(native []Provider, c cpaResult) []Provider {
 	// Which tiles are CPA's in this reading, for a press on one (pace.go).
 	tiles := make([]string, 0, len(c.providers))

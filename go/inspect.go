@@ -8,8 +8,7 @@ package main
 // dashboard may run a shell command, replace the helper, or read process
 // arguments and environment.
 //
-// It is no longer a switch (operator ruling 2026-10-13: this is information we can get and
-// must always get; the switch should not exist): wherever /proc shows other processes
+// It is not a switch: wherever /proc shows other processes
 // the names are read, kept beside the CPU history and served over the tunnel.
 // The marker file and MON_DIAGNOSTICS that used to decide it are ignored;
 // `subnsub-monitor diagnostics` only reports.

@@ -203,7 +203,7 @@ func TestSessionsSearchNewestFirstLimitAndPerSessionCap(t *testing.T) {
 		t.Fatalf("the old session should contribute only up to the leftover limit, got %d", fromOld)
 	}
 	// And the two that made it are the NEWEST two of the session's last
-	// three, not the oldest (review 2026-08-18).
+	// three, not the oldest.
 	if oldTs[0] != "2026-08-16T09:08:00Z" || oldTs[1] != "2026-08-16T09:09:00Z" {
 		t.Fatalf("limit trimming kept the wrong end of the ring: %v", oldTs)
 	}
@@ -473,7 +473,7 @@ func TestSessRedactShapes(t *testing.T) {
 }
 
 // A term that JSON escaping disguises in the raw line (embedded quotes) must
-// still match — the raw gate steps aside for it (review 2026-08-18).
+// still match — the raw gate steps aside for it.
 func TestSessionsSearchFindsQuotedTerm(t *testing.T) {
 	claude, _, sources := sessTestWorld(t)
 	sessWrite(t, filepath.Join(claude, "p", "a.jsonl"), time.Now(),
@@ -485,7 +485,7 @@ func TestSessionsSearchFindsQuotedTerm(t *testing.T) {
 }
 
 // Query folding is the same ASCII-only folding the matcher uses: a non-ASCII
-// letter keeps its case and matches its own exact bytes (review 2026-08-18).
+// letter keeps its case and matches its own exact bytes.
 func TestSessTermsFoldASCIIOnly(t *testing.T) {
 	claude, _, sources := sessTestWorld(t)
 	sessWrite(t, filepath.Join(claude, "p", "a.jsonl"), time.Now(),
@@ -504,7 +504,7 @@ func TestSessTermsFoldASCIIOnly(t *testing.T) {
 }
 
 // The encoded answer fits the channel no matter how fat the hits are, and a
-// drop for size says so in partial (review 2026-08-18).
+// drop for size says so in partial.
 func TestSessEncodeCapped(t *testing.T) {
 	rep := sessReport{Matches: []sessHit{}}
 	for i := 0; i < sessMaxLimit; i++ {

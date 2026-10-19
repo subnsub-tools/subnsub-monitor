@@ -31,8 +31,7 @@ import (
 	"unicode"
 )
 
-// Bounds the page and the relay both assume. Kept in sync with the id/label
-// rules in monitor-worker/src/clean.js — a value that fails there is dropped
+// Bounds the page and the relay both assume: a value that fails at the relay is dropped
 // on arrival, and a machine that quietly loses its id shares a dashboard with
 // every other machine that did the same.
 const (

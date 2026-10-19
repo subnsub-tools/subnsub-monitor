@@ -99,7 +99,7 @@ const (
 	tokenFile = "token.current"
 )
 
-// The 44-byte token layout, mirrored from functions/_lib/monitortoken.js:
+// The 44-byte token layout:
 // 16 bytes of identity, 4 bytes of big-endian expiry, 8 of nonce, 16 of tag.
 // Only the identity and the expiry are read here — the helper has no business
 // interpreting the rest, and cannot verify the tag anyway.

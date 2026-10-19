@@ -359,14 +359,14 @@ func TestCloneBlobParse(t *testing.T) {
 	nk, _ := f.node.MarshalText()
 	mk := func(seed []byte, nk string) string {
 		b, _ := json.Marshal(cloneBlob{V: 1, Cert: cert, SK: base64.StdEncoding.EncodeToString(seed), NK: nk,
-			Machines: []cloneMachine{{ID: "abc123", Name: "muse", Addr: "tcXYZ"}, {ID: "def456", Name: "mini", Addr: "tcABC"}}})
+			Machines: []cloneMachine{{ID: "abc123", Name: "mars", Addr: "tcXYZ"}, {ID: "def456", Name: "mini", Addr: "tcABC"}}})
 		return cloneBlobPrefix + base64.RawURLEncoding.EncodeToString(b)
 	}
 	a, err := parseCloneBlob(mk(f.copyPriv.Seed(), string(nk)))
 	if err != nil {
 		t.Fatalf("good copy: %v", err)
 	}
-	if m, err := a.machine("MUSE"); err != nil || m.ID != "abc123" {
+	if m, err := a.machine("MARS"); err != nil || m.ID != "abc123" {
 		t.Errorf("by name: %v %v", m, err)
 	}
 	if m, err := a.machine("def"); err != nil || m.Name != "mini" {

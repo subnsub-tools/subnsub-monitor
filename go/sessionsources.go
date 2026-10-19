@@ -308,7 +308,7 @@ func sessAmpDoc(b []byte) (sessDocument, bool) {
 
 // A file:// URL as a path. Percent-decoded, because a workspace called
 // `My Project` arrives as `My%20Project` and would otherwise be a project
-// nobody can name in a filter (review 2026-08-19); and with the slash that
+// nobody can name in a filter; and with the slash that
 // precedes a Windows drive letter dropped, because `/C:/x` is not a path any
 // Windows API accepts. Anything that is not a file URL is returned as written
 // — the caller only wants a label out of it either way.

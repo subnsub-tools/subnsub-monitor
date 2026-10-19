@@ -139,8 +139,7 @@ func TestAmpParsesRealOutput(t *testing.T) {
 }
 
 // `amp usage` prints the signed-in e-mail on its first line: it is the
-// reading's account, the name its tile is shown by (operator ruling 2026-10-18: that
-// privacy rule no longer exists). The line itself is not a figure and goes nowhere.
+// reading's account, the name its tile is shown by. The line itself is not a figure and goes nowhere.
 func TestAmpNamesTheAccount(t *testing.T) {
 	p := parseAmpFixture(t, ampReal)
 	if p.Account != "someone@example.com" {

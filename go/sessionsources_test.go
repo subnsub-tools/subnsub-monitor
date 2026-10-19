@@ -526,7 +526,7 @@ func TestArchivedRowsOfPathShapedToolsCarryTheirProject(t *testing.T) {
 	// The archive's `project:` filter reads a column the SYNC writes. A source
 	// whose transcript never names its own working directory has to be asked
 	// the same way the live readers ask it, or the archive and the machine
-	// disagree about which project a session belongs to (review 2026-08-19).
+	// disagree about which project a session belongs to.
 	base, sources := sessNewWorld(t)
 	st := syncTestState()
 	for _, c := range []struct{ agent, path, project, title string }{

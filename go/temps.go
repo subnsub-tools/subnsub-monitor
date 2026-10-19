@@ -118,8 +118,8 @@ func tempChipName(raw string) string {
 }
 
 // The labels drivers write from their own source, as words and as a word
-// followed by a number. monitor-worker/src/clean.js holds the same two lists
-// (TEMP_LABEL_RE) and has to: a label this admits and the relay does not
+// followed by a number. The relay holds the same two lists
+// and has to: a label this admits and the relay does not
 // simply never arrives.
 var tempLabelWords = map[string]bool{
 	"Composite": true,                             // nvme

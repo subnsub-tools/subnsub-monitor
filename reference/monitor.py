@@ -41,16 +41,14 @@
    source, verifiable by reading it, not a guarantee about somebody else's
    binary.
 
-   This is Python for the PoC — zero dependencies, runs anywhere python3 is.
-   The shipping helper is meant to be a single static Go binary; the collection
-   logic is deliberately written to port straight across (and Go should use
-   openat2(RESOLVE_BENEATH) where this walks by hand).
+   Single-file Python 3 reference implementation — zero dependencies, standard
+   library only. The shipping helper in go/ is a single static Go binary built
+   on the same collection model (using os.Root where this walks by hand).
 
    Usage:
      ./monitor.py                        one snapshot as JSON, exit
      ./monitor.py --watch [SEC]          reprint every SEC seconds
      ./monitor.py --serve [PORT]         serve /quota + /events locally
-     ./monitor.py --new-token            mint a relay token
      ./monitor.py --connect URL TOKEN    dial out and push to the relay
      ./monitor.py --selftest             show exactly which paths get opened
 
@@ -507,7 +505,7 @@ def collect_claude(timeout=8.0):
         # watcher's screen.
         return {'id': 'claude', 'name': 'Claude Code', 'ok': False,
                 'error': 'not-signed-in', 'source': 'api',
-                'detail': 'no claudeAiOauth in ~/.claude/.credentials.json',
+                'detail': 'No claudeAiOauth in ~/.claude/.credentials.json.',
                 'captured_at': now}
     # expiresAt is MILLISECONDS here — Codex's resets_at is seconds. Same-named
     # concept, different unit, one of the easier ways to be quietly wrong.

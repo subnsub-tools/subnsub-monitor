@@ -88,7 +88,7 @@ func serve(port int) {
 			// Collect first, then arm the deadline: it bounds the WRITE, and
 			// a collection that runs a vendor's CLI (kiro-cli 30 s, agy 45 s)
 			// would otherwise spend the window before the first byte went out
-			// and close a healthy stream (review 2026-10-14; direct.go's
+			// and close a healthy stream (direct.go's
 			// stream already orders it this way).
 			body := dump(collectAll())
 			if err := rc.SetWriteDeadline(time.Now().Add(15 * time.Second)); err != nil {
@@ -133,21 +133,12 @@ func cors(w http.ResponseWriter, origin string) {
 	}
 }
 
-// The push interval is FIXED at 30 s and is not a setting (operator ruling 2026-10-11:
-// the reporting interval is not to be changed — a helper that pushed faster would run up the
-// relay's bill, which is ours; the direct road's knobs are the machine
-// owner's, the relay's cadence is the relay's). `connect` takes no interval
+// The push interval is FIXED at 30 s and is not a setting. `connect` takes no interval
 // any more, no environment variable reads one, and the relay enforces the
-// same floor on its side (index.js MIN_PUSH_GAP: a push inside 25 s of the
+// same floor on its side (a push inside 25 s of the
 // last accepted one is answered 429 with Retry-After, and the loop below
 // sleeps exactly that), so a rebuilt helper gains nothing by trying.
-//
-// It was 10 s for one release (2026.10.11.3, the same day): the relay's
-// presence record dates a stop by the last push before it, so the cadence
-// is the record's precision — but every push is a billed request and a
-// storage row at the relay, and three times the pushes was three times the
-// bill for a record ten seconds sharper (operator ruling 2026-10-11:
-// consolidate everything into one push every 30 seconds). Everything else the helper says to the relay already rides
+// Everything else the helper says to the relay already rides
 // this push or its answer: the console polls only when the answer says the
 // mailbox has something (hint.go), sessions sync sends nothing when nothing
 // is new, and the version check is hourly.
@@ -290,7 +281,7 @@ func connect(base, token string) {
 	// of a round (below), which keeps the cadence at `every` whatever the
 	// collection costs — but it also means two sends can land closer than
 	// `every` when one round's collection was slow and the next's was
-	// instant (review 2026-10-11: 10 s of collecting, then a cached round,
+	// instant (10 s of collecting, then a cached round,
 	// is a 20 s gap on the wire). The relay's floor (25 s) judges arrivals,
 	// so sends keep a floor of their own, just under the period.
 	var lastSent time.Time
@@ -300,8 +291,7 @@ func connect(base, token string) {
 		// inside it rather than added to it: a sleep of `every` after a push
 		// that took eight seconds to collect made the real cadence `every`
 		// plus eight, and the relay's offline line (90 s) and the presence
-		// threshold (100 s) are set against the cadence, not the sleep
-		// (review 2026-10-11).
+		// threshold (100 s) are set against the cadence, not the sleep.
 		started := time.Now()
 		// Before the push, not after: a token that expires between two pushes
 		// would otherwise cost a failed report and a card that goes silent for
@@ -333,7 +323,7 @@ func connect(base, token string) {
 		// A wait the relay dictated (Retry-After) counts from the response,
 		// not from the start of the round: the subtraction below is for the
 		// period, and taking this round's collection off a relay's number
-		// would land the retry inside the same floor (review 2026-10-11).
+		// would land the retry inside the same floor.
 		fixedWait := false
 		resp, err := client.Do(req)
 		switch {
@@ -508,7 +498,7 @@ type Beacon struct {
 	DirectAddr    string  `json:"direct_addr"`
 	// The console's spare-road key (econ.go): carried here too, so a machine
 	// whose own tunnel is up but whose WATCHER cannot reach it can still use
-	// the sealed relay road (amp review 2026-10-10, finding 6).
+	// the sealed relay road.
 	Econ        string `json:"econ,omitempty"`
 	Console     bool   `json:"exec"`
 	Update      bool   `json:"upd"`

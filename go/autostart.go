@@ -11,8 +11,7 @@ package main
 // Why HERE and not only in install.sh: auto-update replaces this binary and
 // nothing else. A fix in the installer reaches machines installed after it;
 // a fix in the binary reaches the routers already out there on their next
-// hourly update (operator ruling 2026-09-20: the auto-update alone should bring
-// OpenWrt autostart support to a router). install.sh calls the same code (`subnsub-monitor autostart`),
+// hourly update. install.sh calls the same code (`subnsub-monitor autostart`),
 // so there is one init script and one author of it.
 //
 // WHAT IT WRITES: /etc/init.d/subnsub-monitor, a procd service whose whole job

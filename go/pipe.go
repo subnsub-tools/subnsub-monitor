@@ -1,8 +1,7 @@
 package main
 
 // Transfer pipe — the Transfer tool's fourth leg, carried by the direct
-// tunnel (operator ruling 2026-09-04: make it the fourth leg, one that works
-// when only one side has a helper).
+// tunnel.
 //
 // WHAT IT IS. Two browsers that could not reach each other directly (the
 // Transfer tool's WebRTC attempt failed) meet at this machine instead: one of
@@ -12,10 +11,9 @@ package main
 // first side sends come out of the second side's receive stream and vice
 // versa. A pipe, nothing else: no storage, no parsing, no third party.
 //
-// WHAT THE MACHINE SEES. Ciphertext. The frames that cross are the Transfer
-// tool's own relay-pipe frames (lan-app.js PipeChannel), end-to-end encrypted
+// WHAT THE MACHINE SEES. Ciphertext. The frames that cross are end-to-end encrypted
 // between the two browsers with keys they agree on INSIDE the pipe, so this
-// machine — like the signalling Worker the same frames otherwise ride —
+// machine — like the signalling relay the same frames otherwise ride —
 // forwards what it cannot read.
 //
 // WHY THIS IS NOT THE GENERAL-PURPOSE FORWARDING THE PLAN FORBIDS. A guest is
@@ -358,7 +356,7 @@ func (p *pipeHub) touch(s *pipeSession) {
 // end closes both directions of s with err — every stream of the session
 // sees it on its next read or write — and forgets the session. By session,
 // not by id: a stream of a session that an invite has since REPLACED under
-// the same id must not take the replacement down with it (review 2026-09-04).
+// the same id must not take the replacement down with it.
 func (p *pipeHub) end(s *pipeSession, err error) {
 	if s == nil {
 		return

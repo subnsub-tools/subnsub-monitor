@@ -10,7 +10,7 @@ package main
 // — and it is also why the outage that rebuild left could only ever read as
 // `down`: the process was not running, the stamp says for how long, and
 // nothing said the machine underneath had been replaced. A VM the platform
-// wipes and re-provisions is not a reboot (operator ruling 2026-09-26: the two must be told apart),
+// wipes and re-provisions is not a reboot,
 // so the state carries one more file, `host-id`, holding the OS install's
 // own identity. A start that finds it different from the running system is a
 // start on a NEW machine with OLD state, and the stretch the stamp shows is
@@ -23,7 +23,7 @@ package main
 // FreeBSD writes /etc/hostid at first boot, and on macOS the root volume's
 // UUID is the one an erase-and-reinstall changes — the hardware's
 // IOPlatformUUID survives that, so it would say "same machine" of a Mac
-// wiped to the metal (review 2026-09-26). A platform with none of these
+// wiped to the metal. A platform with none of these
 // reports "" and the comparison is simply never made — a blank never
 // counts as a change in either direction.
 //
@@ -107,7 +107,7 @@ func hostIDClean(s string) string {
 // APFS volume the system was installed onto, made anew by an erase. Bounded
 // in time through the command's own context: a start must not wait on a
 // stuck diskutil, and a command that outlives the wait is killed with it
-// rather than left running (review 2026-09-26).
+// rather than left running.
 func macRootVolumeUUID() string {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

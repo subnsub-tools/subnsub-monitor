@@ -1033,7 +1033,7 @@ func adapterResetsRun(specs []adapterResets, docs map[string]any, cred map[strin
 			// A list that is there — even empty — is an answer ("none
 			// held"); a list that is not there is no answer at all, and an
 			// answer of `{}` must not stand in front of a summary that has
-			// one (review 2026-10-07).
+			// one.
 			if adapterListThere(ctx, s.Each) {
 				haveLeft = true
 			}
@@ -1227,7 +1227,7 @@ func adapterKeep(key string, p *Provider, at float64) {
 	// a remembered live date still ahead outranks the credential's own claim:
 	// a token minted before the last renewal carries the date before it, and
 	// reading that when the live call failed would move the card's date
-	// backwards (review 2026-10-07) — or call a plan the vendor said renews
+	// backwards — or call a plan the vendor said renews
 	// one that merely runs until then.
 	live, haveLive := adapterSticky.plan[key]
 	date, kind := p.planDate()
@@ -1252,7 +1252,7 @@ func adapterKeep(key string, p *Provider, at float64) {
 		if s.left != p.Resets.Left {
 			// A count that moved is not the set of credits those dates
 			// belonged to — and must not hand them back if it moves home
-			// again (review 2026-10-07).
+			// again.
 			delete(adapterSticky.expires, key)
 			break
 		}

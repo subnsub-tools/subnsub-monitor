@@ -77,11 +77,3 @@ SPDX-License-Identifier: MIT
 gVisor netstack — https://github.com/google/gvisor
 Copyright 2018 The gVisor Authors
 SPDX-License-Identifier: Apache-2.0 (and MIT for the netstack tree)
-
---------------------------------------------------------------------------------
-
-Earlier releases (2026.08.15.x) could optionally install AgentsView
-(https://github.com/kenn-io/agentsview, MIT License, Copyright (c) Kenn
-Software LLC) as the per-machine session index behind the fleet search.
-Since 2026.08.18 the search is implemented in this program itself and no
-AgentsView code or binary is fetched, used, or included.

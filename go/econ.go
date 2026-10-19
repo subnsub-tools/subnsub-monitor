@@ -1,14 +1,12 @@
 package main
 
 // The console's spare road — a shell line through the relay's mailbox, sealed
-// end to end (operator ruling 2026-10-10: there must always be a spare channel the
-// dashboard can open commands on by hand, and it needs end-to-end
-// encryption).
+// end to end.
 //
 // Since 2026-10-06 a shell line rides the tunnel alone (console.go), and that
 // stays the road for every machine that has one. Some machine has none: a
 // sandbox that can only dial out through a proxy keeps a tunnel up for a few
-// seconds and no longer (muse, 2026-10-10), while its ordinary pushes go
+// seconds and no longer, while its ordinary pushes go
 // through fine. For that machine this file keeps the mailbox usable without
 // giving the relay anything to read:
 //
@@ -23,8 +21,7 @@ package main
 // needs. A machine that allows remote commands offers this road too, and the
 // DASHBOARD decides per machine whether to take it (its own switch, off until
 // pressed) — so the person at the panel can open it without a second visit
-// to the machine (operator ruling 2026-10-11: as long as the helper allowed remote
-// commands at install time, it can be opened from the dashboard). Until 2026.10.11.5 there was a second switch here, `console
+// to the machine. Until 2026.10.11.5 there was a second switch here, `console
 // relay on`; it is gone, and the subcommand only reports.
 //
 // The keys: this machine keeps an X25519 pair of its own for this (econ-key,
@@ -44,8 +41,8 @@ package main
 // the result, which is sealed whole (code, output, truncation) and opened
 // against the id this page sealed to, not a field the relay chose.
 //
-// The one thing it shares with the existing tunnel road (amp review
-// 2026-10-10, finding 1): the relay is what ADVERTISES where this machine is
+// The one thing it shares with the existing tunnel road:
+// the relay is what ADVERTISES where this machine is
 // reached — the tunnel's address there, this machine's econ key here. An
 // honest relay (ours) carries ciphertext it cannot read. A relay that
 // actively SUBSTITUTED this key could have a browser seal a command to a key
@@ -249,7 +246,7 @@ func runSealed(c consoleCmd) consoleResult {
 	// right for the relay's account-gated mailbox and wrong for a road whose
 	// only proof of WHO is the signature. Without this a relay that kept the
 	// econ key from before the last key was removed could run unsigned
-	// commands (amp review 2026-10-10, finding 2). Same gate direct.go sets.
+	// commands. Same gate direct.go sets.
 	if !loadTrust().sealed {
 		res.Error = "unpinned"
 		return res

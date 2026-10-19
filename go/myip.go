@@ -5,13 +5,12 @@ package main
 // The dashboard's Exit tile used to open a record of what the card already
 // knew about a way out: the address the relay saw, where the edge places it,
 // whose network it is. A press now opens the My IP page's own result for that
-// way out instead (operator 2026-10-18: is everything the Exit expansion shows
-// already in My IP? — it was, and My IP has more: the reputation ledger, the
+// way out instead (the reputation ledger, the
 // registry record, the reverse name, the TLS the edge agreed, both families).
 //
 // THE PAGE CANNOT ASK FOR IT. Two of My IP's endpoints answer only about the
 // address that is calling them — /api/iprep and /api/rdap take no ?ip=, on
-// purpose (functions/api/iprep.js: so they can never be scripted into a free
+// purpose (so they can never be scripted into a free
 // bulk-reputation API) — and /api/ip is nothing but a description of the
 // caller. A browser that asked would get its own answers. So the machine asks,
 // over its own way out, and hands the answers back as they came.
@@ -251,7 +250,7 @@ func myipRun(src, ns string) myipOut {
 // /api/ip ride its connection when that speaks HTTP/2; over HTTP/1.1 (an
 // origin of the operator's own), or after the connection dropped, they open
 // others, and on a machine with more than one route another connection can
-// leave from another address (amp review 2026-10-18). An answer about
+// leave from another address. An answer about
 // another address is not this way out's: given up, never mixed in.
 func myipSameAddress(p *myipProbes) {
 	ip := myipAnswerIP(p.IP, false)

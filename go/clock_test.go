@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// 2026-10-16, the audit's second list: the clock put right after boot, the
-// interfaces' traffic, the boot itself, the failed tile and the span asked.
+// Clock skew after boot, interface traffic selection, boot outage timestamps,
+// failed custom tiles, and history span bounds.
 
 // A box whose clock ran eight hours ahead at boot and was put right a minute
 // later: the row filed at boot ends when the right clock first ran, and no

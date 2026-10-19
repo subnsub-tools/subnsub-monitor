@@ -3,24 +3,11 @@ package main
 // Quota pacing: a vendor is asked when a person asks — or, on a machine whose
 // owner chose that, every ten minutes while its dashboard is open.
 //
-// Every remote collector here used to run on its own two-minute floor, and
-// the push loop ran them whether or not anyone had a dashboard open — 720
-// calls a day per vendor per machine, at the same minute marks, for a number
-// that moves by the hour. Enough of that from one account and the vendor
-// stops answering (Claude returned 429 more than once; a limit that would
-// not clear while the loop kept trying, 2026-09-09). CLI Proxy API's own
-// console asks only when a person presses its button, which is the model
-// the operator asked for (2026-09-12).
-//
-// The first build of this file took two departures from that model for
-// every machine: an open dashboard counted as a person looking, and a
-// watched machine asked on a ten-minute floor. A dashboard left open in a
-// tab kept every vendor on that timer for as long as the tab lived, and the
-// operator had not asked for it (operator ruling 2026-09-28: even while being watched, no
-// automatic checks — manual refresh only). So manual is what a machine does unless told
-// otherwise, and the floor is a choice made per machine in its card's
-// Settings (operator ruling 2026-09-28: each machine is set on its own —
-// refresh every ten minutes while open, or by hand).
+// Running remote collectors on a short floor whether or not anyone has a
+// dashboard open costs hundreds of calls a day per vendor per machine for a
+// number that moves by the hour, and triggers vendor rate limits. So manual
+// refresh is what a machine does unless told otherwise, and the ten-minute
+// floor while open is a choice made per machine in its card's Settings.
 //
 // Three inputs and one question. "Forced" is a refresh pressed on the page,
 // which asks once now but never twice inside quotaForceGap. "Watched" is
@@ -40,13 +27,10 @@ package main
 //
 // SILENCE IS MANUAL. A relay that does not send the field, a response that
 // cannot be read, a tunnel stream opened without the parameter: none of
-// them is a yes. Until 2026-09-28 it was the other way round — unknown
-// counted as watched, to keep an older relay on its old behaviour — and
-// that is exactly how a machine nobody had chosen anything for ended up on
-// a timer. The word can still only buy the floor, never anything faster —
+// them is a yes. The word can still only buy the floor, never anything faster —
 // and on the floor an ATTEMPT counts like a success: a vendor that fails is
 // asked again in ten minutes, not in the two the retry floor allows a
-// reader (review 2026-09-28).
+// reader.
 //
 // What is left that nobody asked for: a cache holding nothing at all still
 // asks once (see provCache.collect), so that is one call per provider per

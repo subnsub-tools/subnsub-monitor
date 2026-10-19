@@ -185,14 +185,11 @@ func setAutoUpdate(on bool) error {
 // writes.
 var autoUpdateOnce sync.Once
 
-// What the reading says about the timer (operator ruling 2026-10-09: how long until the
-// helper auto-updates is a state too): when its next pass is due, and how the last one
+// What the reading says about the timer: when its next pass is due, and how the last one
 // ended — so a card can say "next check in 23 min" or "last check could not
 // reach the download" instead of leaving a behind machine looking stuck.
 //
-// Since 2026-10-11 it is also the machine's own word on a PRESSED update
-// (operator ruling: an online machine must report back that it is already
-// updating, so the dashboard can show it). The result frame is one HTTP answer over one tunnel, and the
+// It is also the machine's own word on a PRESSED update. The result frame is one HTTP answer over one tunnel, and the
 // tunnel can drop before it lands — leaving the page to guess whether the
 // update happened. The reading cannot be lost that way: it is sent again
 // every thirty seconds by whichever binary is running, so "installing" goes
@@ -480,8 +477,7 @@ func vercmp(a, b string) int {
 
 // A version string this program is willing to act on.
 //
-// THE SAME SHAPE THE RELAY ENFORCES, character for character — see
-// HELPER_VERSION_RE in monitor-worker/src/clean.js. The two are separated by a
+// THE SAME SHAPE THE RELAY ENFORCES, character for character. The two are separated by a
 // network and cannot share code, so the only thing keeping them honest is that
 // they are written to look identical and are tested against the same cases.
 //
@@ -739,8 +735,7 @@ func updateFrom(id, self, base string) (consoleResult, bool) {
 		return done(0, "update-none")
 	}
 	// Said the moment the download begins, on the hourly pass as on a
-	// press (operator ruling 2026-10-13: the moment an update starts, which is
-	// the moment the download starts, the machine is updating): the reading goes out now with "installing", so the
+	// press: the reading goes out now with "installing", so the
 	// card says Updating… while the bytes come, not only at the hand-over.
 	// A pass that then fails overwrites it with its outcome (autoUpdateLoop).
 	noteUpdatePass("installing")

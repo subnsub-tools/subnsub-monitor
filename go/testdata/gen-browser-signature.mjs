@@ -1,4 +1,4 @@
-/* Regenerate helper/go/testdata/browser-signature.json — using the panel's OWN
+/* Regenerate go/testdata/browser-signature.json — using the panel's OWN
    signingInput, lifted out of monitor.js rather than copied by hand.
 
    The point of the fixture is that a signature made by WebCrypto verifies in
@@ -7,7 +7,7 @@
    exists to catch. So: read monitor.js, cut the function out by matching
    braces, evaluate that, and sign with it.
 
-   Run from the repo root:
+   Run from the monorepo root:
      node <this> > helper/go/testdata/browser-signature.json  */
 import { readFileSync } from 'node:fs';
 

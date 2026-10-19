@@ -9,3 +9,4 @@ __pycache__/
 
 # The bare module-name binary `go build` drops in go/ — same rule as dist/.
 go/subnsubmonitor
+*.exe

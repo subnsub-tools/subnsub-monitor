@@ -2,20 +2,16 @@ package main
 
 // Service probes: the helper's own uptime checks.
 //
-// Until 2026-09-14 the Services surface was fed by a reader for Uptime Kuma's
-// metrics endpoint (kuma.go). The user ruled that anything we can write
-// ourselves we write ourselves, so this file is that: an HTTP / TCP / DNS
-// prober driven by a file the operator writes on the machine, with the
-// uptime bookkeeping Kuma used to do for us.
+// An HTTP / TCP / DNS prober driven by a file the operator writes on the
+// machine, with uptime bookkeeping.
 //
-// What stays exactly as it was is the WIRE: the Service / ServiceSource shapes
-// the relay's clean.js admits and the page renders were designed to carry no
+// The Service / ServiceSource wire shapes carry no
 // URL, host, port or credential, and a prober that knows all of those is the
 // place that promise is easiest to break. So the configuration lives in
 // ~/.config/subnsub-monitor/probes.json, owner-only, read by this process and
 // nobody else, and the reading carries the operator's LABEL for a probe, its
 // kind, its state and its numbers — never its target. The relay applies the
-// same allowlist again (monitor-worker/src/clean.js), and the page has no
+// same allowlist again, and the page has no
 // field to show a target in even if one arrived.
 //
 //   {

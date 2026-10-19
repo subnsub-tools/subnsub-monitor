@@ -20,9 +20,7 @@ package main
 // whose key is on the allow list, signed by one this machine has pinned. The
 // relay's mailbox, which consoleLoop below still polls, carries only the
 // closed kinds — update, refresh, rename, allow, inspect, act, myip — and a shell line
-// handed over by it is refused, not run (operator ruling 2026-10-06: no
-// console work at all without a tailcat connection, and a command never
-// travels by way of the relay). Both roads are outbound
+// handed over by it is refused, not run. Both roads are outbound
 // from here — the tunnel is a dial to a DERP relay, the mailbox a poll — so
 // nothing listens on this machine either way, a machine behind NAT works
 // unchanged, and unplugging the console is still deleting a file.
@@ -534,8 +532,7 @@ func releaseCmd() { <-cmdGate }
 
 // mailboxRefusal is why the relay's mailbox may not hand THIS command over,
 // or "" when it may. A shell line — "sh", or no kind at all, which is what
-// the mailbox carried before kinds existed — rides the tunnel alone (direct.go;
-// operator ruling 2026-10-06: a command never travels by way of the relay),
+// the mailbox carried before kinds existed — rides the tunnel alone (direct.go),
 // so one that arrives this way is
 // refused whatever it is signed with: a relay that queued it before the rule,
 // or one that never heard of it, gets an answer and runs nothing. The closed
@@ -598,9 +595,8 @@ func runCommand(c consoleCmd) (res consoleResult, swap bool) {
 		}
 		// The reading carries this press as well as the result frame does —
 		// and more reliably, because the reading is sent again every thirty
-		// seconds and the frame is sent once over a tunnel that can drop
-		// (operator ruling 2026-10-11: an online machine must report back that
-		// it is already updating). So: "installing" before the download starts, pushed at
+		// seconds and the frame is sent once over a tunnel that can drop.
+		// So: "installing" before the download starts, pushed at
 		// once; the outcome after, pushed at once. On the path that installed,
 		// "installing" stays as this process's last word, and the successor's
 		// first word is "installed" (noteInstalledFrom).
@@ -631,7 +627,7 @@ func runCommand(c consoleCmd) (res consoleResult, swap bool) {
 		// A dashboard enrolling its own browser key as a watcher on the
 		// direct road — see runAllow for what it grants. The key rides in
 		// Target, which the signature covers, and is never a shell line. Two
-		// gates of its own (review 2026-09-01):
+		// gates of its own:
 		//  - a pinned key. Every other kind runs unsigned on a machine with
 		//    nothing pinned, as it always did — but those grant the relay
 		//    nothing that outlives the token, whereas a key on the allowlist

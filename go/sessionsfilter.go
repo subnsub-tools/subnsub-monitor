@@ -214,7 +214,7 @@ func sessFilterFlag(fl *sessFilter, rest []string, i *int, now time.Time) (bool,
 			// A bare date names a DAY, and `--until 2026-08-01` means "up to and
 			// including the first of August" — not "up to its first midnight",
 			// which is what the raw parse gives and which would drop all but the
-			// first instant of the day somebody asked for (review 2026-08-19).
+			// first instant of the day somebody asked for.
 			if dayOnly {
 				t = t.Add(24*time.Hour - time.Nanosecond)
 			}

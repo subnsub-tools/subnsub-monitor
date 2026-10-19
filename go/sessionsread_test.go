@@ -340,7 +340,7 @@ func TestSessEncodeOpenCapped(t *testing.T) {
 }
 
 // A directory can be NAMED like a credential, and the project label must
-// wear the same mask the message text does (review 2026-08-18, round 2).
+// wear the same mask the message text does.
 func TestSessProjectLabelRedacts(t *testing.T) {
 	claude, _, sources := sessTestWorld(t)
 	sessWrite(t, filepath.Join(claude, "p", "a.jsonl"), time.Now(),
@@ -356,7 +356,7 @@ func TestSessProjectLabelRedacts(t *testing.T) {
 }
 
 // A user whose genuine first words open with `<` keeps their title; only the
-// exact machinery preludes are skipped (review 2026-08-18, round 2).
+// exact machinery preludes are skipped.
 func TestSessionsRecentTitleKeepsAngleBracketPrompts(t *testing.T) {
 	claude, _, sources := sessTestWorld(t)
 	sessWrite(t, filepath.Join(claude, "p", "a.jsonl"), time.Now(),
@@ -368,8 +368,7 @@ func TestSessionsRecentTitleKeepsAngleBracketPrompts(t *testing.T) {
 }
 
 // An anchored page whose scan was cut before it ever reached the anchor must
-// come back empty rather than stitch a distant prefix onto the transcript
-// (review 2026-08-18, round 2).
+// come back empty rather than stitch a distant prefix onto the transcript.
 func TestSessionsOpenCutBeforeAnchorServesNoPage(t *testing.T) {
 	if testing.Short() {
 		t.Skip("writes a >8MB line")
@@ -387,7 +386,7 @@ func TestSessionsOpenCutBeforeAnchorServesNoPage(t *testing.T) {
 }
 
 // A credential straddling the 320-rune cut must be masked before the cut can
-// leave a recognisable prefix behind (review 2026-08-18).
+// leave a recognisable prefix behind.
 func TestSessParseMsgRedactsBeforeCutting(t *testing.T) {
 	text := strings.Repeat("a", sessMsgRunes-10) + " DB_PASSWORD=supersecretvalue99 and much more after it"
 	m, _, ok := sessParseMsg([]byte(claudeUserLine("2026-08-17T10:00:00Z", "/p", text)), 1)
@@ -400,7 +399,7 @@ func TestSessParseMsgRedactsBeforeCutting(t *testing.T) {
 }
 
 // Codex tool replies live under payload.output, which search's collector
-// ignores; the reader must still show them (review 2026-08-18).
+// ignores; the reader must still show them.
 func TestSessParseMsgReadsCodexToolOutput(t *testing.T) {
 	line, _ := json.Marshal(map[string]any{
 		"timestamp": "2026-08-17T10:00:00Z", "type": "response_item",
@@ -418,7 +417,7 @@ func TestSessParseMsgReadsCodexToolOutput(t *testing.T) {
 
 // A scan that never reached the end of the file must not report the end of
 // the transcript: the unreadable monster line stops the scanner, and the
-// page it leaves behind has to keep its Later edge (review 2026-08-18).
+// page it leaves behind has to keep its Later edge.
 func TestSessionsOpenCutScanKeepsLater(t *testing.T) {
 	if testing.Short() {
 		t.Skip("writes a >8MB line")
@@ -434,7 +433,7 @@ func TestSessionsOpenCutScanKeepsLater(t *testing.T) {
 }
 
 // An unknown id off an INCOMPLETE candidate walk is not "not-found" — that
-// verdict needs the whole list to have been seen (review 2026-08-18).
+// verdict needs the whole list to have been seen.
 func TestSessionsOpenPartialWalkIsNotNotFound(t *testing.T) {
 	claude, _, sources := sessTestWorld(t)
 	sessWrite(t, filepath.Join(claude, "p", "a.jsonl"), time.Now(),
@@ -446,7 +445,7 @@ func TestSessionsOpenPartialWalkIsNotNotFound(t *testing.T) {
 }
 
 // The byte cap must hold for the FRAME the document rides in, where every
-// quote and backslash is escaped a second time (review 2026-08-18).
+// quote and backslash is escaped a second time.
 func TestSessEncodeOpenCappedByFrameCost(t *testing.T) {
 	rep := sessOpenReport{Messages: []sessMsg{}}
 	for i := 1; i <= sessPageMsgs; i++ {

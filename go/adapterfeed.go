@@ -9,8 +9,7 @@ package main
 // its own: this program looks at the release bucket a few times a day, and a
 // newer table that carries a valid signature replaces the one in force, in
 // memory, between two pushes. Nothing restarts. The next push reads by the
-// new table (operator ruling 2026-09-09: format adaptations hot-update and
-// hot-restart — hot adaptation).
+// new table.
 //
 // update.go refuses to poll for binaries on its own, and says why at length:
 // an unattended fetch-and-run channel on every machine is more authority

@@ -92,7 +92,7 @@ func TestDialByNameOnlyWhenDNSDisagrees(t *testing.T) {
 		{"DNS agrees among others", lookupAnswers("10.0.0.1", "172.238.7.124"), false},
 		{"DNS fails", func(context.Context, string) ([]netip.Addr, error) { return nil, errors.New("no such host") }, false},
 		{"DNS empty", lookupAnswers(), false},
-		{"sandbox gateway (muse)", lookupAnswers("198.18.20.241"), true},
+		{"sandbox gateway", lookupAnswers("198.18.20.241"), true},
 	}
 	for _, c := range cases {
 		reg := testDERPMap().Regions[304].Clone()

@@ -1,7 +1,6 @@
 package main
 
-// Terminal — a real one, carried by the direct tunnel (operator ruling 2026-10-06: a click
-// opens straight into a terminal, where agents such as amp and codex can run).
+// Terminal — a real one, carried by the direct tunnel.
 //
 // WHAT IT IS. The console (console.go) runs one `sh -c` per line: no
 // terminal, no input, thirty seconds, sixteen kilobytes. Nothing interactive

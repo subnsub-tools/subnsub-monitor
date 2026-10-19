@@ -1,25 +1,17 @@
 <#
 subnsub-monitor installer for Windows.
 
-⚠ WINDOWS IS NOT CURRENTLY PUBLISHED, AND THIS SCRIPT WILL NOT INSTALL ANYTHING.
+⚠ WINDOWS BINARIES ARE NOT CURRENTLY PUBLISHED, AND THIS SCRIPT WILL NOT INSTALL ANYTHING.
 
-The port works — it shipped on 2026-08-01 and was withdrawn the same day, for
-product reasons rather than because anything was broken. What that means for
-this file:
+Windows support is present in the Go source tree (`go/`, behind `//go:build windows`),
+but prebuilt Windows binaries are not currently published:
 
-  - no Windows binary is served, so the download below 404s;
-  - the checksums are back to placeholders, so even a binary obtained some other
-    way is refused rather than installed. That refusal is deliberate: an
-    installer carrying real hashes for a release nobody is publishing any more
-    is worse than one that plainly declines.
+  - no Windows binary is served from the release bucket;
+  - the checksums below are placeholders so this script declines cleanly rather
+    than accepting an unverifiable binary.
 
-It is kept here, rather than deleted, because withdrawing an offer and throwing
-away the work are different decisions. Turning it back on is: put windows back
-in helper/go/build.sh and release.sh's TARGETS, add the three names to
-functions/monitor/[asset].js, and re-run the release script — which re-stamps
-the two lines below.
-
-Everything past this notice describes how it works when it is switched on.
+Everything past this notice describes how the Scheduled Task installer works
+when Windows binaries are enabled.
 
   & ([scriptblock]::Create((irm https://tools.subnsub.com/monitor/install.ps1))) -Token <TOKEN>
 

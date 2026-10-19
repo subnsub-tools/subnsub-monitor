@@ -17,7 +17,7 @@ package main
 // partition where "/" is a read-only system image), the two runtime fixes
 // any Go binary needs on Android at all (name resolution with no
 // /etc/resolv.conf, TLS roots in directories Go does not look in), and the
-// detection the rest relies on. PLAN-monitor-android.md has the survey.
+// detection the rest relies on.
 //
 // What runs here is decided at RUN time, not build time: the static
 // GOOS=linux arm64 binary is what people have been running under Termux and

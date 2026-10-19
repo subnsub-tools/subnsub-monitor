@@ -162,8 +162,7 @@ var (
 	}
 )
 
-// Tile and CustomSource are the wire. Mirrored in monitor-worker/src/clean.js
-// (cleanTile / cleanCustomSource) and rendered by monitor.js paintCustom.
+// Tile and CustomSource are the wire shapes for custom metrics.
 type Tile struct {
 	ID    string `json:"id"`
 	Name  string `json:"name"`

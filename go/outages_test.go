@@ -536,7 +536,7 @@ func resetOutagePush(t *testing.T) {
 }
 
 // An answer to a push assembled before a declaration must not stand as the
-// acknowledgement of the rows the declaration rewrote (review 2026-10-12).
+// acknowledgement of the rows the declaration rewrote.
 func TestOutageAckIsForTheEditionSent(t *testing.T) {
 	scratchHome(t)
 	resetOutages(t)
@@ -566,7 +566,7 @@ func TestOutageAckIsForTheEditionSent(t *testing.T) {
 }
 
 // Rows the cap keeps home are not the relay's: the reach the push claims
-// starts at the oldest row that went (review 2026-10-12).
+// starts at the oldest row that went.
 func TestOutageSinceStopsAtTheCut(t *testing.T) {
 	scratchHome(t)
 	resetOutages(t)

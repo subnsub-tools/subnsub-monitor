@@ -8,9 +8,6 @@ package transport
 // again, so once deliver enqueues a conn it belongs to http.Server, which
 // closes it. deliver must therefore return immediately: parking its
 // goroutine would leak one per connection for the life of the server.
-//
-// Lifted from the Phase 0 lab (helper/tailcat-lab/listener.go) unchanged in
-// behaviour; the lab keeps its own copy so it stays buildable on its own.
 
 import (
 	"net"

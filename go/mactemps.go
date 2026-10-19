@@ -185,8 +185,8 @@ func hidRows(all []hidReading) []Temp {
 }
 
 // A label from any source this helper reads: a Linux driver's, an SMC key's
-// word, an Apple Silicon service's name. monitor-worker/src/clean.js holds
-// the same lists (TEMP_LABEL_RE).
+// word, an Apple Silicon service's name. The relay holds
+// the same lists.
 func admitTempLabel(l string) string {
 	l = strings.TrimSpace(l)
 	if k := knownTempLabel(l); k != "" {

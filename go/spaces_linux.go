@@ -68,9 +68,7 @@ func spacesFound() []string {
 }
 
 // netnsInfo: how many network namespaces this machine shows and which one
-// this helper runs in (operator ruling 2026-10-13: check on its own how many network
-// namespaces the machine has, say so on the dashboard, and say which one the
-// helper is installed in). The named ones are
+// this helper runs in. The named ones are
 // `ip netns add`'s handles; the helper's own is one of them when its
 // namespace matches a handle, "init" when it is the system's first
 // namespace (pid 1's), and "unnamed" otherwise — a container, say. The

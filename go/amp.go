@@ -47,10 +47,7 @@ package main
 // ON THE FIRST LINE: `amp usage` prints the signed-in e-mail address. It is
 // the reading's account (ampAddress): the name the tile is shown by, and,
 // through accountkey.go's HMAC, the key that folds this machine's Amp with
-// the same account's on another. Until 2026-10-18 only the key travelled
-// and the address was thrown away; it is a name now like every other
-// account's (operator ruling 2026-10-18: that privacy rule no longer exists;
-// everything is open source and users carry their own responsibility). Every
+// the same account's on another. Every
 // figure still comes from a numeric capture group.
 
 import (

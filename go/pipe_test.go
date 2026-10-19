@@ -82,8 +82,7 @@ func TestPipeHubInviteAttachEnd(t *testing.T) {
 	if hub.isGuest(guest) || !hub.isGuest(other) {
 		t.Error("the retry did not replace the guest")
 	}
-	// A stream of the REPLACED session ending must not end the replacement
-	// (review 2026-09-04: end was by id).
+	// A stream of the REPLACED session ending must not end the replacement.
 	select {
 	case <-first.done:
 	default:

@@ -5,8 +5,7 @@ package main
 //
 // The dashboard draws one row per account, not one per machine: three boxes
 // signed into the same Codex plan share one quota, and three gauges of it
-// are two too many (operator ruling 2026-10-18: many machines' usage is really one
-// account's, overlapping — nothing duplicated, one entry per account). To fold them the page needs to
+// are two too many. To fold them the page needs to
 // know which readings are the same account, and nothing on the wire said so.
 // What decides it is an HMAC of the identity under the fleet's own secret,
 // 12 hex characters:
@@ -25,13 +24,8 @@ package main
 // Without a token — `--local`, the direct tunnel on its own — there is no
 // room and no key, and the page falls back to matching windows' reset times.
 //
-// AND THE NAME. Until 2026-10-18 the identity never left the machine — only
-// the key did — so a tile read through CPA, whose credentials are named,
-// was the only one with an account on it, and a machine without CPA showed
-// tiles nobody could tell apart. That rule is gone (operator ruling 2026-10-18: that
-// privacy rule no longer exists; everything is open source and users carry
-// their own responsibility): a reading that comes
-// without an Account of its own now carries the name its tool is signed in
+// AND THE NAME. A reading that comes
+// without an Account of its own carries the name its tool is signed in
 // with (identSourceFor) — the e-mail, or Copilot's login — read from
 // the same files as the identity. The key still decides which readings are
 // one account, from the identity below: for Codex that is the ChatGPT
@@ -204,7 +198,7 @@ type identSource struct {
 }
 
 // identSourceFor finds the account file of the credential a reading was
-// taken with. It has to be that one (review 2026-10-18): a name read off
+// taken with. It has to be that one: a name read off
 // another sign-in would put one account's quota under another's address.
 // Where that cannot be told there is no source — no key, no name.
 //

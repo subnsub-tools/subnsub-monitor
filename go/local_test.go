@@ -332,7 +332,7 @@ func TestCollectLocalElseHandsOverOnAnyFailure(t *testing.T) {
 // A success the table once had must not paper over a token that has since
 // expired: the cache serves that success for half an hour, and the
 // judgement is the fetch's — a press finds the CLI's report, fresh, not the
-// table's reading from before the token lapsed (review 2026-10-14).
+// table's reading from before the token lapsed.
 func TestCollectLocalElseJudgesTheFetchNotTheServedReading(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	paceDaemon(t)
@@ -367,8 +367,7 @@ func TestCollectLocalElseJudgesTheFetchNotTheServedReading(t *testing.T) {
 
 // The table's 429 backoff consumes presses and serves its refusal; the
 // native road is asked regardless — it paces itself — so a reading the CLI
-// can give is not held behind a vendor that is saying no to the table
-// (review 2026-10-14).
+// can give is not held behind a vendor that is saying no to the table.
 func TestCollectLocalElseAsksNativeWhileTheTableCools(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	paceDaemon(t)

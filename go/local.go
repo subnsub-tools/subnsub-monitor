@@ -46,7 +46,7 @@ var readKeychain = keychainPassword
 // login keychain, and the three names beside it — nothing of this helper's
 // own. NEVER nil: an exec.Cmd with a nil Env inherits this whole process's
 // environment, relay token included, and a session with none of these four
-// set would have handed exactly that over (review 2026-10-14).
+// set would have handed that over.
 func keychainEnv() []string {
 	env := []string{}
 	for _, k := range []string{"HOME", "USER", "LOGNAME", "TMPDIR"} {
@@ -256,7 +256,7 @@ func localFetch(ad *vendorAdapter, id string) Provider {
 // its last success has aged past the stale window — half an hour after the
 // press that produced it. Calling the native collector then would find its
 // cache empty, or holding a press it never saw, and ask the vendor with
-// nobody pressing anything (review 2026-09-28).
+// nobody pressing anything.
 // Two ways of handing over to the native road, named for the vendor shapes
 // that need them.
 type localMode int
@@ -283,8 +283,7 @@ func collectLocalOr(id string, native func() Provider) Provider {
 // and on macOS there is no file at all. So ANY failure of the table's road
 // hands over — a missing or expired file, a 401, a window it could not read
 // — and the native road is never worse off than before this rung existed,
-// while a fresh file still saves launching the CLI (operator ruling 2026-10-14: Linux
-// must read directly without CPA installed, too).
+// while a fresh file still saves launching the CLI.
 func collectLocalElse(id string, native func() Provider) Provider {
 	return collectLocalWith(id, native, localElseNative)
 }
@@ -306,7 +305,7 @@ func collectLocalWith(id string, native func() Provider, mode localMode) Provide
 		// serves a success up to half an hour old over a fresh failure, which
 		// is right for a vendor with one road; here a failure is the signal
 		// that the other road should answer, fresh, now — a token that
-		// expired since the last success, a 401 (review 2026-10-14). And the
+		// expired since the last success, a 401. And the
 		// native road is asked every time the table's cannot stand, press or
 		// no press: it paces itself (its own provCache), so a press the
 		// table's 429 backoff consumed still reaches it, and a quiet

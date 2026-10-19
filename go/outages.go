@@ -144,19 +144,18 @@ var outages struct {
 //
 // The record above is exact and says why, and it lives on the one disk a
 // wipe erases, behind the one tunnel an offline machine does not have. The
-// relay's own record (monitor-worker presence.js) survives the machine but
+// relay's own record survives the machine but
 // sees a stop only as the gap between two pushes, past 100 s. So the rows
 // here ride the push the helper already makes (types.go `outages`), and
-// the relay files them beside its own; what the page reads is the merge
-// (operator ruling 2026-10-12: the two combined is what is accurate). Only
+// the relay files them beside its own; what the page reads is the merge. Only
 // what the relay has not
 // acknowledged travels: each push response says how far its copy reaches
 // (`outages_until`, hint.go), and the next push carries the rows newer than
 // that — none, on an ordinary push. A relay that does not speak the field
 // (the self-hosted one, an older build) gets the rows once and never again.
 //
-// The window is the relay's own (presence.js PRESENCE_KEEP_MS, a week) and
-// the cap is the relay's (clean.js OUTAGE_PUSH_MAX), so a machine coming
+// The window is a week and
+// the cap matches the relay's limit, so a machine coming
 // back to a relay that forgot it sends a week at most, newest kept.
 const (
 	outagePushMax     = 200
@@ -176,7 +175,7 @@ var outagePush struct {
 	// declaration between a push's assembly and its answer rewrites rows
 	// and asks for the window again (outageResend); the answer to the
 	// push before it must not then stand as the acknowledgement of rows
-	// it never saw (review 2026-10-12), so an answer only counts for the
+	// it never saw, so an answer only counts for the
 	// edition it was sent for.
 	gen, sentGen uint64
 	// When a push's rows were the newest of more than the cap allows, the
@@ -292,7 +291,7 @@ func outageSince() int64 {
 	}
 	// Rows the cap kept home are rows the relay does not have: a reach
 	// that claimed them would let a silence over one of them read as the
-	// road (review 2026-10-12). The relay keeps the earliest reach it was
+	// road. The relay keeps the earliest reach it was
 	// ever told, so a push that fits under the cap later does not move it
 	// back either — what went before the cut is simply not known there.
 	if from > since {

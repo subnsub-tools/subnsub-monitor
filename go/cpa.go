@@ -23,9 +23,7 @@ package main
 // management endpoints this program will call are the two above. Nothing
 // here downloads a credential file, and nothing here writes one.
 //
-// Precedence (operator ruling 2026-09-09: a credential file CPA supports
-// is read the CPA way first; agents CPA does not support fall back to the
-// other open-source projects): a vendor CPA holds a credential for is
+// Precedence: a vendor CPA holds a credential for is
 // read through CPA and the native collector's reading for that vendor is set
 // aside; a vendor CPA has no credential for keeps its native collector. CPA
 // itself being unreachable or refusing the key costs nothing native — the
@@ -157,9 +155,7 @@ type cpaCred struct {
 
 // The result of one pass: the readings, and — when CPA itself was the problem
 // — what was wrong, for this program's own log. Never for the wire: CPA is a
-// channel, not a vendor, and a channel is not a tile (operator ruling 2026-09-09:
-// CPA is only a channel we fetch data through underneath, and must not be
-// something the user perceives).
+// channel, not a vendor, and a channel is not a tile.
 type cpaResult struct {
 	configured bool
 	providers  []Provider
@@ -171,10 +167,8 @@ var cpaCache struct {
 	listedAt float64
 	creds    []cpaCred
 	// The last listing that FAILED, and why: a listing is asked for on
-	// every push, and only a success used to set listedAt, so a CPA that
-	// was down, or answering 401/404, was asked again every push — every
-	// ten seconds since the cadence changed (review 2026-10-11). A failure
-	// now holds its answer for cpaListInterval too.
+	// every push, and a failure holds its answer for cpaListInterval too
+	// so a CPA that is down or answering 401/404 is not asked every push.
 	failAt  float64
 	failWhy string
 	per     map[string]*provCache
@@ -684,9 +678,7 @@ func adapterFetch(p Provider, ad *vendorAdapter, cred map[string]any, channel st
 				// The channel itself failed — CPA timed out on a slow
 				// vendor, the local request never completed. For a request
 				// the reading can do without, that costs the fields it would
-				// have filled and nothing else (review 2026-10-07: the
-				// subscription call timing out was sinking a usage reading
-				// already in hand).
+				// have filled and nothing else.
 				if r.Optional {
 					noteErr(channelFail.Error, channelFail.DetailCode, channelFail.DetailArg)
 					break

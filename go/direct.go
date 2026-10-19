@@ -3,8 +3,7 @@ package main
 // Direct mode — a watcher's browser reaching this machine with no relay,
 // no account and no server of ours in between.
 //
-// This is the road for a machine with no account (PLAN-monitor-tailcat.md,
-// v3 ruling of 2026-08-31): the page is a static display terminal, the bytes travel over a
+// The page is a static display terminal, the bytes travel over a
 // WireGuard tunnel bootstrapped through a DERP relay (transport/tailcat.go),
 // and nothing about this machine is stored anywhere but here and in the
 // watcher's own browser. What we do NOT do on this road, and say so on the
@@ -31,7 +30,7 @@ package main
 // `command` handler below takes them only from a machine that has PINNED a
 // dashboard key (signing.go) and only under the same switches that gate the
 // relay road, so "allowed to watch" never quietly becomes "allowed to
-// command" (plan invariant 3, review 2026-09-01). A frame type this build
+// command". A frame type this build
 // does not know is refused by transport.Decode before it is looked at.
 
 import (
@@ -364,8 +363,7 @@ func runAllow(id, target string) consoleResult {
 	}
 	// The switch first, the key second: a switch that is on with no key is a
 	// tunnel waiting for one, whereas a key on the list with the switch still
-	// off would be access granted under a result that said it was not
-	// (review 2026-09-01).
+	// off would be access granted under a result that said it was not.
 	if err := setDirect(true); err != nil {
 		warnf("direct: could not set the switch: %v", err)
 		r.Code, r.Error = -1, "allow-failed"
@@ -743,7 +741,7 @@ func directCaps() []string {
 	}
 	// Portable copies (clone.go): named wherever a key is pinned, console or
 	// not, so a dashboard can always REVOKE one; an enrolment is refused with
-	// console-off where the console is (review 2026-10-17).
+	// console-off where the console is.
 	caps = append(caps, transport.CapClone)
 	if updateAllowed() {
 		caps = append(caps, transport.CapUpdate)
@@ -754,8 +752,7 @@ func directCaps() []string {
 	// Tile actions: named wherever a key is pinned, whether or not anything
 	// is declared yet. The hello is read once per tunnel, and an action
 	// written into metrics.d after the page connected would otherwise stay
-	// unpressable until it reconnected (2026-10-17: the weights file landed
-	// 17 seconds after the page's hello). What is declared is in the tiles;
+	// unpressable until it reconnected. What is declared is in the tiles;
 	// a press on nothing is refused with no-action.
 	caps = append(caps, transport.CapAct)
 	// The My IP check (myip.go): wherever runMyIP would take it — an origin
@@ -769,8 +766,7 @@ func directCaps() []string {
 // command is the mailbox's other door, and the console's only one: the same
 // command envelope, POSTed through the tunnel by an allowed browser instead of
 // collected from the relay. A shell line comes this way or not at all — the
-// mailbox refuses one (mailboxRefusal; operator ruling 2026-10-06: a command never
-// travels by way of the relay). The gate has admitted the peer's key; the command's own signature is
+// mailbox refuses one (mailboxRefusal). The gate has admitted the peer's key; the command's own signature is
 // still checked by verifyCommand exactly as on the relay road, and each kind's
 // switch by runCommand. The answer is the console result document in a result
 // frame, so the page feeds it to the code it already has for the relay's
@@ -813,7 +809,7 @@ func (h *directHandler) command(w http.ResponseWriter, r *http.Request) {
 	}
 	// Judged again once the command gate is held: the wait can be thirty
 	// seconds, and a copy that expired or was revoked in it must not run on
-	// the strength of the look taken before (review 2026-10-17).
+	// the strength of the look taken before.
 	verify := func() string {
 		if clone != nil {
 			now := time.Now()
@@ -831,7 +827,7 @@ func (h *directHandler) command(w http.ResponseWriter, r *http.Request) {
 	// The one difference from the mailbox road, and it is a tightening: the
 	// tunnel takes a command only from a machine that has PINNED a dashboard
 	// key, so that "allowed to watch" (the tailcat key on the list) never
-	// quietly becomes "allowed to command" (review 2026-09-01). With nothing
+	// quietly becomes "allowed to command". With nothing
 	// pinned, verifyCommand would wave everything through unsigned — right
 	// for a mailbox the relay already gates by account, wrong for a road
 	// whose only gate is a watcher's key. directCaps says the same in the
@@ -1120,11 +1116,8 @@ func (h *directHandler) events(w http.ResponseWriter, r *http.Request) {
 // (no token, or MON_TRANSPORT=tailcat): a collection every
 // push interval, as the relay loop makes one, whether or not anybody is
 // watching. Started by main for that case ALONE: beside a relay push it
-// would take the sampler's series out from under it (review 2026-10-16). Until 2026-10-16 the only collection on this road was the one a
-// watching browser asked for (snapshotFrame), so a night nobody watched had
-// no rows at all and the next morning's line was drawn straight across it —
-// and the rows it did have were the one-second sample a snapshot carries,
-// not the thirty seconds' peak (audit). This collection takes the sampler's
+// would take the sampler's series out from under it.
+// This collection takes the sampler's
 // series, as the relay push does; the tunnel's snapshots never take it, so
 // the two cannot starve each other.
 func directRecordLoop(ctx context.Context) {

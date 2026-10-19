@@ -25,7 +25,7 @@ type Fake struct {
 	// done is closed by Close so a Send blocked on backpressure returns
 	// ErrClosed instead of panicking on a channel closed under it; sending
 	// counts the Sends in flight so Close can wait for them before it
-	// closes out (review 2026-08-31: send-on-closed-channel).
+	// closes out.
 	done    chan struct{}
 	sending sync.WaitGroup
 }

@@ -32,8 +32,8 @@
 # Read-only host details — a top-process table on the card, and beside each
 # five-minute bucket of the CPU history the names of the programs that used
 # it — are always on where /proc shows other processes (Linux; Android as
-# shell or root). Names only, no shell (helper/go/inspect.go, prochist.go).
-# --diagnostics is still accepted, for lines written before 2026-10-13, and
+# shell or root). Names only, no shell (go/inspect.go, prochist.go).
+# --diagnostics is still accepted for compatibility and
 # changes nothing.
 #
 # The dashboard can also SEARCH this machine's coding-agent sessions — a
@@ -79,14 +79,12 @@
 # ANDROID is not installed with this line. Run in a Termux session the helper
 # is an app, and Android lets an app see much less of the machine than Linux
 # does — no CPU percentage, load, disk throughput, network counters, process
-# count or temperature, all refused by the platform's own policy. That road
-# was closed on 2026-10-02: this script stops on Android and says where to go
-# instead, which is the Monitor page on a computer — it installs the helper on
-# a phone over USB and starts it as the shell user, which reads all of it. A
-# helper installed under Termux before then keeps running, and --uninstall
-# still removes it (it is handled before the platform is looked at). The
-# Termux branches further down are no longer reached; they stay until the
-# script is next cleared out. PLAN-monitor-android.md has the whole survey.
+# count or temperature, all refused by the platform's own policy. This script
+# stops on Android and says where to go instead, which is the Monitor page on
+# a computer — it installs the helper on a phone over USB and starts it as the
+# shell user, which reads all of it. A helper installed under Termux earlier
+# keeps running, and --uninstall still removes it (it is handled before the
+# platform is looked at).
 #
 # Uninstall:  sh install.sh --uninstall
 set -eu
@@ -98,7 +96,7 @@ RELAY="${MON_RELAY:-https://monitor.subnsub.com}"
 # that browser open the console over the encrypted tunnel at all — a machine
 # with nothing pinned takes no command over it, and none ever comes through
 # the relay — and what makes the requests the relay does carry (an update, a
-# new name) ones it cannot forge. See helper/go/signing.go.
+# new name) ones it cannot forge. See go/signing.go.
 PUBKEY="${MON_PUBKEY:-}"
 BASE="${MON_BASE:-https://tools.subnsub.com/monitor}"   # where the binaries live
 NAME=subnsub-monitor
@@ -203,7 +201,7 @@ helper_stop_strays() {
 # the loop may have been started by cron's @reboot rather than by this script,
 # and only the loop itself can know its own PID. See keeper_start.
 # OpenWrt: the helper arranges its own start at boot as a procd service that
-# runs the keeper loop (helper/go/autostart.go; `subnsub-monitor autostart`).
+# runs the keeper loop (go/autostart.go; `subnsub-monitor autostart`).
 # The marker is how a file is known to be that one and not somebody's own
 # init script under the same name.
 PROCD_INIT="/etc/init.d/$NAME"
@@ -372,7 +370,7 @@ NAME_ARG="${MON_NAME:-}"
 CONSOLE_ARG=""
 # Whether the dashboard may replace this helper's binary. Same rule, same
 # place, and a separate switch from the console even though the console implies
-# it — see helper/go/update.go. A machine that wants the button and no shell is
+# it — see go/update.go. A machine that wants the button and no shell is
 # the case this exists for.
 UPDATE_ARG=""
 # Whether the helper replaces itself on a timer, unasked — see update.go. Its
@@ -648,7 +646,7 @@ arch=$(uname -m)
 # Android calls itself Linux to uname, and is: the same kernel, a different
 # userland. What tells the two apart is bionic's property store, which every
 # Android since 5.0 has and no Linux distribution does — the same test the
-# helper makes at run time (helper/go/android_linux.go). Termux is how people
+# helper makes at run time (go/android_linux.go). Termux is how people
 # get a shell on it, and exports TERMUX_VERSION into every session.
 android=""
 termux=""
@@ -691,7 +689,7 @@ case "$arch" in
   armv7l|armv7|armhf) goarch=arm ;;
   *) die "unsupported architecture: $arch" ;;
 esac
-# Android is published for arm64 alone — see helper/go/build.sh.
+# Android is published for arm64 alone — see go/build.sh.
 if [ "$goos" = android ] && [ "$goarch" != arm64 ]; then
     die "Android: only arm64 is published, and this device reports $arch"
 fi
@@ -799,7 +797,7 @@ rm -f "$conf/token.new"
 # earlier lines unless that key is present in this process's environment.
 # (Service checks are NOT configured here: they live in probes.json beside the
 # token, written by the operator and read by the helper alone — see
-# helper/go/probes.go and the README.)
+# go/probes.go and the README.)
 valid_config_value() {
     [ -z "$1" ] && return 0
     # grep sees lines without their separators, so it cannot detect the one
@@ -813,11 +811,11 @@ valid_config_value() {
 # CLI Proxy API settings take the same road: data in the private config,
 # never shell, preserved across a plain reinstall. MON_CPA_KEY is the
 # proxy's management key — it is written 0600 beside the token and read by
-# nothing but the helper (helper/go/cpa.go).
+# nothing but the helper (go/cpa.go).
 for cpa_value in "${MON_CPA_URL-}" "${MON_CPA_KEY-}"; do
     valid_config_value "$cpa_value" || die "CLI Proxy API configuration contains a control character"
 done
-# MON_IPV4 (helper/go/ipv4.go) the same way: "off" to stop the helper asking a
+# MON_IPV4 (go/ipv4.go) the same way: "off" to stop the helper asking a
 # public service for the machine's IPv4, or the https URL of another one. The
 # service never sees this shell, so the value has to be in the config it reads.
 valid_config_value "${MON_IPV4-}" || die "MON_IPV4 contains a control character"
@@ -1013,7 +1011,7 @@ have_systemd_user() {
 # smallest thing that makes the one promise the helper depends on — something
 # restarts me if I die — on a box where nothing else will make it. Note what it
 # is NOT for: since the helper re-execs itself in place after an update
-# (helper/go/restart.go), the loop does not even observe an update happening.
+# (go/restart.go), the loop does not even observe an update happening.
 # The PID it is waiting on is the same PID, now running the new binary. What
 # the loop is really here for is the crash.
 #
@@ -1319,7 +1317,7 @@ RestrictSUIDSGID=true"
         # the one file the service executes writable by the service. What keeps
         # that honest is on the other side: the payload comes from the release
         # bucket over TLS and must match the published checksum, and nothing
-        # downloads until somebody presses a button. See helper/go/update.go.
+        # downloads until somebody presses a button. See go/update.go.
         UPD_HOLE=""
         [ -f "$conf/update" ] && UPD_HOLE="
 # This machine may update itself, so the directory holding the binary it
@@ -1544,7 +1542,7 @@ case "$goos" in
 esac
 # How many network namespaces the machine shows and which one this helper is
 # in: a router with a VPN in a namespace of its own has two, and the card
-# names them (helper/go/spaces_linux.go netnsInfo).
+# names them (go/spaces_linux.go netnsInfo).
 case "$goos" in
   linux|android)
     ns=$("$BINDIR/$NAME" netns 2>/dev/null || true)

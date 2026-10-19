@@ -5,10 +5,7 @@ package main
 //
 // The Agent usage card says every account once; a tool is not an account but
 // a program on one machine, so its version is said per machine, and the page
-// marks the machine whose copy has fallen behind (operator ruling 2026-10-18: see whether cc-switch's
-// new release added agent management and updating … do only the first
-// step). This is that first
-// step and nothing past it: what is installed and which release. Installing,
+// marks the machine whose copy has fallen behind. Installing,
 // upgrading or removing a tool is not here, and neither is anything that
 // would need to: no command runs, no PATH is consulted, nothing is asked of
 // the network.
@@ -16,8 +13,7 @@ package main
 // WHY NOT `--version`. It is the obvious question and the wrong one for a
 // program that runs unattended on somebody's machine every few minutes: a
 // vendor CLI started with any argument at all may check for updates, refresh
-// a token, or install itself over itself (agy did exactly that under a quota
-// tool's probe, 2026-10-07). Every install worth reporting already writes its
+// a token, or install itself over itself. Every install worth reporting already writes its
 // version down where it put the program:
 //
 //   - npm, nvm, bun, Homebrew's node, Termux: the command is a link into

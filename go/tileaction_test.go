@@ -248,25 +248,25 @@ func TestTileVia(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec := cfg.Tiles[0]
-	list, err := parseExecOutput(spec, `[{"id":"rec_weight","name":"weight","type":"text","value":"6","via":{"machine":"myserver","tile":"w_jp"}},{"id":"n","value":1}]`)
+	list, err := parseExecOutput(spec, `[{"id":"rec_weight","name":"weight","type":"text","value":"6","via":{"machine":"node-a","tile":"w_jp"}},{"id":"n","value":1}]`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	tile := tileOf(&list[0], "pool", time.Time{}, now())
-	if tile.Via == nil || tile.Via.Machine != "myserver" || tile.Via.Tile != "w_jp" || len(tile.Actions) != 0 {
+	if tile.Via == nil || tile.Via.Machine != "node-a" || tile.Via.Tile != "w_jp" || len(tile.Actions) != 0 {
 		t.Fatalf("via on the wire: %+v", tile)
 	}
 	if other := tileOf(&list[1], "pool", time.Time{}, now()); other.Via != nil {
 		t.Fatalf("via leaked to a sibling: %+v", other)
 	}
 	b, _ := json.Marshal(tile)
-	if !strings.Contains(string(b), `"via":{"machine":"myserver","tile":"w_jp"}`) {
+	if !strings.Contains(string(b), `"via":{"machine":"node-a","tile":"w_jp"}`) {
 		t.Fatalf("wire: %s", b)
 	}
 	for _, out := range []string{
 		`[{"id":"x","value":1,"via":{"machine":"","tile":"w_jp"}}]`,
-		`[{"id":"x","value":1,"via":{"machine":"myserver","tile":"w jp"}}]`,
-		`[{"id":"x","value":1,"via":{"machine":"myserver","tile":"w_jp","exec":"rm -rf ~"}}]`,
+		`[{"id":"x","value":1,"via":{"machine":"node-a","tile":"w jp"}}]`,
+		`[{"id":"x","value":1,"via":{"machine":"node-a","tile":"w_jp","exec":"rm -rf ~"}}]`,
 	} {
 		if _, err := parseExecOutput(spec, out); err == nil {
 			t.Errorf("accepted: %s", out)

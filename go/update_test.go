@@ -47,8 +47,6 @@ func TestVercmpIsNumericPerComponent(t *testing.T) {
 // fine and then reports as unidentifiable, which shows a healthy machine on
 // the board as older than everything.
 //
-// Kept in step with HELPER_VERSION_RE in monitor-worker/src/clean.js:
-//
 //	/^\d{4}\.\d{2}\.\d{2}\.\d{1,3}$/
 func TestValidVersionMatchesTheRelaysShapeExactly(t *testing.T) {
 	for _, ok := range []string{"2026.07.31.6", "2026.07.31.123", "0000.00.00.0"} {
