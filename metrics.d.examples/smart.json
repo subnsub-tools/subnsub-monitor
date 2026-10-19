@@ -1,0 +1,13 @@
+{
+  "name": "Disks",
+  "tiles": [
+    {
+      "id": "smart",
+      "name": "SMART",
+      "icon": "disk",
+      "exec": "printf '['\nn=0\nfor dev in $(sudo -n smartctl --scan 2>/dev/null | awk '{print $1}'); do\n  out=$(sudo -n smartctl -H \"$dev\" 2>/dev/null)\n  case \"$out\" in\n    *PASSED*|*\"Health Status: OK\"*) state=ok; word=passed ;;\n    *FAILED*|*FAILING*) state=bad; word=failing ;;\n    *) state=unknown; word=\"no answer\" ;;\n  esac\n  name=${dev#/dev/}\n  [ \"$n\" -gt 0 ] && printf ','\n  printf '{\"id\":\"smart_%s\",\"name\":\"%s\",\"type\":\"status\",\"value\":\"%s\",\"label\":\"SMART %s\"}' \"$(printf '%s' \"$name\" | tr -c 'A-Za-z0-9_-' '_')\" \"$name\" \"$state\" \"$word\"\n  n=$((n + 1))\ndone\nprintf ']\\n'",
+      "interval": 1800,
+      "timeout": 45
+    }
+  ]
+}

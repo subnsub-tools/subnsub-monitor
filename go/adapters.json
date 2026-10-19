@@ -1,0 +1,891 @@
+{
+  "version": 11,
+  "min_helper": "2026.10.14.2",
+  "_": [
+    "The quota adapters behind the CPA rung — see adapter.go for the vocabulary.",
+    "Protocol per the CLI Proxy API Management Center's quota page at the commit",
+    "pinned in types.go (cpamcReferenceCommit): the same vendor endpoints, the",
+    "same headers, read here by table rather than by code. Every host below",
+    "must be on the allow-list in cpa.go; the table cannot widen it.",
+    "$TOKEN$ is substituted by CLI Proxy API, never by this helper.",
+    "`credential` is the local rung (local.go): where the vendor's own tool leaves its token on a machine without a proxy.",
+    "v4 (2026.10.07.2, CPAMC 6abace9f): `credits`, `resets` (reset credits: how many are held, when each lapses)",
+    "and `renews` (a plan's renewal date, only ever one still ahead); `used_fraction` windows; placeholders in",
+    "request URLs (query values, escaped). min_helper keeps older helpers on the table they have — and the two",
+    "hosts this version adds (api.kimi.ai, server.codeium.com) are off their allow-lists, which refuses it there too.",
+    "Claude's usage is asked with ?cedar_ember=1 and the claude-cli User-Agent: that is what returns the reset grants.",
+    "v5 (2026.10.07.3): reset credits say what can be done with them now — `usable` (Codex's applicable count),",
+    "`eligible` / `item_usable` / `item_needs_limit` / `at_limit` (Claude's grants: usable, not paused, and at a",
+    "limit when the grant asks for one), `wait_until` (a cooldown) and `item_clears` + `clears_map` (which windows a",
+    "grant clears, by length).",
+    "v6 (2026.10.07.4): `limited` — whether the vendor says the account is at its limit now, any one flag stated:",
+    "Codex's rate_limit.limit_reached or allowed:false (the account's own limit, not an additional model's), Claude's",
+    "cedar_ember.at_limit.",
+    "v7 (2026.10.07.6): the plan's date says what it is — `renews` where the vendor says the plan renews then, `ends`",
+    "where it says it ends then (Codex: an entitlement's expires_at `unless` it names a renewal at all), `until` where",
+    "it says only how long the period runs (Codex's credential claim, Devin's planEnd); the first that lands is the one.",
+    "v8 (2026.10.07.7): a window's amounts can take their unit from the vendor's own field — `unit_from` + `unit_map`;",
+    "a value the map does not name keeps the share and drops the amounts. Claude's extra usage: currency USD is usd, and",
+    "an account billed in another currency shows its share alone rather than dollars it was never charged.",
+    "v9 (2026.10.07.7, CodexBar 6710f07e): Claude's `iguana_necktie` is a dollar-denominated cloud credit, not a weekly window;",
+    "reset grants take `starts` (a grant not yet begun is not held; paused and ineligible ones are held, not usable —",
+    "v5's rule — and `gate` / `when` exist for a vendor whose list is void without a flag); `renews` takes `when` (Codex's",
+    "active_until is a renewal only while will_renew is true); Codex's monthly individual_limit; Kimi's ratio pools and",
+    "membership plan; Grok's on-demand ratio and billingPeriodEnd; Antigravity's summary shapes (response/summary wrappers,",
+    "nested remaining, explicit window, disabled). Keys a helper does not know are ignored.",
+    "v10 (2026.10.14.1): `credential.keychain` — macOS: the generic-password service the vendor's tool keeps the same",
+    "document under (Claude Code: `Claude Code-credentials`), read when none of the `files` exists.",
+    "v11 (2026.10.14.2): Antigravity's local rung — agy's own token file (~/.gemini/antigravity-cli/antigravity-oauth-token,",
+    "written on Linux and wherever the OS keyring is unavailable; on macOS the keychain item is encrypted and unreadable),",
+    "and a quota request per channel: the proxy's carries the project its credential names, the local one none — Google",
+    "answers retrieveUserQuotaSummary without it (verified 2026-10-14), and agy's file holds no project id."
+  ],
+  "vendors": {
+    "claude": {
+      "provider": "claude",
+      "name": "Claude Code",
+      "requests": [
+        {
+          "id": "usage",
+          "method": "GET",
+          "url": "https://api.anthropic.com/api/oauth/usage?cedar_ember=1",
+          "headers": {
+            "Authorization": "Bearer $TOKEN$",
+            "Content-Type": "application/json",
+            "User-Agent": "claude-cli/2.1.280 (external, cli)"
+          },
+          "headers_cpa": {
+            "anthropic-beta": "oauth-2025-04-20"
+          }
+        },
+        {
+          "id": "profile",
+          "method": "GET",
+          "url": "https://api.anthropic.com/api/oauth/profile",
+          "headers": {
+            "Authorization": "Bearer $TOKEN$",
+            "Content-Type": "application/json",
+            "User-Agent": "claude-cli/2.1.280 (external, cli)"
+          },
+          "optional": true,
+          "headers_cpa": {
+            "anthropic-beta": "oauth-2025-04-20"
+          },
+          "channel": "cpa"
+        }
+      ],
+      "windows": [
+        {
+          "from": "usage",
+          "each": "limits[]",
+          "key": "{kind}",
+          "key_map": {
+            "session": "session",
+            "weekly_all": "weekly",
+            "weekly": "weekly",
+            "weekly_scoped": "weekly_scoped"
+          },
+          "label": "{kind}",
+          "label_map": {
+            "session": "5h",
+            "weekly_all": "7d",
+            "weekly": "7d",
+            "weekly_scoped": "7d"
+          },
+          "used": "percent",
+          "resets": "resets_at",
+          "active": "is_active",
+          "severity": "severity",
+          "scope": "{scope.model.display_name}"
+        },
+        {
+          "from": "usage",
+          "base": "five_hour",
+          "key": "session",
+          "label": "5h",
+          "used": "utilization",
+          "resets": "resets_at",
+          "skip_if_any": [
+            "session"
+          ]
+        },
+        {
+          "from": "usage",
+          "base": "seven_day",
+          "key": "weekly",
+          "label": "7d",
+          "used": "utilization",
+          "resets": "resets_at",
+          "skip_if_any": [
+            "weekly"
+          ]
+        },
+        {
+          "from": "usage",
+          "base": "seven_day_opus",
+          "key": "weekly_scoped",
+          "label": "7d",
+          "scope": "Opus",
+          "used": "utilization",
+          "resets": "resets_at",
+          "skip_if_any": [
+            "weekly_scoped"
+          ]
+        },
+        {
+          "from": "usage",
+          "base": "seven_day_sonnet",
+          "key": "weekly_scoped",
+          "label": "7d",
+          "scope": "Sonnet",
+          "used": "utilization",
+          "resets": "resets_at",
+          "skip_if_any": [
+            "weekly_scoped"
+          ]
+        },
+        {
+          "from": "usage",
+          "base": "iguana_necktie",
+          "key": "cloud_credits",
+          "label": "cloud",
+          "used_kind": "ratio",
+          "used": "used_dollars",
+          "limit": "limit_dollars",
+          "remaining": "remaining_dollars",
+          "unit": "usd",
+          "resets": "resets_at"
+        },
+        {
+          "from": "usage",
+          "base": "extra_usage",
+          "when": {
+            "path": "is_enabled",
+            "eq": "true"
+          },
+          "key": "extra",
+          "label": "extra",
+          "used_kind": "ratio",
+          "used": "used_credits",
+          "limit": "monthly_limit",
+          "amount_scale": 0.01,
+          "unit": "usd",
+          "unit_from": "currency",
+          "unit_map": {
+            "USD": "usd"
+          }
+        }
+      ],
+      "plan": {
+        "from": "profile",
+        "any_of": [
+          {
+            "path": "account.has_claude_max",
+            "eq": "true",
+            "value": "Max"
+          },
+          {
+            "path": "account.has_claude_pro",
+            "eq": "true",
+            "value": "Pro"
+          },
+          {
+            "path": "organization.organization_type",
+            "eq": "claude_team",
+            "value": "Team"
+          },
+          {
+            "path": "organization.organization_type",
+            "eq": "claude_enterprise",
+            "value": "Enterprise"
+          }
+        ]
+      },
+      "tier": {
+        "from": "profile",
+        "path": "organization.rate_limit_tier",
+        "map": {
+          "default_claude_max_5x": "5x",
+          "default_claude_max_20x": "20x",
+          "default_claude_pro": "1x"
+        }
+      },
+      "credential": {
+        "files": [
+          "$CLAUDE_SECURESTORAGE_CONFIG_DIR/.credentials.json",
+          "$CLAUDE_CONFIG_DIR/.credentials.json",
+          "~/.claude/.credentials.json"
+        ],
+        "keychain": "Claude Code-credentials",
+        "token": "claudeAiOauth.accessToken",
+        "expires": "claudeAiOauth.expiresAt",
+        "expires_format": "epoch_ms",
+        "plan": {
+          "from": "cred",
+          "path": "claudeAiOauth.subscriptionType",
+          "map": {
+            "max": "Max",
+            "pro": "Pro",
+            "team": "Team",
+            "enterprise": "Enterprise",
+            "free": "Free"
+          }
+        },
+        "tier": {
+          "from": "cred",
+          "path": "claudeAiOauth.rateLimitTier",
+          "map": {
+            "default_claude_max_5x": "5x",
+            "default_claude_max_20x": "20x",
+            "default_claude_pro": "1x"
+          }
+        },
+        "signin": "claude"
+      },
+      "resets": [
+        {
+          "from": "usage",
+          "base": "cedar_ember",
+          "each": "grants[]",
+          "item_left": "resets_left",
+          "item_total": "resets_total",
+          "starts": "starts_at",
+          "expires": "ends_at",
+          "eligible": {
+            "path": "eligible",
+            "ne": "false"
+          },
+          "item_usable": [
+            {
+              "path": "usable_now",
+              "ne": "false"
+            },
+            {
+              "path": "paused",
+              "ne": "true"
+            }
+          ],
+          "item_needs_limit": {
+            "path": "use_requires_limit",
+            "eq": "true"
+          },
+          "at_limit": {
+            "path": "at_limit",
+            "eq": "true"
+          },
+          "wait_until": "cooldown_until",
+          "item_clears": "clears",
+          "clears_map": {
+            "five_hour": "5h",
+            "seven_day": "7d",
+            "seven_day_overage_included": "7d"
+          }
+        }
+      ],
+      "limited": [
+        {
+          "from": "usage",
+          "path": "cedar_ember.at_limit",
+          "eq": "true"
+        }
+      ]
+    },
+    "codex": {
+      "provider": "codex",
+      "name": "Codex",
+      "requests": [
+        {
+          "id": "usage",
+          "method": "GET",
+          "url": "https://chatgpt.com/backend-api/wham/usage",
+          "headers": {
+            "Authorization": "Bearer $TOKEN$",
+            "Content-Type": "application/json",
+            "User-Agent": "codex-tui/0.149.1 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.149.1)",
+            "Chatgpt-Account-Id": "{cred.id_token.chatgpt_account_id|metadata.id_token.chatgpt_account_id|attributes.id_token.chatgpt_account_id}{jwt:id_token|metadata.id_token|attributes.id_token:chatgpt_account_id}"
+          }
+        },
+        {
+          "id": "reset_credits",
+          "method": "GET",
+          "url": "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits",
+          "headers": {
+            "Authorization": "Bearer $TOKEN$",
+            "Content-Type": "application/json",
+            "User-Agent": "codex-tui/0.149.1 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.149.1)",
+            "Chatgpt-Account-Id": "{cred.id_token.chatgpt_account_id|metadata.id_token.chatgpt_account_id|attributes.id_token.chatgpt_account_id}{jwt:id_token|metadata.id_token|attributes.id_token:chatgpt_account_id}",
+            "Accept": "application/json",
+            "OpenAI-Beta": "codex-1",
+            "Originator": "Codex Desktop"
+          },
+          "optional": true
+        },
+        {
+          "id": "subscription",
+          "method": "GET",
+          "url": "https://chatgpt.com/backend-api/subscriptions?account_id={cred.id_token.chatgpt_account_id|metadata.id_token.chatgpt_account_id|attributes.id_token.chatgpt_account_id}{jwt:id_token|metadata.id_token|attributes.id_token:chatgpt_account_id}",
+          "headers": {
+            "Authorization": "Bearer $TOKEN$",
+            "Content-Type": "application/json",
+            "User-Agent": "codex-tui/0.149.1 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.149.1)",
+            "Chatgpt-Account-Id": "{cred.id_token.chatgpt_account_id|metadata.id_token.chatgpt_account_id|attributes.id_token.chatgpt_account_id}{jwt:id_token|metadata.id_token|attributes.id_token:chatgpt_account_id}"
+          },
+          "optional": true,
+          "requires": {
+            "account_id": "{cred.id_token.chatgpt_account_id|metadata.id_token.chatgpt_account_id|attributes.id_token.chatgpt_account_id}{jwt:id_token|metadata.id_token|attributes.id_token:chatgpt_account_id}"
+          }
+        }
+      ],
+      "windows": [
+        {
+          "from": "usage",
+          "base": "rate_limit.primary_window|rateLimit.primaryWindow",
+          "key": "primary",
+          "used": "used_percent|usedPercent",
+          "window_seconds": "limit_window_seconds|limitWindowSeconds",
+          "resets": "reset_at|resetAt|reset_after_seconds|resetAfterSeconds"
+        },
+        {
+          "from": "usage",
+          "base": "rate_limit.secondary_window|rateLimit.secondaryWindow",
+          "key": "secondary",
+          "used": "used_percent|usedPercent",
+          "window_seconds": "limit_window_seconds|limitWindowSeconds",
+          "resets": "reset_at|resetAt|reset_after_seconds|resetAfterSeconds"
+        },
+        {
+          "from": "usage",
+          "base": "code_review_rate_limit.primary_window|codeReviewRateLimit.primaryWindow",
+          "key": "review_primary",
+          "scope": "Code review",
+          "used": "used_percent|usedPercent",
+          "window_seconds": "limit_window_seconds|limitWindowSeconds",
+          "resets": "reset_at|resetAt|reset_after_seconds|resetAfterSeconds"
+        },
+        {
+          "from": "usage",
+          "base": "code_review_rate_limit.secondary_window|codeReviewRateLimit.secondaryWindow",
+          "key": "review_secondary",
+          "scope": "Code review",
+          "used": "used_percent|usedPercent",
+          "window_seconds": "limit_window_seconds|limitWindowSeconds",
+          "resets": "reset_at|resetAt|reset_after_seconds|resetAfterSeconds"
+        },
+        {
+          "from": "usage",
+          "each": "additional_rate_limits[]",
+          "base": "rate_limit.primary_window|rateLimit.primaryWindow",
+          "key": "extra_primary",
+          "scope": "{^limit_name|^limitName|^metered_feature|^meteredFeature}",
+          "used": "used_percent|usedPercent",
+          "window_seconds": "limit_window_seconds|limitWindowSeconds",
+          "resets": "reset_at|resetAt|reset_after_seconds|resetAfterSeconds"
+        },
+        {
+          "from": "usage",
+          "each": "additional_rate_limits[]",
+          "base": "rate_limit.secondary_window|rateLimit.secondaryWindow",
+          "key": "extra_secondary",
+          "scope": "{^limit_name|^limitName|^metered_feature|^meteredFeature}",
+          "used": "used_percent|usedPercent",
+          "window_seconds": "limit_window_seconds|limitWindowSeconds",
+          "resets": "reset_at|resetAt|reset_after_seconds|resetAfterSeconds"
+        },
+        {
+          "from": "usage",
+          "base": "individual_limit|individualLimit",
+          "key": "monthly_credits",
+          "label": "month",
+          "used_kind": "ratio",
+          "used": "used",
+          "limit": "limit",
+          "remaining": "remaining",
+          "unit": "credits",
+          "resets": "reset_at|resetAt|resets_at|resetsAt"
+        },
+        {
+          "from": "usage",
+          "base": "rate_limit.individual_limit|rateLimit.individualLimit",
+          "key": "monthly_credits",
+          "label": "month",
+          "used_kind": "ratio",
+          "used": "used",
+          "limit": "limit",
+          "remaining": "remaining",
+          "unit": "credits",
+          "resets": "reset_at|resetAt|resets_at|resetsAt"
+        },
+        {
+          "from": "usage",
+          "base": "spend_control.individual_limit|spendControl.individualLimit",
+          "key": "monthly_credits",
+          "label": "month",
+          "used_kind": "ratio",
+          "used": "used",
+          "limit": "limit",
+          "remaining": "remaining",
+          "unit": "credits",
+          "resets": "reset_at|resetAt|resets_at|resetsAt"
+        }
+      ],
+      "plan": {
+        "from": "usage",
+        "path": "plan_type|planType",
+        "map": {
+          "free": "Free",
+          "plus": "Plus",
+          "pro": "Pro",
+          "team": "Team",
+          "business": "Business",
+          "enterprise": "Enterprise",
+          "edu": "Edu",
+          "guest": "Guest",
+          "go": "Go",
+          "prolite": "Pro Lite",
+          "pro_lite": "Pro Lite",
+          "pro-lite": "Pro Lite",
+          "free_workspace": "Free workspace",
+          "education": "Education",
+          "quorum": "Quorum",
+          "k12": "K12"
+        }
+      },
+      "credits": {
+        "from": "usage",
+        "base": "credits",
+        "has": "has_credits",
+        "unlimited": "unlimited",
+        "balance": "balance"
+      },
+      "resets": [
+        {
+          "from": "reset_credits",
+          "left": "available_count|availableCount",
+          "each": "credits[]",
+          "when": {
+            "path": "status",
+            "eq": "available"
+          },
+          "expires": "expires_at|expiresAt",
+          "usable": {
+            "from": "usage",
+            "path": "rate_limit_reset_credits.applicable_available_count|rateLimitResetCredits.applicableAvailableCount"
+          }
+        },
+        {
+          "from": "usage",
+          "base": "rate_limit_reset_credits|rateLimitResetCredits",
+          "left": "available_count|availableCount",
+          "usable": {
+            "from": "usage",
+            "path": "rate_limit_reset_credits.applicable_available_count|rateLimitResetCredits.applicableAvailableCount"
+          }
+        }
+      ],
+      "renews": [
+        {
+          "from": "subscription",
+          "path": "entitlement.renews_at|entitlement.renewsAt"
+        },
+        {
+          "from": "subscription",
+          "path": "active_until|activeUntil",
+          "when": {
+            "path": "will_renew|willRenew",
+            "eq": "true"
+          }
+        }
+      ],
+      "ends": [
+        {
+          "from": "subscription",
+          "path": "entitlement.expires_at|entitlement.expiresAt",
+          "unless": "entitlement.renews_at|entitlement.renewsAt"
+        }
+      ],
+      "until": [
+        {
+          "from": "subscription",
+          "path": "active_until|activeUntil"
+        },
+        {
+          "from": "cred",
+          "path": "id_token.chatgpt_subscription_active_until|metadata.id_token.chatgpt_subscription_active_until"
+        }
+      ],
+      "limited": [
+        {
+          "from": "usage",
+          "path": "rate_limit.limit_reached|rateLimit.limitReached",
+          "eq": "true"
+        },
+        {
+          "from": "usage",
+          "path": "rate_limit.allowed|rateLimit.allowed",
+          "eq": "false"
+        }
+      ]
+    },
+    "antigravity": {
+      "provider": "antigravity",
+      "name": "Antigravity",
+      "requests": [
+        {
+          "id": "quota",
+          "method": "POST",
+          "url": "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+          "fallback_urls": [
+            "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:retrieveUserQuotaSummary",
+            "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+          ],
+          "headers": {
+            "Authorization": "Bearer $TOKEN$",
+            "Content-Type": "application/json",
+            "User-Agent": "antigravity/cli/1.0.13 (aidev_client; os_type=darwin; arch=arm64)"
+          },
+          "body": "{\"project\":\"{cred.project_id|projectId|metadata.project_id|metadata.projectId|attributes.project_id|attributes.projectId|attributes.gemini_virtual_project}\"}",
+          "requires": {
+            "project_id": "{cred.project_id|projectId|metadata.project_id|metadata.projectId|attributes.project_id|attributes.projectId|attributes.gemini_virtual_project}"
+          },
+          "channel": "cpa"
+        },
+        {
+          "id": "quota",
+          "method": "POST",
+          "url": "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+          "fallback_urls": [
+            "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:retrieveUserQuotaSummary",
+            "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+          ],
+          "headers": {
+            "Authorization": "Bearer $TOKEN$",
+            "Content-Type": "application/json",
+            "User-Agent": "antigravity/cli/1.0.13 (aidev_client; os_type=darwin; arch=arm64)"
+          },
+          "body": "{}",
+          "channel": "local"
+        },
+        {
+          "id": "assist",
+          "method": "POST",
+          "url": "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
+          "headers": {
+            "Authorization": "Bearer $TOKEN$",
+            "Content-Type": "application/json",
+            "User-Agent": "antigravity/cli/1.0.13 (aidev_client; os_type=darwin; arch=arm64)"
+          },
+          "body": "{\"metadata\":{\"ideType\":\"ANTIGRAVITY\"}}",
+          "optional": true
+        }
+      ],
+      "credential": {
+        "files": [
+          "~/.gemini/antigravity-cli/antigravity-oauth-token"
+        ],
+        "token": "token.access_token",
+        "expires": "token.expiry",
+        "signin": "agy"
+      },
+      "windows": [
+        {
+          "from": "quota",
+          "each": "response.groups|summary.groups|groups[].buckets[]",
+          "when": {
+            "path": "disabled",
+            "ne": "true"
+          },
+          "key": "{bucketId|bucket_id|id|window}",
+          "label": "{window|bucketId|bucket_id|id}",
+          "label_map": {
+            "5h": "5h",
+            "five-hour": "5h",
+            "five_hour": "5h",
+            "weekly": "7d",
+            "week": "7d",
+            "daily": "1d",
+            "day": "1d",
+            "session": "5h",
+            "5-hour": "5h",
+            "five hour": "5h",
+            "gemini-5h": "5h",
+            "3p-5h": "5h",
+            "gemini-weekly": "7d",
+            "3p-weekly": "7d"
+          },
+          "used_kind": "remaining_fraction",
+          "used": "remainingFraction|remaining_fraction|remaining.remainingFraction|remaining.remaining_fraction",
+          "resets": "resetTime|reset_time",
+          "scope": "{^displayName|^display_name|^name}"
+        }
+      ],
+      "plan": {
+        "from": "assist",
+        "path": "paidTier.id|paid_tier.id|currentTier.id|current_tier.id",
+        "map": {
+          "g1-pro-tier": "Pro",
+          "g1-ultra-tier": "Ultra",
+          "g1-ultra-lite-tier": "Ultra Lite",
+          "free-tier": "Free"
+        }
+      }
+    },
+    "kimi": {
+      "provider": "kimi",
+      "name": "Kimi Code",
+      "requests": [
+        {
+          "id": "usage",
+          "method": "GET",
+          "url": "https://api.kimi.com/coding/v1/usages",
+          "headers": {
+            "Authorization": "Bearer $TOKEN$"
+          },
+          "fallback_urls": [
+            "https://api.kimi.ai/coding/v1/usages"
+          ]
+        }
+      ],
+      "windows": [
+        {
+          "from": "usage",
+          "each": "limits[]",
+          "base": "detail",
+          "key": "rate",
+          "used_kind": "ratio",
+          "used": "used",
+          "limit": "limit",
+          "remaining": "remaining",
+          "resets": "resetTime|reset_time|resetAt|reset_at",
+          "window_minutes": "^window.duration|^duration",
+          "window_unit": "^window.timeUnit|^timeUnit",
+          "unit_minutes": {
+            "TIME_UNIT_MINUTE": 1,
+            "TIME_UNIT_HOUR": 60,
+            "TIME_UNIT_DAY": 1440,
+            "TIME_UNIT_WEEK": 10080
+          }
+        },
+        {
+          "from": "usage",
+          "each": "limits[]",
+          "key": "rate",
+          "used_kind": "ratio",
+          "used": "used",
+          "limit": "limit",
+          "remaining": "remaining",
+          "resets": "resetTime|reset_time|resetAt|reset_at",
+          "window_minutes": "window.duration|duration",
+          "window_unit": "window.timeUnit|timeUnit",
+          "unit_minutes": {
+            "TIME_UNIT_MINUTE": 1,
+            "TIME_UNIT_HOUR": 60,
+            "TIME_UNIT_DAY": 1440,
+            "TIME_UNIT_WEEK": 10080
+          }
+        },
+        {
+          "from": "usage",
+          "base": "usage",
+          "key": "weekly",
+          "label": "7d",
+          "used_kind": "ratio",
+          "used": "used",
+          "limit": "limit",
+          "remaining": "remaining",
+          "resets": "resetTime|reset_time|resetAt|reset_at"
+        },
+        {
+          "from": "usage",
+          "base": "usages.limit_month_total",
+          "key": "monthly",
+          "label": "month",
+          "used_kind": "used_fraction",
+          "used": "used_ratio",
+          "resets": "reset_time|resetTime"
+        },
+        {
+          "from": "usage",
+          "base": "usages.limit_7d",
+          "key": "weekly",
+          "label": "7d",
+          "used_kind": "used_fraction",
+          "used": "used_ratio",
+          "resets": "reset_time|resetTime"
+        },
+        {
+          "from": "usage",
+          "base": "usages.limit_5h",
+          "key": "rate",
+          "label": "5h",
+          "used_kind": "used_fraction",
+          "used": "used_ratio",
+          "resets": "reset_time|resetTime"
+        }
+      ],
+      "credential": {
+        "files": [
+          "$KIMI_CODE_HOME/credentials/kimi-code.json",
+          "~/.kimi-code/credentials/kimi-code.json"
+        ],
+        "token": "access_token",
+        "expires": "expires_at",
+        "signin": "kimi"
+      },
+      "plan": {
+        "from": "usage",
+        "path": "user.membership.level",
+        "map": {
+          "level_free": "Adagio",
+          "level_trial": "Andante",
+          "level_basic": "Moderato",
+          "level_intermediate": "Allegretto",
+          "level_advanced": "Allegro",
+          "level_unspecified": ""
+        }
+      }
+    },
+    "xai": {
+      "provider": "grok",
+      "name": "Grok",
+      "requests": [
+        {
+          "id": "weekly",
+          "method": "GET",
+          "url": "https://cli-chat-proxy.grok.com/v1/billing?format=credits",
+          "headers": {
+            "Authorization": "Bearer $TOKEN$",
+            "x-xai-token-auth": "xai-grok-cli",
+            "x-grok-client-version": "0.2.91",
+            "accept": "*/*",
+            "user-agent": "grok-pager/0.2.91 grok-shell/0.2.91 (macos; aarch64)",
+            "x-userid": "{cred.sub|subject|user_id|userId|metadata.sub|metadata.subject|metadata.user_id|metadata.userId|attributes.sub|attributes.user_id|oauth.sub|user.sub|user.id|*.user_id}"
+          },
+          "optional": true
+        },
+        {
+          "id": "monthly",
+          "method": "GET",
+          "url": "https://cli-chat-proxy.grok.com/v1/billing",
+          "headers": {
+            "Authorization": "Bearer $TOKEN$",
+            "x-xai-token-auth": "xai-grok-cli",
+            "x-grok-client-version": "0.2.91",
+            "accept": "*/*",
+            "user-agent": "grok-pager/0.2.91 grok-shell/0.2.91 (macos; aarch64)",
+            "x-userid": "{cred.sub|subject|user_id|userId|metadata.sub|metadata.subject|metadata.user_id|metadata.userId|attributes.sub|attributes.user_id|oauth.sub|user.sub|user.id|*.user_id}"
+          },
+          "optional": true
+        },
+        {
+          "id": "settings",
+          "method": "GET",
+          "url": "https://cli-chat-proxy.grok.com/v1/settings",
+          "headers": {
+            "Authorization": "Bearer $TOKEN$",
+            "x-xai-token-auth": "xai-grok-cli",
+            "x-grok-client-version": "0.2.91",
+            "accept": "*/*",
+            "user-agent": "grok-pager/0.2.91 grok-shell/0.2.91 (macos; aarch64)",
+            "x-userid": "{cred.sub|subject|user_id|userId|metadata.sub|metadata.subject|metadata.user_id|metadata.userId|attributes.sub|attributes.user_id|oauth.sub|user.sub|user.id|*.user_id}"
+          },
+          "optional": true
+        }
+      ],
+      "windows": [
+        {
+          "from": "weekly",
+          "base": "config",
+          "key": "credits",
+          "label": "7d",
+          "used": "creditUsagePercent|credit_usage_percent",
+          "resets": "currentPeriod.end|current_period.end|billingPeriodEnd|billing_period_end"
+        },
+        {
+          "from": "weekly",
+          "base": "config",
+          "key": "credits",
+          "label": "7d",
+          "used_kind": "ratio",
+          "used": "onDemandUsed|on_demand_used",
+          "limit": "onDemandCap|on_demand_cap",
+          "resets": "currentPeriod.end|current_period.end|billingPeriodEnd|billing_period_end"
+        },
+        {
+          "from": "monthly",
+          "base": "config",
+          "key": "monthly",
+          "label": "30d",
+          "used_kind": "ratio",
+          "used": "used",
+          "limit": "monthlyLimit|monthly_limit",
+          "amount_scale": 0.01,
+          "unit": "usd",
+          "resets": "currentPeriod.end|current_period.end|billingPeriodEnd|billing_period_end"
+        }
+      ],
+      "credential": {
+        "files": [
+          "$GROK_HOME/auth.json",
+          "~/.grok/auth.json"
+        ],
+        "token": "*.key",
+        "expires": "*.expires_at",
+        "account": "*.email",
+        "signin": "grok"
+      },
+      "plan": {
+        "from": "settings",
+        "path": "subscription_tier_display|subscriptionTierDisplay"
+      }
+    },
+    "devin": {
+      "provider": "devin",
+      "name": "Devin",
+      "requests": [
+        {
+          "id": "status",
+          "method": "POST",
+          "url": "https://server.codeium.com/exa.seat_management_pb.SeatManagementService/GetUserStatus",
+          "headers": {
+            "Content-Type": "application/json",
+            "Connect-Protocol-Version": "1"
+          },
+          "body": "{\"metadata\":{\"ideName\":\"chisel\",\"ideVersion\":\"3000.10.21\",\"apiKey\":\"$TOKEN$\",\"locale\":\"en\",\"os\":\"darwin\",\"extensionVersion\":\"3000.10.21\",\"clientName\":\"chisel\"}}"
+        }
+      ],
+      "windows": [
+        {
+          "from": "status",
+          "base": "userStatus.planStatus",
+          "key": "daily",
+          "label": "1d",
+          "used_kind": "remaining_percent",
+          "used": "dailyQuotaRemainingPercent",
+          "resets": "dailyQuotaResetAtUnix",
+          "resets_format": "epoch_s"
+        },
+        {
+          "from": "status",
+          "base": "userStatus.planStatus",
+          "key": "weekly",
+          "label": "7d",
+          "used_kind": "remaining_percent",
+          "used": "weeklyQuotaRemainingPercent",
+          "resets": "weeklyQuotaResetAtUnix",
+          "resets_format": "epoch_s"
+        }
+      ],
+      "plan": {
+        "from": "status",
+        "path": "userStatus.planStatus.planInfo.planName"
+      },
+      "until": [
+        {
+          "from": "status",
+          "path": "userStatus.planStatus.planEnd",
+          "format": "iso"
+        }
+      ]
+    }
+  }
+}

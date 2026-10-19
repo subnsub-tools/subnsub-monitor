@@ -215,12 +215,17 @@ func TestSnapshotCarriesNoIdentity(t *testing.T) {
 		//                against this box's own $HOME; TestFoldMountPath does it
 		//                exhaustively.
 		"cpu_user": true, "cpu_system": true, "cpu_iowait": true, "cpu_steal": true,
-		"mem_available": true, "mem_cached": true,
+		"mem_available": true, "mem_cached": true, "mem_balloon": true,
 		"swap_in_bps": true, "swap_out_bps": true,
 		"disk_read_bps": true, "disk_write_bps": true, "mounts": true,
 		"net_rx_packets": true, "net_tx_packets": true,
 		"net_rx_errs": true, "net_tx_errs": true,
 		"net_rx_drops": true, "net_tx_drops": true,
+		// 2026-09-28, asked for by the operator: temp_c said a machine was hot
+		// and not what on it was. One row per sensor — the kernel driver's name
+		// and channel label, which come from kernel source rather than from
+		// the machine, and numbers (temps.go).
+		"temps": true,
 	}
 	for _, k := range topLevelKeys(blob) {
 		if !allowed[k] {
@@ -322,19 +327,6 @@ func TestTCPDeltaNeedsTwoSamplesAndRecoversAfterReset(t *testing.T) {
 	}
 }
 
-func TestLinuxTCPParsersUseNamesNotPositions(t *testing.T) {
-	snmp := "Tcp: RtoAlgorithm CurrEstab MaxConn RetransSegs InSegs\n" +
-		"Tcp: 1 17 -1 42 999\n"
-	estab, retrans, ok := parseLinuxTCPSNMP(snmp)
-	if !ok || estab != 17 || retrans != 42 {
-		t.Fatalf("SNMP parsed %v/%v ok=%v", estab, retrans, ok)
-	}
-	tw, ok := parseLinuxTCPTimeWait("sockets: used 20\nTCP: inuse 5 orphan 0 tw 13 alloc 8 mem 2\n")
-	if !ok || tw != 13 {
-		t.Fatalf("sockstat tw=%v ok=%v", tw, ok)
-	}
-}
-
 // The CPU split, which is cpuDelta's arithmetic applied four times with two
 // extra ways to be wrong: a platform that keeps only some of the counters, and
 // a bucket that outran the total it is a share of.
@@ -417,23 +409,4 @@ func resetCPUParts() {
 	cpuPartsPrev.Lock()
 	cpuPartsPrev.valid, cpuPartsPrev.parts, cpuPartsPrev.total = false, [4]float64{}, 0
 	cpuPartsPrev.Unlock()
-}
-
-// All or nothing, because a partial answer would put one column's number under
-// another column's name.
-func TestParseNonNeg(t *testing.T) {
-	if v, ok := parseNonNeg("1", "2", "3"); !ok || v[0] != 1 || v[2] != 3 {
-		t.Fatalf("got %v/%v", v, ok)
-	}
-	for _, in := range [][]string{
-		{"1", "-2"},
-		{"1", "two"},
-		{"1", ""},
-		{"1", "NaN"},
-		{"1", "Inf"},
-	} {
-		if _, ok := parseNonNeg(in...); ok {
-			t.Errorf("parseNonNeg(%q) should refuse", in)
-		}
-	}
 }

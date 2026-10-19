@@ -11,13 +11,16 @@ package main
 // from the relay: the base URL is a constant in this file and there is no
 // parameter, header or command field that moves it.
 //
-// Which is also why there is no timer here, and why adding one would be a
-// different feature wearing this one's name. A helper that went looking for
-// releases on its own would be a permanent, unattended download-and-execute
-// channel on every machine — including every machine whose operator never
-// turned the console on, which is strictly more authority than the console
-// itself grants and would have been acquired by accident. This runs when
-// somebody presses a button, or it does not run.
+// There was no timer here until 2026-09-12, and the reason still shapes the
+// one there is now: a helper that goes looking for releases on its own is a
+// permanent, unattended download-and-execute channel, which is strictly
+// more authority than the button grants. So the timer is its OWN switch
+// (autoupdate), off until an operator turns it on at the machine, and it
+// counts only on a machine that already allows remote updates — a switch
+// that says "and you need not press the button" cannot mean anything on a
+// machine that never granted the button. What it installs is what the
+// button installs: the release bucket decides, the checksum decides, and
+// the timer decides only WHEN — once an hour, whether anything is new.
 //
 // And why the report goes out BEFORE the process exits: this is the one
 // command whose success kills the thing that would have reported it. Swapping
@@ -30,6 +33,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"os"
@@ -39,6 +43,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -58,6 +63,25 @@ const (
 	// the direction that leaves it on.
 	updateFileName = "update"
 	updateEnvVar   = "MON_UPDATE"
+	// The timer's own switch (see the top): existence is the setting, and
+	// it counts only alongside updateAllowed.
+	autoUpdateFileName = "autoupdate"
+	autoUpdateEnvVar   = "MON_AUTOUPDATE"
+	// How often the timer asks the bucket what is published — one small GET.
+	// Spread across the fleet by the first delay below, so a release is not
+	// met by every machine at the same minute.
+	autoUpdateEvery = time.Hour
+	// After a pass that could not reach or finish the download.
+	autoUpdateRetry = 15 * time.Minute
+	// Before the first look: long enough that a machine which has just been
+	// installed or updated is settled, and different on every machine.
+	autoUpdateFirstMin = 3 * time.Minute
+	autoUpdateFirstMax = 10 * time.Minute
+	// A nudge from the relay (hint.go: the push response said a newer helper
+	// is published) starts a pass at once instead of at the hour — but not
+	// more often than this, so a release the download refuses cannot make a
+	// machine hammer the bucket on every push.
+	updateNudgeMin = 10 * time.Minute
 
 	// The whole operation, end to end, and it has to be ONE budget rather than
 	// a per-request one.
@@ -112,6 +136,235 @@ func updateAllowed() bool {
 	// is no failure here that means "probably fine".
 	st, err := os.Stat(filepath.Join(dir, updateFileName))
 	return err == nil && st.Mode().IsRegular()
+}
+
+// May this helper replace itself WITHOUT being asked? Only on a machine that
+// allows remote updates at all: the file alone grants nothing, so `update
+// off` (or MON_UPDATE=off) takes the timer with it, whatever this file says.
+func autoUpdateEnabled() bool {
+	if !updateAllowed() {
+		return false
+	}
+	if v := strings.TrimSpace(os.Getenv(autoUpdateEnvVar)); v != "" {
+		return v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "on")
+	}
+	dir := configDir()
+	if dir == "" {
+		return false
+	}
+	st, err := os.Stat(filepath.Join(dir, autoUpdateFileName))
+	return err == nil && st.Mode().IsRegular()
+}
+
+// Turn the timer's switch on or off, from the command line on the machine.
+func setAutoUpdate(on bool) error {
+	dir := configDir()
+	if dir == "" {
+		return os.ErrNotExist
+	}
+	path := filepath.Join(dir, autoUpdateFileName)
+	if !on {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte("on\n"), 0o600)
+}
+
+// The timer. Runs beside the push loop for the life of the process and
+// re-reads its switch on every pass, so `autoupdate off` (or `update off`)
+// takes effect within the hour without a restart. Each pass is the button's
+// own path — runUpdate, behind the same one-at-a-time gate a pressed update
+// takes — and a pass that finds the bucket current costs one GET. A swap
+// hands over to the new binary exactly as a pressed update does; there is
+// nobody to report to but this machine's own log, which runUpdate already
+// writes.
+var autoUpdateOnce sync.Once
+
+// What the reading says about the timer (operator ruling 2026-10-09: how long until the
+// helper auto-updates is a state too): when its next pass is due, and how the last one
+// ended — so a card can say "next check in 23 min" or "last check could not
+// reach the download" instead of leaving a behind machine looking stuck.
+//
+// Since 2026-10-11 it is also the machine's own word on a PRESSED update
+// (operator ruling: an online machine must report back that it is already
+// updating, so the dashboard can show it). The result frame is one HTTP answer over one tunnel, and the
+// tunnel can drop before it lands — leaving the page to guess whether the
+// update happened. The reading cannot be lost that way: it is sent again
+// every thirty seconds by whichever binary is running, so "installing" goes
+// into it the moment the press is taken, the outcome the moment it is known,
+// and — the one the old process cannot say — "installed" is said by the NEW
+// process on its way up (noteInstalledFrom), naming the version it replaced.
+type updateLast struct {
+	At     int64  `json:"at"`
+	Result string `json:"result"` // current | installing | installed | unreachable | failed | off
+	// The version that was running before, on `installed` only.
+	From string `json:"from,omitempty"`
+}
+
+// The environment line the outgoing binary leaves for its successor across
+// the exec (restart.go): the version it was. The successor reads it once at
+// start and says "installed" from it. Environment and not a file, because it
+// lives exactly as long as the handover does — a file would have to be
+// cleaned up, and a stale one would announce an update that never happened.
+const updatedFromEnv = "MON_UPDATED_FROM"
+
+var updState struct {
+	sync.Mutex
+	next  time.Time
+	last  *updateLast
+	nudge chan struct{}
+	ran   time.Time // when a nudge last started a pass
+}
+
+func init() { updState.nudge = make(chan struct{}, 1) }
+
+// updateSnapshot: the next pass as unix seconds (0 while the timer is off or
+// has not started), and the last pass.
+func updateSnapshot() (int64, *updateLast) {
+	updState.Lock()
+	defer updState.Unlock()
+	var next int64
+	if !updState.next.IsZero() && autoUpdateEnabled() {
+		next = updState.next.Unix()
+	}
+	return next, updState.last
+}
+
+func noteUpdatePass(result string) {
+	updState.Lock()
+	updState.last = &updateLast{At: time.Now().Unix(), Result: result}
+	updState.Unlock()
+}
+
+// noteInstalledFrom: the first thing a freshly exec'd binary says about
+// updates. If the process that handed over left its version in the
+// environment (restart_unix.go), the reading opens with "installed, from
+// <that version>" — the one outcome the old process could never report
+// itself, since reporting it would have meant still being the old process.
+// Read once and unset, so a child this process spawns does not inherit a
+// claim about a handover it took no part in.
+func noteInstalledFrom() {
+	from := strings.TrimSpace(os.Getenv(updatedFromEnv))
+	if from == "" {
+		return
+	}
+	os.Unsetenv(updatedFromEnv)
+	if from == helperVersion {
+		// A handover that landed on the same version is not an update.
+		return
+	}
+	updState.Lock()
+	updState.last = &updateLast{At: time.Now().Unix(), Result: "installed", From: from}
+	updState.Unlock()
+	warnf("update: now running %s (was %s)", helperVersion, from)
+	wakePush()
+}
+
+// nudgeUpdate: the relay said a newer helper is published. Wakes the timer
+// for one pass now, at most once per updateNudgeMin, and only while the
+// operator has the timer on — the relay cannot switch it on.
+func nudgeUpdate() {
+	if !autoUpdateEnabled() {
+		return
+	}
+	updState.Lock()
+	recent := !updState.ran.IsZero() && time.Since(updState.ran) < updateNudgeMin
+	updState.Unlock()
+	if recent {
+		return
+	}
+	select {
+	case updState.nudge <- struct{}{}:
+	default:
+	}
+}
+
+// startAutoUpdate begins the timer once per process, whichever road the
+// daemon runs on — the relay push loop or the tunnel alone (a direct-only
+// install has no relay loop, and its snapshot would otherwise say auto:true
+// for a timer that never ran).
+//
+// Also where the process reads what its predecessor left for it
+// (noteInstalledFrom): the same once-per-process, every-daemon-mode place.
+func startAutoUpdate() {
+	autoUpdateOnce.Do(func() {
+		noteInstalledFrom()
+		// Said once at start, in the log, where a person looking for why a
+		// download crawls will find it: which namespace this is.
+		if ni := netnsInfo(); ni != nil && ni.Count > 1 {
+			warnf("%s", netnsSay())
+		}
+		startRoads()
+		go autoUpdateLoop()
+	})
+}
+
+func autoUpdateLoop() {
+	wait := autoUpdateFirstMin + time.Duration(jitter()*float64(autoUpdateFirstMax-autoUpdateFirstMin))
+	for {
+		updState.Lock()
+		updState.next = time.Now().Add(wait)
+		updState.Unlock()
+		// The hour, or a nudge from the relay — whichever comes first.
+		nudged := false
+		select {
+		case <-time.After(wait):
+		case <-updState.nudge:
+			nudged = true
+		}
+		if nudged {
+			updState.Lock()
+			updState.ran = time.Now()
+			updState.Unlock()
+		}
+		if autoUpdateEnabled() && acquireCmd(context.Background()) {
+			// Read again with the gate held: the wait above can be as long
+			// as a shell command, and `autoupdate off` typed during it means
+			// now, not after one more install.
+			if !autoUpdateEnabled() {
+				releaseCmd()
+				noteUpdatePass("off")
+			} else {
+				res, swap := runUpdate("auto")
+				switch {
+				case swap:
+					noteUpdatePass("installing")
+				case res.Error == "update-failed" && strings.Contains(res.Out, "could not read the published version"):
+					warnf("autoupdate: not installed this time; next look in an hour")
+					noteUpdatePass("unreachable")
+				case res.Error == "update-failed":
+					warnf("autoupdate: not installed this time; next look in an hour")
+					noteUpdatePass("failed")
+				default:
+					noteUpdatePass("current")
+				}
+				if swap {
+					// The gate stays held through the handover: releasing
+					// it first would let a queued command start running in
+					// a process about to be replaced mid-way. restartSelf
+					// returns only when the handover did not happen, and
+					// then the gate is given back and this image carries on.
+					restartSelf()
+				}
+				releaseCmd()
+			}
+		} else {
+			noteUpdatePass("off")
+		}
+		wait = autoUpdateEvery
+		if last := func() *updateLast { updState.Lock(); defer updState.Unlock(); return updState.last }(); last != nil &&
+			(last.Result == "failed" || last.Result == "unreachable") {
+			// A pass that could not reach or finish the download looks
+			// again sooner: the road it will take next may be another one
+			// (roads.go), and an hour is a long time to stay behind.
+			wait = autoUpdateRetry
+		}
+	}
 }
 
 // Turn the dedicated switch on or off, from the command line on the machine.
@@ -438,12 +691,30 @@ func updateFrom(id, self, base string) (consoleResult, bool) {
 	// waits on are bounded by a figure this side actually enforces.
 	ctx, cancel := context.WithTimeout(context.Background(), updateBudget)
 	defer cancel()
-	client := updateClient()
-
-	target, err := fetchText(ctx, client, base+"/VERSION")
-	if err != nil {
-		say("could not read the published version: %v", err)
-		return fail()
+	// The roads out, fastest measured first (roads.go): the release host
+	// is reached by the first that answers, and the download below moves
+	// to the next when one stalls. One road — the usual machine — is the
+	// client this always used.
+	roadsTry := roadsRanked()
+	var client *http.Client
+	var road string
+	var target string
+	var err error
+	for i, name := range roadsTry {
+		client = roadClient(name, updateProbeTimeout)
+		target, err = fetchText(ctx, client, base+"/VERSION")
+		if err == nil {
+			road = name
+			break
+		}
+		if len(roadsTry) > 1 {
+			say("could not read the published version via %s: %v", roadLabel(name), err)
+		} else {
+			say("could not read the published version: %v", err)
+		}
+		if i == len(roadsTry)-1 {
+			return fail()
+		}
 	}
 	target = strings.TrimSpace(target)
 	if !validVersion(target) {
@@ -467,6 +738,13 @@ func updateFrom(id, self, base string) (consoleResult, bool) {
 		// press, and a rolled-back bucket all land here.
 		return done(0, "update-none")
 	}
+	// Said the moment the download begins, on the hourly pass as on a
+	// press (operator ruling 2026-10-13: the moment an update starts, which is
+	// the moment the download starts, the machine is updating): the reading goes out now with "installing", so the
+	// card says Updating… while the bytes come, not only at the hand-over.
+	// A pass that then fails overwrites it with its outcome (autoUpdateLoop).
+	noteUpdatePass("installing")
+	wakePush()
 
 	asset := "subnsub-monitor-" + runtime.GOOS + "-" + runtime.GOARCH + exeSuffix()
 
@@ -487,51 +765,99 @@ func updateFrom(id, self, base string) (consoleResult, bool) {
 	// swap below is a rename and a rename does not cross filesystems. /tmp is
 	// its own mount often enough that using it would work everywhere it was
 	// tested and fail on somebody's server.
-	tmp, err := os.CreateTemp(filepath.Dir(self), ".subnsub-monitor-*"+exeSuffix())
-	if err != nil {
-		say("cannot write next to %s: %v", self, err)
-		// The overwhelmingly likely cause on Linux, and worth naming rather
-		// than leaving as a bare permission error: a helper installed WITHOUT
-		// --console runs under ProtectHome=read-only, so its own binary is not
-		// writable by it. That is the sandbox working, not a bug, and the way
-		// through it is the installer.
-		say("if this is a sandboxed service, re-run the installer with --remote-update")
-		return fail()
-	}
-	tmpName := tmp.Name()
+	var tmpName string
 	// Harmless after a successful rename: the name no longer exists, and
 	// removing something that is not there is not an error worth branching on.
-	defer os.Remove(tmpName)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", base+"/"+asset, nil)
-	if err != nil {
-		tmp.Close()
-		say("cannot build the download request")
-		return fail()
+	defer func() {
+		if tmpName != "" {
+			os.Remove(tmpName)
+		}
+	}()
+	// The download: by the road the version came over first, then the
+	// others in measured order. A road that stalls — nothing for roadStall
+	// — is abandoned at once rather than at the budget (the MT3000's native
+	// uplink crawled at ten kilobytes a second and timed out every hour).
+	dlRoads := []string{road}
+	for _, name := range roadsTry {
+		if name != road {
+			dlRoads = append(dlRoads, name)
+		}
 	}
-	req.Header.Set("User-Agent", "subnsub-monitor")
-	resp, err := client.Do(req)
-	if err != nil {
-		tmp.Close()
-		say("download failed: %v", err)
-		return fail()
+	var h hash.Hash
+	var n int64
+	fetched := false
+	for _, name := range dlRoads {
+		tmp, err := os.CreateTemp(filepath.Dir(self), ".subnsub-monitor-*"+exeSuffix())
+		if err != nil {
+			say("cannot write next to %s: %v", self, err)
+			// The overwhelmingly likely cause on Linux, and worth naming rather
+			// than leaving as a bare permission error: a helper installed WITHOUT
+			// --console runs under ProtectHome=read-only, so its own binary is not
+			// writable by it. That is the sandbox working, not a bug, and the way
+			// through it is the installer.
+			say("if this is a sandboxed service, re-run the installer with --remote-update")
+			return fail()
+		}
+		if tmpName != "" {
+			os.Remove(tmpName)
+		}
+		tmpName = tmp.Name()
+		actx, acancel := context.WithCancel(ctx)
+		req, err := http.NewRequestWithContext(actx, "GET", base+"/"+asset, nil)
+		if err != nil {
+			acancel()
+			tmp.Close()
+			say("cannot build the download request")
+			return fail()
+		}
+		req.Header.Set("User-Agent", "subnsub-monitor")
+		dl := roadClient(name, 0)
+		started := time.Now()
+		resp, err := dl.Do(req)
+		if err != nil {
+			acancel()
+			tmp.Close()
+			say("download via %s failed: %v", roadLabel(name), err)
+			continue
+		}
+		h = sha256.New()
+		// Bounded by one byte more than the ceiling, so a body AT the limit is
+		// distinguishable from one that was cut off at it.
+		pr := &progressReader{r: io.LimitReader(resp.Body, updateMaxBytes+1)}
+		stop, stalled := watchStall(actx, acancel, pr)
+		var cerr error
+		n, cerr = io.Copy(io.MultiWriter(tmp, h), pr)
+		stop()
+		resp.Body.Close()
+		acancel()
+		closeErr := tmp.Close()
+		took := time.Since(started)
+		if resp.StatusCode != 200 {
+			say("download via %s failed: http %d", roadLabel(name), resp.StatusCode)
+			continue
+		}
+		if cerr != nil || closeErr != nil {
+			why := "did not complete"
+			if stalled.Load() {
+				why = "stalled"
+			}
+			say("download via %s %s after %d KiB in %.0f s", roadLabel(name), why, (n+1023)/1024, took.Seconds())
+			continue
+		}
+		if n > updateMaxBytes {
+			say("the published binary is larger than this build will accept")
+			return fail()
+		}
+		rate := float64(n) / 1024 / took.Seconds()
+		if took.Seconds() < 0.001 {
+			rate = 0
+		}
+		say("downloaded %d KiB via %s in %.0f s (%.0f KiB/s)", (n+1023)/1024, roadLabel(name), took.Seconds(), rate)
+		fetched = true
+		break
 	}
-	h := sha256.New()
-	// Bounded by one byte more than the ceiling, so a body AT the limit is
-	// distinguishable from one that was cut off at it.
-	n, cerr := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(resp.Body, updateMaxBytes+1))
-	resp.Body.Close()
-	closeErr := tmp.Close()
-	if resp.StatusCode != 200 {
-		say("download failed: http %d", resp.StatusCode)
-		return fail()
-	}
-	if cerr != nil || closeErr != nil {
+	if !fetched {
 		say("download did not complete")
-		return fail()
-	}
-	if n > updateMaxBytes {
-		say("the published binary is larger than this build will accept")
 		return fail()
 	}
 
@@ -547,7 +873,7 @@ func updateFrom(id, self, base string) (consoleResult, bool) {
 	// Rounded UP, so anything that arrived at all reads as something. A
 	// truncating divide printed "downloaded 0 KiB" beside "checksum matches",
 	// which is a sentence that reads as a bug in the line above it.
-	say("downloaded %d KiB; checksum matches the manifest", (n+1023)/1024)
+	say("checksum matches the manifest")
 
 	if err := os.Chmod(tmpName, 0o755); err != nil {
 		say("could not make the new binary executable: %v", err)
@@ -603,12 +929,22 @@ func updateFrom(id, self, base string) (consoleResult, bool) {
 		say("%v", err)
 		return fail()
 	}
+	// Said the instant it becomes true, and before anything else can fail.
+	// This path is how the successor gets started at all on a machine with no
+	// service manager behind it, and it is the last moment it can be known:
+	// the rename above is exactly what stops os.Executable() from being able
+	// to answer. See restart.go.
+	noteInstalledAt(self)
 	// And the directory entry itself. Best effort: not every platform allows
 	// it, and a failure here is not a reason to unpick an install that has
 	// already happened.
 	syncDir(filepath.Dir(self))
 	say("installed %s over %s", target, helperVersion)
-	say("restarting; the service manager starts the new one within about a minute")
+	// Deliberately says nothing about HOW. The helper hands over to the new
+	// version itself where it can, and leaves it to a service manager where
+	// that is the platform's arrangement — and on a machine with neither, the
+	// old version keeps running and this line must not have promised otherwise.
+	say("handing over to %s now", target)
 
 	res.Code = 0
 	res.Ms = time.Since(started).Milliseconds()

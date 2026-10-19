@@ -1,0 +1,13 @@
+{
+  "name": "GPU",
+  "tiles": [
+    {
+      "id": "gpu",
+      "name": "GPU",
+      "icon": "gpu",
+      "exec": "nvidia-smi --query-gpu=index,name,temperature.gpu,utilization.gpu,memory.used,memory.total,power.draw --format=csv,noheader,nounits | awk -F', *' '\nfunction num(x) { return x ~ /^[0-9]+(\\.[0-9]+)?$/ }\nfunction add(s) { printf \"%s%s\", (n++ ? \",\" : \"\"), s }\nBEGIN { printf \"[\" }\n{\n  g = $2; gsub(/NVIDIA |GeForce |[\"\\\\]/, \"\", g)\n  if (num($3)) add(sprintf(\"{\\\"id\\\":\\\"gpu%s_temp\\\",\\\"name\\\":\\\"%s temp\\\",\\\"type\\\":\\\"gauge\\\",\\\"value\\\":%s,\\\"unit\\\":\\\"celsius\\\",\\\"max\\\":100,\\\"warn\\\":80,\\\"bad\\\":90,\\\"icon\\\":\\\"thermometer\\\",\\\"history\\\":true}\", $1, g, $3))\n  if (num($4)) add(sprintf(\"{\\\"id\\\":\\\"gpu%s_util\\\",\\\"name\\\":\\\"%s load\\\",\\\"type\\\":\\\"gauge\\\",\\\"value\\\":%s,\\\"unit\\\":\\\"percent\\\",\\\"alerts\\\":false,\\\"history\\\":true}\", $1, g, $4))\n  if (num($5) && num($6) && $6 > 0) add(sprintf(\"{\\\"id\\\":\\\"gpu%s_mem\\\",\\\"name\\\":\\\"%s memory\\\",\\\"type\\\":\\\"gauge\\\",\\\"value\\\":%.0f,\\\"max\\\":%.0f,\\\"unit\\\":\\\"bytes\\\",\\\"icon\\\":\\\"memory\\\"}\", $1, g, $5 * 1048576, $6 * 1048576))\n  if (num($7)) add(sprintf(\"{\\\"id\\\":\\\"gpu%s_power\\\",\\\"name\\\":\\\"%s power\\\",\\\"type\\\":\\\"number\\\",\\\"value\\\":%s,\\\"unit\\\":\\\"watts\\\",\\\"icon\\\":\\\"bolt\\\"}\", $1, g, $7))\n}\nEND { print \"]\" }'",
+      "interval": 30,
+      "timeout": 10
+    }
+  ]
+}

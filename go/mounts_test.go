@@ -85,7 +85,7 @@ func TestFoldMountPathCaps(t *testing.T) {
 
 	wide := "/mnt/"
 	for i := 0; i < 60; i++ {
-		wide += "宽"
+		wide += "\u5bbd"
 	}
 	got = foldMountPath(wide)
 	if len([]rune(got)) > maxMountPath {
@@ -179,28 +179,6 @@ func TestCapMountsSurvivesMissingTotals(t *testing.T) {
 	in := []Mount{{Path: "/mnt/a"}, {Path: "/mnt/b", Total: fp(5)}}
 	if got := capMounts(in); len(got) != 2 {
 		t.Fatalf("want both rows, got %+v", got)
-	}
-}
-
-// The kernel escapes space, tab, newline and backslash in /proc/mounts as
-// three-digit octal. A parser that misses that reads one path as two fields
-// and measures the wrong filesystem.
-func TestUnescapeMountField(t *testing.T) {
-	for _, c := range []struct{ in, want string }{
-		{`/mnt/my\040disk`, "/mnt/my disk"},
-		{`/mnt/a\011b`, "/mnt/a\tb"},
-		{`/mnt/a\012b`, "/mnt/a\nb"},
-		{`/mnt/a\134b`, `/mnt/a\b`},
-		{"/mnt/plain", "/mnt/plain"},
-		// Not an escape this understands: left exactly as found rather than
-		// given an invented meaning.
-		{`/mnt/a\zzb`, `/mnt/a\zzb`},
-		{`/mnt/trailing\`, `/mnt/trailing\`},
-		{`/mnt/short\04`, `/mnt/short\04`},
-	} {
-		if got := unescapeMountField(c.in); got != c.want {
-			t.Errorf("unescapeMountField(%q) = %q, want %q", c.in, got, c.want)
-		}
 	}
 }
 
@@ -351,7 +329,7 @@ func TestFoldMountPathRefusesInvisibleCharacters(t *testing.T) {
 		}
 	}
 	// An ordinary non-ASCII path is not affected by any of that.
-	if got := foldMountPath("/mnt/备份"); got != "/mnt/备份" {
+	if got := foldMountPath("/mnt/\u5907\u4efd"); got != "/mnt/\u5907\u4efd" {
 		t.Errorf("a legitimate non-ASCII path was refused: %q", got)
 	}
 }

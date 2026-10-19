@@ -1,0 +1,11 @@
+{
+  "name": "UPS",
+  "tiles": [
+    {
+      "id": "ups",
+      "name": "UPS",
+      "exec": "UPS=ups@localhost\nupsc \"$UPS\" 2>/dev/null | awk -F': ' '\nfunction add(s) { printf \"%s%s\", (n++ ? \",\" : \"\"), s }\n{ v[$1] = $2 }\nEND {\n  printf \"[\"\n  st = v[\"ups.status\"]\n  if (st != \"\") {\n    state = st ~ /LB|RB|OVER|OFF/ ? \"bad\" : st ~ /OB|DISCHRG|BYPASS|CAL/ ? \"warn\" : \"ok\"\n    word = st ~ /OB/ ? \"on battery\" : \"on line power\"\n    add(sprintf(\"{\\\"id\\\":\\\"ups_status\\\",\\\"name\\\":\\\"UPS\\\",\\\"type\\\":\\\"status\\\",\\\"value\\\":\\\"%s\\\",\\\"label\\\":\\\"%s\\\",\\\"icon\\\":\\\"plug\\\"}\", state, word))\n  }\n  if (v[\"battery.charge\"] ~ /^[0-9.]+$/) add(sprintf(\"{\\\"id\\\":\\\"ups_charge\\\",\\\"name\\\":\\\"UPS battery\\\",\\\"type\\\":\\\"gauge\\\",\\\"value\\\":%s,\\\"unit\\\":\\\"percent\\\",\\\"invert\\\":true,\\\"warn\\\":40,\\\"bad\\\":15,\\\"icon\\\":\\\"battery\\\",\\\"history\\\":true}\", v[\"battery.charge\"]))\n  if (v[\"battery.runtime\"] ~ /^[0-9.]+$/) add(sprintf(\"{\\\"id\\\":\\\"ups_runtime\\\",\\\"name\\\":\\\"UPS runtime\\\",\\\"type\\\":\\\"number\\\",\\\"value\\\":%s,\\\"unit\\\":\\\"s\\\",\\\"icon\\\":\\\"timer\\\"}\", v[\"battery.runtime\"]))\n  if (v[\"ups.load\"] ~ /^[0-9.]+$/) add(sprintf(\"{\\\"id\\\":\\\"ups_load\\\",\\\"name\\\":\\\"UPS load\\\",\\\"type\\\":\\\"gauge\\\",\\\"value\\\":%s,\\\"unit\\\":\\\"percent\\\",\\\"icon\\\":\\\"bolt\\\"}\", v[\"ups.load\"]))\n  print \"]\"\n}'",
+      "interval": 30
+    }
+  ]
+}

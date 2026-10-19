@@ -69,6 +69,8 @@ machine ended up with.
 param(
     [string]$Token = $env:SUBNSUB_MONITOR_TOKEN,
     [string]$Name = $env:MON_NAME,
+    [string]$CpaUrl = $env:MON_CPA_URL,
+    [string]$CpaKey = $env:MON_CPA_KEY,
     [switch]$Console,
     [switch]$RemoteUpdate,
     [switch]$Uninstall,
@@ -192,6 +194,18 @@ if ($Uninstall) {
             Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
         }
     } catch {}
+    # Stop first, but retain the binary and credentials for this one attempt.
+    # An older helper may not have the command; say so without blocking local
+    # uninstall, and never print the credential or put it in process arguments.
+    $relay = if ($man['INSTALLED_RELAY']) { $man['INSTALLED_RELAY'] } else { $Relay }
+    if ((Test-Path -LiteralPath $bin) -and (Test-Path -LiteralPath (Join-Path $ConfDir 'agent-id'))) {
+        try {
+            & $bin unregister $relay
+            if ($LASTEXITCODE -ne 0) { throw "helper returned $LASTEXITCODE" }
+        } catch {
+            Say "warning: relay was not notified; removing the local installation anyway"
+        }
+    }
     # agent-id and name go too: leaving the id behind means a reinstall silently
     # reclaims the same dashboard card, which is surprising when the point of
     # uninstalling was to stop watching this machine.
@@ -209,7 +223,8 @@ if ($Uninstall) {
                      (Join-Path $ConfDir 'token'), (Join-Path $ConfDir 'token.current'),
                      (Join-Path $ConfDir 'token.current.new'), (Join-Path $ConfDir 'agent-id'),
                      (Join-Path $ConfDir 'name'), (Join-Path $ConfDir 'console'),
-                     (Join-Path $ConfDir 'update'), (Join-Path $ConfDir 'log'),
+                     (Join-Path $ConfDir 'update'), (Join-Path $ConfDir 'diagnostics'),
+                     (Join-Path $ConfDir 'log'),
                      (Join-Path $ConfDir 'log.1'), (Join-Path $ConfDir 'manifest'))) {
         Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
     }
@@ -364,8 +379,8 @@ try {
 # Kept out of the task definition and out of the process arguments, so it does
 # not show up in a process list.
 #
-# This matters more here than on Linux, where systemd reads this same file as an
-# EnvironmentFile and the token never reaches a command line either way. A
+# This matters more here than on Linux, where systemd reads a separate
+# token-only EnvironmentFile and the token never reaches a command line. A
 # scheduled task carries NO environment: the only two other places a token could
 # go on this platform are the task's arguments — readable by every process on
 # the machine — or the user's persistent environment, which would hand it to
@@ -376,9 +391,30 @@ try {
 # the replacement to `token.current` beside this file. Re-running this installer
 # with a newly pasted token still wins: the helper picks whichever of the two
 # lasts longer, and a just-issued one always does.
+$tokenFile = Join-Path $ConfDir 'token'
+# Extra settings (the CLI Proxy API today) ride in the same private file; a
+# plain reinstall preserves earlier lines unless the parameter is given again.
+# Service checks are not configured here: they live in probes.json beside the
+# token, written by the operator and read by the helper alone.
+$extra = @{}
+if (Test-Path -LiteralPath $tokenFile -PathType Leaf) {
+    foreach ($line in [IO.File]::ReadAllLines($tokenFile)) {
+        if ($line -match '^(MON_CPA_URL|MON_CPA_KEY)=(.*)$') {
+            $extra[$Matches[1]] = $Matches[2]
+        }
+    }
+}
+foreach ($pair in @(@('MON_CPA_URL',$CpaUrl), @('MON_CPA_KEY',$CpaKey))) {
+    if ($null -ne $pair[1] -and $pair[1] -ne '') { $extra[$pair[0]] = [string]$pair[1] }
+}
+foreach ($value in $extra.Values) {
+    if ($value -match '[\x00-\x1F\x7F]') { Die 'CLI Proxy API configuration contains a control character' }
+}
 $lines = "SUBNSUB_MONITOR_TOKEN=$Token`n"
 if ($Site) { $lines += "SUBNSUB_MONITOR_SITE=$Site`n" }
-$tokenFile = Join-Path $ConfDir 'token'
+foreach ($key in @('MON_CPA_URL','MON_CPA_KEY')) {
+    if ($extra.ContainsKey($key)) { $lines += "$key=$($extra[$key])`n" }
+}
 Write-TextFile $tokenFile $lines
 Protect-File $tokenFile
 

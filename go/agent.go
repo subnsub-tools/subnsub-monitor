@@ -44,9 +44,10 @@ const (
 
 var agentOnce struct {
 	sync.Once
-	id    string
-	label string
+	id string
 }
+
+var labelMu sync.RWMutex
 
 // Where the installer keeps the token, and where the id belongs too: one
 // directory per install, removed by --uninstall.
@@ -81,12 +82,25 @@ func agentID() string {
 // looking-broken.
 func agentLabel() string {
 	loadAgent()
-	return agentOnce.label
+	labelMu.RLock()
+	defer labelMu.RUnlock()
+	return readLabel(configDir(), os.Getenv(labelEnv))
+}
+
+// A saved name is the operator's current configuration, including an explicit
+// empty name. The install-time environment is only a bootstrap default.
+func readLabel(dir, envLabel string) string {
+	if dir != "" {
+		if b, err := os.ReadFile(filepath.Join(dir, "name")); err == nil {
+			return cleanLabel(string(b))
+		}
+	}
+	return cleanLabel(envLabel)
 }
 
 func loadAgent() {
 	agentOnce.Do(func() {
-		agentOnce.id, agentOnce.label = resolveAgent(configDir(),
+		agentOnce.id, _ = resolveAgent(configDir(),
 			os.Getenv(agentIDEnv), os.Getenv(labelEnv))
 	})
 }
@@ -94,7 +108,7 @@ func loadAgent() {
 // The whole decision, with the machine's state passed in rather than read
 // from the process — which is what makes it testable without a real HOME.
 //
-// Precedence, and each step has a reason:
+// ID precedence (names use readLabel), and each step has a reason:
 //  1. the environment, so a container image or a config-management run can pin
 //     the identity of a machine whose filesystem does not survive a restart;
 //  2. the file, which is the ordinary case;
@@ -104,15 +118,7 @@ func resolveAgent(dir, envID, envLabel string) (id, label string) {
 	// only on the path that reads the id file, so pinning MON_AGENT_ID — the
 	// container case, exactly where a name is most useful — silently threw away
 	// the name that `--name` had installed.
-	label = cleanLabel(envLabel)
-	// A label file sits beside the id and is only consulted when the
-	// environment did not supply one, so `MON_NAME=x` on a single run does not
-	// have to be undone afterwards.
-	if label == "" && dir != "" {
-		if b, err := os.ReadFile(filepath.Join(dir, "name")); err == nil {
-			label = cleanLabel(string(b))
-		}
-	}
+	label = readLabel(dir, envLabel)
 
 	if v := cleanID(envID); v != "" {
 		return v, label
@@ -156,6 +162,8 @@ func writeID(dir, path, id string) error {
 // --uninstall takes both, and cleaned first so the file can never hold
 // something the relay would refuse.
 func setLabel(s string) error {
+	labelMu.Lock()
+	defer labelMu.Unlock()
 	dir := configDir()
 	if dir == "" {
 		return os.ErrNotExist
@@ -165,14 +173,7 @@ func setLabel(s string) error {
 	}
 	path := filepath.Join(dir, "name")
 	label := cleanLabel(s)
-	if label == "" {
-		// Clearing is a legitimate request, and leaving an empty file behind
-		// would make the next read look like a label of "".
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		return nil
-	}
+	// Keep an empty file when clearing: deleting it would resurrect MON_NAME.
 	tmp := path + ".new"
 	if err := os.WriteFile(tmp, []byte(label+"\n"), 0o600); err != nil {
 		return err
@@ -215,7 +216,7 @@ func cleanID(s string) string {
 // Control characters go first: they are what turns a label into a line break
 // in a log, a terminal escape in a shell that cats the config, or an invisible
 // prefix on a dashboard. Then it is cut to a length the page can lay out.
-// Cutting by RUNE, not by byte, because a byte-cut of "东京构建机" ends
+// Cutting by RUNE, not by byte, because a byte-cut of a CJK label ends
 // mid-character and produces a replacement glyph.
 func cleanLabel(s string) string {
 	s = strings.Map(func(r rune) rune {

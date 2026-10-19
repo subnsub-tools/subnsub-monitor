@@ -2,8 +2,8 @@ package main
 
 // Shared plumbing for the CLI-rung collectors that came after Amp. Amp wrote
 // the rules (amp.go's header tells the whole story); this file is those rules
-// with the Amp-specific names factored out, so Kiro, Auggie and arkcli do not
-// each re-learn them:
+// with the Amp-specific names factored out, so Kiro does not re-learn
+// them:
 //
 //   - the binary comes from a fixed list of absolute paths or an explicit
 //     override, never from PATH;
@@ -52,6 +52,10 @@ func vendorCandidates(name string) []string {
 	var out []string
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		out = append(out, filepath.Join(home, ".local", "bin", name))
+	}
+	if p := androidPrefix(); p != "" {
+		// Termux: `pkg install` and `npm -g` both land here.
+		out = append(out, p+"/bin/"+name)
 	}
 	out = append(out, "/usr/local/bin/"+name, "/opt/homebrew/bin/"+name)
 	if appdata := os.Getenv("APPDATA"); filepath.IsAbs(appdata) {
@@ -103,12 +107,35 @@ func vendorEnv(envPrefixes []string) []string {
 // top of the shared allowlist (ampEnvKeys — the list is not Amp-specific,
 // only its name is).
 func runVendorCLI(bin string, args []string, envPrefixes []string, deadline time.Duration) (string, bool, error) {
+	return runVendorCLIEnv(bin, args, vendorEnv(envPrefixes), deadline)
+}
+
+// The same run with an environment the caller built — vendorEnv plus what
+// one CLI needs on top (Antigravity's browser stubs, antigravity.go).
+func runVendorCLIEnv(bin string, args []string, env []string, deadline time.Duration) (string, bool, error) {
+	return runVendorCLIWith(bin, args, env, deadline, false)
+}
+
+// The same run for a CLI that starts children of its own — agy boots a
+// language server. exec's deadline kills the child it started and nothing
+// below it, so a hung run would leave that server behind, one per attempt;
+// here the child leads a process group and the deadline takes the group
+// down (proctree_unix.go; a job object on Windows).
+func runVendorCLITree(bin string, args []string, env []string, deadline time.Duration) (string, bool, error) {
+	return runVendorCLIWith(bin, args, env, deadline, true)
+}
+
+func runVendorCLIWith(bin string, args []string, env []string, deadline time.Duration, tree bool) (string, bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 
 	cmd := toolCommand(ctx, bin, args...)
+	if tree {
+		setProcessGroup(cmd)
+		cmd.Cancel = func() error { killProcessTree(cmd); return nil }
+	}
 	cmd.Stdin = nil
-	cmd.Env = vendorEnv(envPrefixes)
+	cmd.Env = env
 	cmd.WaitDelay = 2 * time.Second
 
 	var stdout, stderr bytes.Buffer

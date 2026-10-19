@@ -6,7 +6,8 @@ import "syscall"
 
 // Root filesystem usage, the way df reports it: the denominator excludes the
 // blocks reserved for root, so a disk df already calls full does not show up
-// here as 95% with room to spare.
+// here as 95% with room to spare. The path is the caller's: "/" everywhere but
+// Android, where it is /data (linuxRootPath).
 //
 // Shared between Linux and macOS because the field WIDTHS differ (Bsize is
 // int64 on Linux and uint32 on Darwin) but the names and meanings do not, and
@@ -18,8 +19,8 @@ import "syscall"
 // blocks and DiskTotal includes them, so total × percent overstates usage by
 // however much the filesystem is holding back for root (5% by default on
 // ext4 — enough to be visibly wrong on a large disk).
-func statfsRoot(s *System) {
-	total, used, usedPct, ok := statfsUsage("/")
+func statfsRoot(s *System, path string) {
+	total, used, usedPct, ok := statfsUsage(path)
 	if !ok {
 		s.miss(mDisk)
 		return

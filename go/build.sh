@@ -30,9 +30,25 @@ mkdir -p "$out"
 # itself out of a stale file is the exact accident this line prevents.
 rm -f "$out"/subnsub-monitor-* "$out/SHA256SUMS"
 
-go="${GO:-go}"
-command -v "$go" >/dev/null 2>&1 || go="$HOME/.local/go/bin/go"
-command -v "$go" >/dev/null 2>&1 || { echo "no go toolchain found" >&2; exit 1; }
+# The helper links tailcat since 2026-08-31 (direct mode, see direct.go), and
+# tailcat needs Go 1.27. A driver as old as 1.21 can still build it — go.mod
+# names the version and GOTOOLCHAIN=auto fetches the matching toolchain into
+# the module cache — but anything older cannot even read go.mod. So prefer an
+# explicit $GO, then the developer's own install, then whatever is on PATH,
+# and check the one chosen can switch rather than discovering it in the middle
+# of the target list.
+export GOTOOLCHAIN="${GOTOOLCHAIN:-auto}"
+go=""
+for cand in "${GO:-}" "$HOME/.local/go/bin/go" go; do
+    [ -n "$cand" ] || continue
+    command -v "$cand" >/dev/null 2>&1 || continue
+    v=$("$cand" version 2>/dev/null | sed -n 's/^go version go\([0-9]*\)\.\([0-9]*\).*/\1 \2/p')
+    set -- $v
+    if [ "${1:-0}" -gt 1 ] || { [ "${1:-0}" -eq 1 ] && [ "${2:-0}" -ge 21 ]; }; then
+        go=$cand; break
+    fi
+done
+[ -n "$go" ] || { echo "no go toolchain >= 1.21 found (1.27 is fetched automatically from it)" >&2; exit 1; }
 
 # Every target install.sh and install.ps1 know how to fetch.
 #
@@ -54,9 +70,23 @@ command -v "$go" >/dev/null 2>&1 || { echo "no go toolchain found" >&2; exit 1; 
 # `GOOS=windows go vet ./...` still passes — which is what keeps it from rotting
 # while it is switched off. Re-enabling is this line, release.sh's TARGETS, and
 # three names in functions/monitor/[asset].js.
+#
+# android/arm64 is a Linux kernel with a different userland, and GOOS=android
+# is what makes the difference land: runtime.GOOS says "android" (so the
+# asset name below is the one the helper asks for when it updates), Go's
+# root-CA loader looks in Android's certificate store, and the linker emits
+# what Android will execute — a PIE that names /system/bin/linker64 as its
+# interpreter and needs no shared library, which the kernel runs directly
+# under the F-Droid Termux and the Play build's linker-exec mode both accept.
+# The static GOOS=linux arm64 binary ran there too, but found no CA roots and
+# no resolver (helper/go/android_linux.go). 64-bit only: Android 15+ phones
+# are commonly 64-bit-only, and the 32-bit ones left are the ones nobody
+# monitors. CGO stays off — the Linux collectors compile as they are, and the
+# tailscale androidbin feature does the rest with no NDK in the release chain.
 for target in linux/amd64 linux/arm64 linux/arm \
               darwin/amd64 darwin/arm64 \
-              freebsd/amd64 freebsd/arm64; do
+              freebsd/amd64 freebsd/arm64 \
+              android/arm64; do
     os=${target%/*}
     arch=${target#*/}
     ext=""

@@ -507,7 +507,7 @@ def collect_claude(timeout=8.0):
         # watcher's screen.
         return {'id': 'claude', 'name': 'Claude Code', 'ok': False,
                 'error': 'not-signed-in', 'source': 'api',
-                'detail': '~/.claude/.credentials.json 里没有 claudeAiOauth',
+                'detail': 'no claudeAiOauth in ~/.claude/.credentials.json',
                 'captured_at': now}
     # expiresAt is MILLISECONDS here — Codex's resets_at is seconds. Same-named
     # concept, different unit, one of the easier ways to be quietly wrong.

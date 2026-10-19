@@ -1,0 +1,32 @@
+{
+  "name": "Docker",
+  "tiles": [
+    {
+      "id": "docker_running",
+      "name": "Containers running",
+      "type": "number",
+      "unit": "count",
+      "icon": "container",
+      "history": true,
+      "exec": "out=$(docker ps -q) || exit 1; printf '%s\\n' \"$out\" | grep -c . ; true",
+      "interval": 60
+    },
+    {
+      "id": "docker_health",
+      "name": "Container health",
+      "type": "status",
+      "icon": "container",
+      "exec": "u=$(docker ps -q --filter health=unhealthy) && r=$(docker ps -q --filter status=restarting) && e=$(docker ps -aq --filter status=dead) || exit 1; n() { printf '%s\\n' \"$1\" | grep -c . ; true; }; u=$(n \"$u\"); r=$(n \"$r\"); e=$(n \"$e\"); if [ $((u + r + e)) -gt 0 ]; then echo \"bad $u unhealthy · $r restarting · $e dead\"; else echo \"ok nothing unhealthy\"; fi",
+      "interval": 60
+    },
+    {
+      "id": "docker_images",
+      "name": "Images",
+      "type": "number",
+      "unit": "count",
+      "icon": "database",
+      "exec": "out=$(docker images -q) || exit 1; printf '%s\\n' \"$out\" | sort -u | grep -c . ; true",
+      "interval": 600
+    }
+  ]
+}

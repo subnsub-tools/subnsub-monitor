@@ -1,0 +1,11 @@
+{
+  "name": "Pi-hole",
+  "tiles": [
+    {
+      "id": "pihole",
+      "name": "Pi-hole",
+      "exec": "pihole api stats/summary 2>/dev/null | jq -c '[\n  {id:\"pihole_blocked_pct\", name:\"Blocked\", type:\"gauge\", value:.queries.percent_blocked, unit:\"percent\", alerts:false, icon:\"shield\", history:true},\n  {id:\"pihole_queries\", name:\"Queries today\", type:\"number\", value:.queries.total, unit:\"count\", icon:\"globe\"},\n  {id:\"pihole_blocked\", name:\"Blocked today\", type:\"number\", value:.queries.blocked, unit:\"count\", icon:\"shield\"},\n  {id:\"pihole_gravity\", name:\"Blocklist domains\", type:\"number\", value:.gravity.domains_being_blocked, unit:\"count\", icon:\"list\"}\n]'",
+      "interval": 60
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -179,5 +180,76 @@ func TestSetRemoteUpdateWritesAndRemovesTheFile(t *testing.T) {
 	// that never turned it on, and must not be an error.
 	if err := setRemoteUpdate(false); err != nil {
 		t.Fatalf("off twice: %v", err)
+	}
+}
+
+// The timer's switch counts only beside the update switch: on its own it is
+// a file that grants nothing.
+func TestAutoUpdateNeedsRemoteUpdate(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("MON_UPDATE", "")
+	t.Setenv("MON_CONSOLE", "")
+	t.Setenv("MON_AUTOUPDATE", "")
+	if err := setAutoUpdate(true); err != nil {
+		t.Fatal(err)
+	}
+	if autoUpdateEnabled() {
+		t.Fatal("autoupdate must not count with remote updates off")
+	}
+	if err := setRemoteUpdate(true); err != nil {
+		t.Fatal(err)
+	}
+	if !autoUpdateEnabled() {
+		t.Fatal("autoupdate should count once remote updates are on")
+	}
+	t.Setenv("MON_UPDATE", "off")
+	if autoUpdateEnabled() {
+		t.Fatal("MON_UPDATE=off must take the timer with it")
+	}
+	t.Setenv("MON_UPDATE", "")
+	if err := setAutoUpdate(false); err != nil {
+		t.Fatal(err)
+	}
+	if autoUpdateEnabled() {
+		t.Fatal("autoupdate off should be off")
+	}
+}
+
+// The successor's first word after a handover. The env line is the only
+// thing that crosses the exec, so: read it, say "installed" from it, and
+// drop it — a child spawned later must not inherit a claim about a
+// handover it took no part in. A line naming this very version is a restart,
+// not an update, and says nothing.
+func TestNoteInstalledFromReadsTheHandoverOnce(t *testing.T) {
+	reset := func() {
+		updState.Lock()
+		updState.last = nil
+		updState.Unlock()
+	}
+	reset()
+	t.Setenv(updatedFromEnv, "")
+	noteInstalledFrom()
+	if _, last := updateSnapshot(); last != nil {
+		t.Fatalf("no handover line: last should stay empty, got %+v", last)
+	}
+
+	t.Setenv(updatedFromEnv, "2020.1.1.1")
+	noteInstalledFrom()
+	_, last := updateSnapshot()
+	if last == nil || last.Result != "installed" || last.From != "2020.1.1.1" || last.At == 0 {
+		t.Fatalf("after a handover: want installed from 2020.1.1.1, got %+v", last)
+	}
+	if os.Getenv(updatedFromEnv) != "" {
+		t.Fatal("the handover line must be unset once read")
+	}
+
+	reset()
+	t.Setenv(updatedFromEnv, helperVersion)
+	noteInstalledFrom()
+	if _, last := updateSnapshot(); last != nil {
+		t.Fatalf("a handover onto the same version is not an update, got %+v", last)
+	}
+	if os.Getenv(updatedFromEnv) != "" {
+		t.Fatal("the line is consumed either way")
 	}
 }

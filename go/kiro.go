@@ -11,6 +11,13 @@ package main
 //	████████████████████ 0%
 //	Overages: Disabled
 //
+// Newer CLIs open with a summary line instead — "Plan: KIRO PRO MAX | 1
+// usage breakdowns" — and a managed plan may print nothing but that: a
+// reading with the plan and no gauge, which is what it says (CodexBar
+// KiroStatusProbe, steipete/CodexBar@28b8dcbe8d). "Credits used: N" under
+// an "Overages:" line is overage spend, not the plan's usage, and is not
+// read as the plan's (same probe: overageCreditsUsed).
+//
 // No credential is opened or held — kiro-cli talks to its own service with
 // its own login. Same parsing philosophy as amp.go: every pattern is anchored
 // and literal-prefixed, spacing is [ \t] never \s, numbers carry the grouping
@@ -26,7 +33,7 @@ import (
 
 const kiroBinEnv = "MON_KIRO_BIN"
 
-var kiroCache provCache
+var kiroCache = provCache{pace: paceMark{id: "kiro"}}
 
 func collectKiro() Provider {
 	return kiroCache.collect(fetchKiro)
@@ -38,8 +45,11 @@ var (
 	// sits after the last pipe.
 	kiroResetRE = regexp.MustCompile(`(?i)resets on[ \t]+(\d{4}-\d{2}-\d{2}|\d{2}/\d{2})`)
 	kiroHeadRE  = regexp.MustCompile(`(?im)^[ \t]*Estimated Usage[ \t]*\|[^\r\n|]*\|[ \t]*([A-Za-z][A-Za-z0-9 ]+?)[ \t]*$`)
+	// "Plan: KIRO PRO MAX | 1 usage breakdowns" — the summary line, whose
+	// plan stops at the pipe and is shouted like the header's.
+	kiroSummaryRE = regexp.MustCompile(`(?im)^[ \t]*Plan:[ \t]*([^|\r\n]+?)[ \t]*\|[ \t]*[0-9]+[ \t]+usage breakdowns?[ \t]*$`)
 	// "Plan: Q Developer Pro" — the shape CodexBar records for paid seats.
-	kiroPlanRE = regexp.MustCompile(`(?im)^[ \t]*Plan:[ \t]*([^\r\n]+?)[ \t]*$`)
+	kiroPlanRE = regexp.MustCompile(`(?im)^[ \t]*Plan:[ \t]*([^|\r\n]+?)[ \t]*$`)
 	// "Credits (0.00 of 50 covered in plan)" — anchored to the Credits label
 	// (allowing the box-drawing/whitespace the CLI pads with) so a stray
 	// "(N of M …)" elsewhere in the output cannot be mistaken for it.
@@ -47,11 +57,8 @@ var (
 	// The gauge line: a run of block characters followed by "N%". Requiring
 	// the bar to be a RUN (2+) and to sit at the line start keeps a lone
 	// glyph in a download/spinner from being read as a quota gauge.
-	kiroPctRE = regexp.MustCompile(`(?im)^[ \t│┃]*[█▉▊▋▌▍▎▏]{2,}[ \t]*(\d+)[ \t]*%`)
-	// "Credits used: 12.5" — the older shape CodexBar still parses; kept as a
-	// fallback so an older CLI loses nothing.
-	kiroCreditsUsedRE = regexp.MustCompile(`(?im)^[ \t]*Credits used:[ \t]*` + amount)
-	kiroSignedOutRE   = regexp.MustCompile(`(?i)not (?:signed|logged) in|login required|failed to initialize auth portal|kiro-cli login|oauth error`)
+	kiroPctRE       = regexp.MustCompile(`(?im)^[ \t│┃]*[█▉▊▋▌▍▎▏]{2,}[ \t]*(\d+)[ \t]*%`)
+	kiroSignedOutRE = regexp.MustCompile(`(?i)not (?:signed|logged) in|login required|failed to initialize auth portal|kiro-cli login|oauth error`)
 )
 
 // A Kiro reset date: yyyy-MM-dd read as local midnight, or a bare MM/DD taken
@@ -107,6 +114,16 @@ func fetchKiro() Provider {
 		}
 		return fail("cli-failed", "cli-failed", "kiro-cli")
 	}
+	return parseKiroUsage(p, out, exited)
+}
+
+// What the CLI printed, read into a Provider — split from fetchKiro so the
+// shapes can be tested without a CLI.
+func parseKiroUsage(p Provider, out string, exited bool) Provider {
+	fail := func(err, code string, arg ...string) Provider {
+		p.failWith(err, code, arg...)
+		return p
+	}
 	text := ansiRE.ReplaceAllString(out, "")
 
 	var resets *float64
@@ -114,8 +131,15 @@ func fetchKiro() Provider {
 		resets = kiroReset(m[1])
 	}
 	var plan string
+	summary := false
 	if m := kiroHeadRE.FindStringSubmatch(text); m != nil {
 		plan = kiroDisplayPlan(m[1])
+	}
+	if m := kiroSummaryRE.FindStringSubmatch(text); m != nil {
+		summary = true
+		if plan == "" {
+			plan = kiroDisplayPlan(m[1])
+		}
 	}
 	if plan == "" {
 		if m := kiroPlanRE.FindStringSubmatch(text); m != nil {
@@ -162,12 +186,6 @@ func fetchKiro() Provider {
 		if balance != "" {
 			p.Credits = &Credits{HasCredits: true, Balance: balance}
 		}
-	} else if m := kiroCreditsUsedRE.FindStringSubmatch(text); m != nil {
-		// The oldest shape names no total, so no gauge — but "how much used"
-		// is still a reading, published as a balance rather than invented.
-		if v, ok := ampNum(m[1]); ok {
-			p.Credits = &Credits{HasCredits: true, Balance: trimAmount(v) + " used"}
-		}
 	}
 
 	if len(p.Limits) == 0 && p.Credits == nil {
@@ -176,8 +194,12 @@ func fetchKiro() Provider {
 			return fail("not-signed-in", "cli-signin", "kiro-cli login")
 		case exited:
 			return fail("cli-failed", "cli-exit", "kiro-cli")
+		case summary && plan != "":
+			// The summary line with no gauge under it: a managed plan the
+			// CLI has no usage for. The plan is the reading — not a 0%.
+		default:
+			return fail("no-readings", "cli-nolines", "kiro-cli")
 		}
-		return fail("no-readings", "cli-nolines", "kiro-cli")
 	}
 
 	p.OK = true

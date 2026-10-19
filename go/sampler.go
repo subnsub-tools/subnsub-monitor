@@ -82,11 +82,18 @@ func startSysSampler() {
 	// measuring for itself — and that one call is enough to take the baseline
 	// this sampler is about to build its first delta against.
 	recordSysSample(collectSystem())
+	// Whoever keeps a history keeps the names that explain it (prochist.go).
+	startProcHistory()
+	// And the stretches it was not here to keep one (outages.go): the start
+	// closes any gap the alive-stamp shows, and every tick after watches the
+	// wall clock for a jump.
+	outageBoot(time.Now())
 
 	go func() {
 		t := time.NewTicker(time.Duration(samplerStep * float64(time.Second)))
 		defer t.Stop()
 		for range t.C {
+			outageTick(time.Now())
 			recordSysSample(collectSystem())
 		}
 	}()
@@ -112,6 +119,21 @@ func recordSysSample(sys System) {
 // that fails has nothing to retry with — the relay never saw the frame, and the
 // next one is thirty seconds away — so holding the samples back would only
 // widen the next frame with points too old to draw beside its own.
+// latestSystem is the newest sample as measured, WITHOUT consuming the
+// series the relay push is accumulating. The direct tunnel's 1 Hz stream
+// reads this: it wants the current numbers each second, and it must not
+// reset the "already sent" mark that decides how many seconds of series the
+// next relay push carries — two consumers of that mark would each get half.
+func latestSystem() *System {
+	sampler.Lock()
+	defer sampler.Unlock()
+	if !sampler.on || len(sampler.buf) == 0 {
+		return nil
+	}
+	sys := sampler.buf[len(sampler.buf)-1].sys
+	return &sys
+}
+
 func sampledSystem() (*System, *SysSeries) {
 	sampler.Lock()
 	defer sampler.Unlock()
@@ -168,7 +190,8 @@ func buildSysSeries(fresh []sysSample, end float64) *SysSeries {
 	}
 	s := &SysSeries{At: end, Step: samplerStep,
 		CPU: make([]*float64, n), Mem: make([]*float64, n),
-		Rx: make([]*float64, n), Tx: make([]*float64, n)}
+		Rx: make([]*float64, n), Tx: make([]*float64, n),
+		IORead: make([]*float64, n), IOWrite: make([]*float64, n)}
 	for _, sm := range fresh {
 		i := n - 1 - int(math.Round((end-sm.at)/samplerStep))
 		if i < 0 || i >= n {
@@ -184,6 +207,8 @@ func buildSysSeries(fresh []sysSample, end float64) *SysSeries {
 		s.Mem[i] = round1p(sm.sys.MemUsedPercent)
 		s.Rx[i] = round0p(sm.sys.NetRxBps)
 		s.Tx[i] = round0p(sm.sys.NetTxBps)
+		s.IORead[i] = round0p(sm.sys.DiskReadBps)
+		s.IOWrite[i] = round0p(sm.sys.DiskWriteBps)
 	}
 	// A platform that cannot read a metric sends no array for it rather than a
 	// row of nulls — that is a quarter of the frame on a Mac, which reports
@@ -193,6 +218,8 @@ func buildSysSeries(fresh []sysSample, end float64) *SysSeries {
 	s.Mem = dropIfAllNil(s.Mem)
 	s.Rx = dropIfAllNil(s.Rx)
 	s.Tx = dropIfAllNil(s.Tx)
+	s.IORead = dropIfAllNil(s.IORead)
+	s.IOWrite = dropIfAllNil(s.IOWrite)
 	if s.CPU == nil && s.Mem == nil && s.Rx == nil && s.Tx == nil {
 		return nil
 	}

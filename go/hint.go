@@ -8,16 +8,23 @@ package main
 // every push, so a hint lost with one response is re-sent by the next one,
 // and the worst a wrong `true` costs is a single poll that finds nothing.
 //
-// PARSED ONLY on a machine with an instruction switch on (console, remote
-// update or diagnostics). That line is load-bearing: a monitoring-only
-// helper has never parsed a byte the relay produced, and it still does not —
-// it also never polls, so the bit could tell it nothing. The set of machines
-// that parse relay output stays exactly the set that collects work from it.
+// A second bit rides beside it since 2026-09-12 — `watch`. Since 2026-09-28
+// it means: a dashboard is open on this account AND this machine is set, in
+// its card's Settings, to refresh its quota on its own. It feeds pace.go,
+// which then asks the vendors on a ten-minute floor. That bit is for EVERY
+// helper, so the body is read on every machine, under the same bound; `poll`
+// is still acted on only where an instruction switch is on (console, remote
+// update or diagnostics), because a monitoring-only helper never polls and
+// the bit could tell it nothing.
 //
-// A HINT, not an instruction. It selects between sleeps that both end in the
-// same guarded poll; it cannot select work, name a command, or shorten the
-// floor consoleWait already enforces. The worst a hostile relay can do with
-// it is what it could already do by answering polls slowly.
+// HINTS, not instructions. `poll` selects between sleeps that both end in
+// the same guarded poll; it cannot select work, name a command, or shorten
+// the floor consoleWait already enforces. `watch` counts only when it is
+// read and says true: absent (an older relay), false or unreadable, the
+// machine is on manual from that response on — an earlier true is taken
+// back, not left to run out — and asks when Refresh quota is pressed. The most a
+// hostile relay can buy with it is the floor — one call per vendor every
+// ten minutes — which is what every machine did unasked until this build.
 
 import (
 	"encoding/json"
@@ -74,6 +81,18 @@ const (
 // stays distinguishable from `poll: false`.
 type pushHint struct {
 	Poll *bool `json:"poll"`
+	// A dashboard is open and this machine is set to refresh on its own.
+	// Anything but a readable true is "no" (see pace.go).
+	Watch *bool `json:"watch"`
+	// Whether the relay knows of a newer published helper than the one that
+	// pushed. True starts an update pass now (update.go nudgeUpdate), so a
+	// release reaches the fleet within one push interval instead of within
+	// the hour each machine's own timer happens to land on.
+	Update *bool `json:"update"`
+	// How far the relay's copy of this machine's outage record reaches, in
+	// unix seconds (outages.go outageAcked). Absent from a relay that does
+	// not keep the record.
+	OutagesUntil *float64 `json:"outages_until"`
 }
 
 // Where the push loop files what the relay said and the console loop asks.
@@ -117,7 +136,20 @@ func (b *hintBox) wakeNow() {
 // just have the next nap corrected.
 func (b *hintBox) absorb(raw []byte) {
 	var h pushHint
-	if len(raw) > hintMaxBody || json.Unmarshal(raw, &h) != nil || h.Poll == nil {
+	parsed := len(raw) <= hintMaxBody && json.Unmarshal(raw, &h) == nil
+	// The watch bit first, and on its own terms: it is read whether or not
+	// this machine takes instructions. Only a readable true counts, and
+	// anything else withdraws the last one.
+	noteWatched(parsed && h.Watch != nil && *h.Watch)
+	// The outage record's acknowledgement, read on every machine too.
+	outageAcked(parsed, h.OutagesUntil)
+	if parsed && h.Update != nil && *h.Update {
+		nudgeUpdate()
+	}
+	if b == nil {
+		return
+	}
+	if !parsed || h.Poll == nil {
 		b.mu.Lock()
 		b.mode = hintLegacy
 		b.mu.Unlock()
@@ -157,22 +189,26 @@ func hintDormant(signal bool, next int) bool {
 	return signal && next >= hintDormantMin
 }
 
-// absorbHint disposes of one 200 push response body: read and filed on a
-// machine that takes instructions, closed unread on one that does not — see
-// the top of this file for why that distinction is kept. Read one byte past
-// the bound, so "too big" is a fact rather than a truncation that might
-// still parse.
+// absorbHint disposes of one 200 push response body: read on every machine
+// for the watch bit, and filed for polling only on a machine that takes
+// instructions — see the top of this file. Read one byte past the bound, so
+// "too big" is a fact rather than a truncation that might still parse.
 func absorbHint(b *hintBox, body io.ReadCloser) {
 	defer body.Close()
-	if !consoleEnabled() && !updateAllowed() && !diagnosticsEnabled() {
-		return
-	}
+	takes := consoleEnabled() || updateAllowed() || diagnosticsEnabled()
 	raw, err := io.ReadAll(io.LimitReader(body, hintMaxBody+1))
 	if err != nil {
 		// A blip mid-read says nothing about what the relay speaks, so the
-		// mode keeps; but a dormant waiter must not sleep through it.
-		b.wakeNow()
+		// mode keeps; but a dormant waiter must not sleep through it. Nothing
+		// was learned about watchers either, which is not a yes.
+		noteWatched(false)
+		if takes {
+			b.wakeNow()
+		}
 		return
+	}
+	if !takes {
+		b = nil
 	}
 	b.absorb(raw)
 }

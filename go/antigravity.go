@@ -1,26 +1,37 @@
 package main
 
-// Antigravity: the quota comes from a server already running on this machine.
+// Antigravity: the quota comes from the CLI's own report, or from a server
+// already running on this machine.
 //
-// Antigravity (Google's agentic IDE, built on Codeium's language server — hence
-// the `exa.language_server_pb` package name below) keeps no quota on disk. What
-// it does have is a language server listening on loopback that will answer the
-// question, which puts it a rung below every other reading here — and what each
-// reading COSTS is the thing worth naming:
+// Antigravity (Google's agentic IDE and its CLI, agy, both built on Codeium's
+// language server — hence the `exa.language_server_pb` package name below)
+// keeps no quota on disk. Two things on the machine will answer the question,
+// and what each reading COSTS is the thing worth naming:
 //
 //	Codex        a file on disk        no credential, no network, no process
 //	Antigravity  a loopback request    no credential, no network off this box
+//	             or a subprocess       no credential; the vendor's CLI answers
 //	Amp          a subprocess          no credential; the vendor's CLI answers
 //	Claude       an HTTPS request      we hold the credential and make the call
 //
-// This one is cheaper than Amp's: nothing is launched. The server is already
-// there because the user is running the IDE, we ask it a question over
-// 127.0.0.1, and the answer never leaves the machine except as the percentages
-// every other provider here also publishes. No Google credential is opened,
-// held, or sent — the OAuth path CodexBar also implements (cloudcode-pa
-// .googleapis.com) is deliberately NOT implemented here, for the same reason
-// the Amp bearer path is not: it would mean holding a credential this helper
-// currently never touches.
+// The loopback request first: the IDE (and agy before 1.2.2) leaves a
+// language server listening on 127.0.0.1 that answers a Connect call, so
+// nothing is launched and the answer never leaves the machine except as the
+// percentages every other provider here also publishes. Since agy 1.2.2 the
+// CLI's server gates that call behind a CSRF token the CLI generates and never
+// exposes (CodexBar AntigravityProviderDescriptor.firstCSRFGatedVersion,
+// steipete/CodexBar@ed3c650e), and on macOS `ps` shows a CLI started from
+// PATH as a bare `agy`, which the matcher below cannot tell from any other
+// two-letter process — so where the CLI is installed, its own report is
+// asked for instead: `agy -p /usage --output-format json` prints the same
+// four buckets as JSON in about six seconds, with no model turn (num_turns
+// 0, zero tokens; verified against agy 1.3.4 on 2026-10-14). That is Amp's
+// cost rung exactly: the Google credential stays inside agy's own process,
+// we never open the keychain item or token file it lives in, and the only
+// thing crossing into this program is text on a pipe. The OAuth path CodexBar
+// also implements (cloudcode-pa.googleapis.com) remains deliberately NOT
+// implemented here, for the same reason the Amp bearer path is not: it would
+// mean holding a credential this helper currently never touches.
 //
 // The protocol was worked out from CodexBar's Antigravity provider, which is
 // where the credit for this integration belongs — see the README. It speaks
@@ -42,24 +53,24 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
 const (
-	// Probing means a directory walk and a loopback request. Cheap, but `watch`
-	// and the local /events stream can both ask far faster than the 30-second
-	// push does, and there is no reason to.
-	agMinInterval = 20.0
-	// How long a real reading outlives the server that produced it. An IDE that
-	// was closed is the ordinary case here, and the last known quota is worth
-	// more than an error for a while — but not forever, or a card would show
-	// yesterday's percentages as though they were current.
-	agStaleMax = 600.0
-	agTimeout  = 4 * time.Second
+	agTimeout = 4 * time.Second
+	// The CLI's report. `agy -p /usage` boots the CLI's language server, signs
+	// in with the token the CLI holds, asks Google and exits — about six
+	// seconds on a laptop; --print-timeout is the CLI's own cap on the turn,
+	// inside ours. MON_AGY_BIN names the binary for an unusual install, as
+	// MON_AMP_BIN does for Amp.
+	agyBinEnv       = "MON_AGY_BIN"
+	agyTimeout      = 45 * time.Second
+	agyPrintTimeout = "30s"
 	// A ceiling on the WHOLE collection, discovery included. One request is
 	// bounded at agTimeout, but a process may hold any number of listening
 	// sockets and they were being tried one after another while the cache
@@ -78,64 +89,22 @@ const (
 	agMaxBody = 512 * 1024
 )
 
-var agCache struct {
-	sync.Mutex
-	last        *Provider
-	fail        *Provider
-	fetchedAt   float64
-	attemptedAt float64
-}
+// The cache floor and the stale window are provhttp.go's — the CLI's report
+// is a process launched and a request to Google made on our behalf, so the
+// same reasoning as amp.go applies: a real call when a refresh is pressed or
+// on pace.go's floor while watched, the last answer served between. The
+// loopback probe is cheaper and could run more often, but two cadences for
+// one tile is a tile that changes meaning with how it was read.
+var agCache = provCache{pace: paceMark{id: "antigravity"}}
 
-// Same shape as collectAmp: a floor on how often the real work runs, and a
-// stale-but-real reading preferred over an error up to a point.
 func collectAntigravity() Provider {
-	agCache.Lock()
-	defer agCache.Unlock()
-
-	t := now()
-	serve := func(p *Provider) Provider {
-		out := *p
-		out.CapturedAt = t // when we looked; RecordedAt still says when it was fetched
-		return out
-	}
-
-	if agCache.last != nil && t-agCache.fetchedAt < agMinInterval {
-		return serve(agCache.last)
-	}
-	if agCache.attemptedAt > 0 && t-agCache.attemptedAt < agMinInterval {
-		if agCache.last != nil && t-agCache.fetchedAt < agStaleMax {
-			return serve(agCache.last)
-		}
-		if agCache.fail != nil {
-			return serve(agCache.fail)
-		}
-	}
-
-	agCache.attemptedAt = t
-	p := fetchAntigravity()
-	if p.OK {
-		agCache.last, agCache.fetchedAt, agCache.fail = &p, t, nil
-		return p
-	}
-	agCache.fail = &p
-	if agCache.last != nil && t-agCache.fetchedAt < agStaleMax {
-		return serve(agCache.last)
-	}
-	agCache.last = nil
-	return p
+	return agCache.collect(fetchAntigravity)
 }
 
 func fetchAntigravity() Provider {
 	p := Provider{ID: "antigravity", Name: "Antigravity", Source: "local-api", CapturedAt: now()}
 
 	cands := agCandidates()
-	if len(cands) == 0 {
-		// Not running is the ordinary state on most machines, and it is not a
-		// failure of anything. Same wording as a missing CLI.
-		p.failWith("not-installed", "ls-none")
-		return p
-	}
-
 	var lastErr string
 	deadline := time.Now().Add(agBudget)
 	for _, c := range cands {
@@ -162,12 +131,156 @@ func fetchAntigravity() Provider {
 		}
 	}
 
+	// No server answered — none listening, or the CLI's keeping its token to
+	// itself. Where the CLI is installed, its own report is the reading.
+	if bin := vendorBinary(agyBinEnv, vendorCandidates("agy")); bin != "" {
+		return fetchAgyReport(bin)
+	}
+	if len(cands) == 0 {
+		// Not running is the ordinary state on most machines, and it is not a
+		// failure of anything. Same wording as a missing CLI.
+		p.failWith("not-installed", "ls-none")
+		return p
+	}
 	if lastErr == "" {
 		lastErr = "no listening port found"
 	}
 	// The server was there and would not answer. Distinct from "not running",
 	// because the two want different things done about them.
 	p.failWith("unreachable", "ls-no-quota", lastErr)
+	return p
+}
+
+/* ── the CLI's report ───────────────────────────────────────────────────
+   `agy -p /usage --output-format json`: the CLI answers its own /usage
+   command in print mode and exits, no model turn made. Amp's cost rung and
+   Amp's discipline (clirun.go): a binary from a fixed list or MON_AGY_BIN,
+   never PATH; an allow-listed environment; null stdin, bounded output, a
+   real deadline. */
+
+func fetchAgyReport(bin string) Provider {
+	p := Provider{ID: "antigravity", Name: "Antigravity", Source: "cli", CapturedAt: now()}
+	fail := func(err, code string, arg ...string) Provider {
+		p.failWith(err, code, arg...)
+		return p
+	}
+	out, exited, err := agyRun(bin)
+	if err != nil {
+		// Never err.Error(): exec errors quote the path being run, which
+		// carries the local username onto every watcher's screen.
+		if err == errAmpTimeout {
+			return fail("unreachable", "cli-timeout", "agy")
+		}
+		return fail("cli-failed", "cli-failed", "agy")
+	}
+	return parseAgyReport(p, out, exited)
+}
+
+// One run of the report, in a private directory of its own.
+//
+// Signing in, agy opens a browser: `open` or `xdg-open` found on PATH, or
+// $BROWSER — in print mode too (CodexBar AntigravityProviderDescriptor
+// .runPrintUsage, steipete/CodexBar@ed3c650e). A helper under launchd or
+// systemd asking every few minutes would raise Google's sign-in page on the
+// user's screen each time the token is gone, so both names resolve to a stub
+// that exits 1, first on PATH, and BROWSER names the same stub. The CLI's
+// own log goes into the directory as well, one file per run, instead of
+// into the user's log folder; the directory is removed with the run.
+func agyRun(bin string) (string, bool, error) {
+	dir, err := os.MkdirTemp("", "subnsub-agy-")
+	if err != nil {
+		return "", false, err
+	}
+	defer os.RemoveAll(dir)
+	stub := []byte("#!/bin/sh\nexit 1\n")
+	for _, name := range []string{"open", "xdg-open"} {
+		if err := os.WriteFile(filepath.Join(dir, name), stub, 0o700); err != nil {
+			return "", false, err
+		}
+	}
+	env := vendorEnv(nil)
+	path := "/usr/bin:/bin"
+	for i, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
+			path = v
+			env = append(env[:i], env[i+1:]...)
+			break
+		}
+	}
+	env = append(env,
+		"PATH="+dir+string(os.PathListSeparator)+path,
+		"BROWSER="+filepath.Join(dir, "open"))
+	// The whole tree on the deadline: agy's server is a child of its own
+	// (runVendorCLITree), and a hung one must not outlive this run.
+	return runVendorCLITree(bin, []string{
+		"-p", "/usage", "--output-format", "json",
+		"--print-timeout", agyPrintTimeout,
+		"--log-file", filepath.Join(dir, "agy.log"),
+	}, env, agyTimeout)
+}
+
+// The report, as agy 1.3.4 prints it with --output-format json:
+//
+//	{"conversation_id":"","status":"SUCCESS","response":"Gemini Models\tWeekly Limit Remaining\t100%\t…",
+//	 "num_turns":0,"usage":{"total_tokens":0,…},
+//	 "command":{"name":"usage","data":{"description":"…","groups":[{"name":"Gemini Models",
+//	   "buckets":[{"id":"gemini-weekly","name":"Weekly Limit Remaining","window":"weekly",
+//	               "remaining_fraction":1,"reset_time":"2026-10-21T01:25:17Z"},…]},…]}}}
+//
+// `response` is the same table as text and is not read; the buckets are the
+// server's, spelled in snake_case, and agBucket knows both spellings
+// (CodexBar parseCLIUsageReport decodes them with convertFromSnakeCase).
+type agReport struct {
+	Status  string `json:"status"`
+	Command *struct {
+		Name string    `json:"name"`
+		Data agSummary `json:"data"`
+	} `json:"command"`
+}
+
+// What the CLI says when it is not a report — the sign-in state is the one
+// worth telling apart, because its fix is `agy` once in a terminal (CodexBar
+// AntigravityCLIPrintFailure.signInMarkers; "not logged in" also covers the
+// CLI's own "You are not logged into Antigravity").
+var agySignedOutRE = regexp.MustCompile(`(?i)not logged in|not signed in|unauthenticated|authentication required|login required|please (?:log|sign) in`)
+
+// What the CLI printed, read into a Provider — split from the run so the
+// shapes can be tested without a CLI.
+func parseAgyReport(p Provider, out string, exited bool) Provider {
+	fail := func(err, code string, arg ...string) Provider {
+		p.failWith(err, code, arg...)
+		return p
+	}
+	text := strings.TrimSpace(ansiRE.ReplaceAllString(out, ""))
+	// Whatever the CLI printed before the document (a notice, an update
+	// banner) is skipped to the first brace; whatever follows it is ignored.
+	var rep agReport
+	parsed := false
+	if i := strings.IndexByte(text, '{'); i >= 0 {
+		parsed = json.NewDecoder(strings.NewReader(text[i:])).Decode(&rep) == nil
+	}
+	failed := parsed && rep.Status != "" && rep.Status != "SUCCESS"
+	if !parsed || failed || rep.Command == nil || rep.Command.Name != "usage" {
+		// Same ladder as amp.go: only an explicit signed-out phrase claims
+		// that diagnosis; a failing exit or a failed status is reported as
+		// that; and a clean exit with no report is a parser this build has
+		// to update.
+		switch {
+		case agySignedOutRE.MatchString(text):
+			return fail("not-signed-in", "cli-signin", "agy")
+		case exited || failed:
+			return fail("cli-failed", "cli-exit", "agy")
+		}
+		return fail("cli-failed", "cli-shape", "agy")
+	}
+	lims := agLimits(rep.Command.Data.groups())
+	if len(lims) == 0 {
+		return fail("no-readings", "cli-nolines", "agy")
+	}
+	p.OK = true
+	p.Limits = lims
+	// Live: the CLI asks Google every time it runs.
+	p.RecordedAt = fp(now())
 	return p
 }
 
@@ -237,6 +350,13 @@ func agIsServer(argv []string) bool {
 	if !agServerNames[base] {
 		return false
 	}
+	// The desktop app has shipped as Gemini.app since 2026-08 (CodexBar
+	// AntigravityStatusProbe, steipete/CodexBar@a2444e62ec), and its server
+	// runs out of the bundle: the bundle's path is the flag value's equal, a
+	// place only that app installs to.
+	if strings.Contains(exe, "/gemini.app/") || strings.Contains(exe, "\\gemini.app\\") {
+		return true
+	}
 	return agFlagNames(argv, "antigravity")
 }
 
@@ -299,28 +419,71 @@ type agRemaining struct {
 	RemainingFraction *float64 `json:"remainingFraction"`
 }
 
+// One bucket, in every spelling the three sources of this summary use —
+// the server's Connect reply, Cloud Code's, and the CLI's own report
+// (CodexBar AntigravityQuotaSummaryParser, steipete/CodexBar@62acfd8ead):
+// `bucketId` or `id`, `displayName` or `name` — and the CLI's print report
+// spells the same fields in snake_case (`bucket_id`, `remaining_fraction`,
+// `reset_time`), which encoding/json does not fold into the camelCase names.
 type agBucket struct {
-	BucketID string `json:"bucketId"`
+	BucketID      string `json:"bucketId"`
+	ID            string `json:"id"`
+	BucketIDSnake string `json:"bucket_id"`
 	// Two shapes seen for the same number; the nested one is current.
-	Remaining         *agRemaining `json:"remaining"`
-	RemainingFraction *float64     `json:"remainingFraction"`
+	Remaining              *agRemaining `json:"remaining"`
+	RemainingFraction      *float64     `json:"remainingFraction"`
+	RemainingFractionSnake *float64     `json:"remaining_fraction"`
+	// The period, stated: "weekly" or "5h". When the server says it, the id
+	// is not consulted — a bucket named gemini-5h with window "weekly" is
+	// weekly — and a window this build does not know is no period at all
+	// rather than a guess from the id.
+	Window string `json:"window"`
+	// A bucket switched off carries no reading, whatever its number says.
+	Disabled bool `json:"disabled"`
 	// ISO-8601 in current builds, epoch seconds in older ones. Decoded as
 	// `any` so a number does not fail the whole document.
-	ResetTime any `json:"resetTime"`
+	ResetTime      any `json:"resetTime"`
+	ResetTimeSnake any `json:"reset_time"`
 }
 
 type agGroup struct {
 	DisplayName string     `json:"displayName"`
+	Name        string     `json:"name"`
 	Buckets     []agBucket `json:"buckets"`
 }
 
+func (g *agGroup) label() string {
+	if g.DisplayName != "" {
+		return g.DisplayName
+	}
+	return g.Name
+}
+
 // Connect returns the response message at the top level; some builds wrap it
-// in `response`. Both are accepted rather than guessed at.
+// in `response`, the CLI's report in `summary`. All three are accepted
+// rather than guessed at.
 type agSummary struct {
 	Groups   []agGroup `json:"groups"`
 	Response *struct {
 		Groups []agGroup `json:"groups"`
 	} `json:"response"`
+	Summary *struct {
+		Groups []agGroup `json:"groups"`
+	} `json:"summary"`
+}
+
+// The groups, from whichever wrapper holds them.
+func (s *agSummary) groups() []agGroup {
+	if len(s.Groups) > 0 {
+		return s.Groups
+	}
+	if s.Response != nil && len(s.Response.Groups) > 0 {
+		return s.Response.Groups
+	}
+	if s.Summary != nil && len(s.Summary.Groups) > 0 {
+		return s.Summary.Groups
+	}
+	return nil
 }
 
 func agClient() *http.Client {
@@ -367,11 +530,8 @@ func agAsk(ep agEndpoint, csrf string) ([]agGroup, error) {
 		if err := json.Unmarshal(body, &s); err != nil {
 			continue
 		}
-		if len(s.Groups) > 0 {
-			return s.Groups, nil
-		}
-		if s.Response != nil && len(s.Response.Groups) > 0 {
-			return s.Response.Groups, nil
+		if groups := s.groups(); len(groups) > 0 {
+			return groups, nil
 		}
 	}
 	return nil, fmt.Errorf("no quota in the reply")
@@ -401,6 +561,14 @@ func agPost(client *http.Client, ep agEndpoint, path, csrf string) ([]byte, erro
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		if resp.StatusCode == 401 && csrf == "" {
+			// agy 1.2.2 and later gate their local server behind a CSRF
+			// token the CLI generates and never exposes (CodexBar
+			// AntigravityProviderDescriptor.firstCSRFGatedVersion,
+			// steipete/CodexBar@7d7c730185): a 401 from a tokenless ask is
+			// that, not a server that would not answer.
+			return nil, fmt.Errorf("local server answered 401 (agy 1.2.2+ keeps its token to itself)")
+		}
 		return nil, fmt.Errorf("local server answered %d", resp.StatusCode)
 	}
 	// One byte past the cap, so "too big" is DETECTED rather than silently
@@ -428,7 +596,13 @@ func agLimits(groups []agGroup) []Limit {
 	var out []Limit
 	for _, g := range groups {
 		for _, b := range g.Buckets {
+			if b.Disabled {
+				continue
+			}
 			frac := b.RemainingFraction
+			if frac == nil {
+				frac = b.RemainingFractionSnake
+			}
 			if b.Remaining != nil && b.Remaining.RemainingFraction != nil {
 				frac = b.Remaining.RemainingFraction
 			}
@@ -450,14 +624,25 @@ func agLimits(groups []agGroup) []Limit {
 			if used > 100 {
 				used = 100
 			}
-			lim := Limit{Key: agKey(b.BucketID), UsedPercent: round2(used)}
-			if lbl := agWindow(b.BucketID); lbl != "" {
+			id := b.BucketID
+			if id == "" {
+				id = b.ID
+			}
+			if id == "" {
+				id = b.BucketIDSnake
+			}
+			lim := Limit{Key: agKey(id), UsedPercent: round2(used)}
+			if lbl := agWindow(b.Window, id); lbl != "" {
 				lim.WindowLabel = sp(lbl)
 			}
-			if g.DisplayName != "" {
-				lim.Scope = sp(agScope(g.DisplayName))
+			if name := g.label(); name != "" {
+				lim.Scope = sp(agScope(name))
 			}
-			if e := agReset(b.ResetTime); e > 0 {
+			reset := b.ResetTime
+			if reset == nil {
+				reset = b.ResetTimeSnake
+			}
+			if e := agReset(reset); e > 0 {
 				lim.ResetsAt = fp(e)
 			}
 			out = append(out, lim)
@@ -514,7 +699,22 @@ func agScope(s string) string {
 // The window this bucket covers, in the same vocabulary the other providers
 // use — "5h" and "7d" are what Codex and Claude already put in this column, and
 // a fourth spelling would make the card read as four different things.
-func agWindow(bucketID string) string {
+//
+// A stated `window` is the answer, known or not; the id is read only when
+// none is stated (CodexBar AntigravityStatusProbe, @62acfd8ead — "window":
+// "unknown" on gemini-5h is no period, not five hours).
+func agWindow(window, bucketID string) string {
+	if w := strings.TrimSpace(window); w != "" {
+		switch strings.ToLower(strings.ReplaceAll(strings.TrimSuffix(strings.ToLower(w), " limit"), "_", "-")) {
+		case "weekly", "week":
+			return "7d"
+		case "session", "5h", "5-hour", "five hour", "five-hour":
+			return "5h"
+		case "daily", "day":
+			return "1d"
+		}
+		return ""
+	}
 	u := strings.ToUpper(bucketID)
 	switch {
 	case strings.Contains(u, "WEEK"):

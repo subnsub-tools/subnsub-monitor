@@ -97,6 +97,14 @@ func TestCoverageEndpointMatchesCollectorRegistry(t *testing.T) {
 	if relayRef == nil || relayRef[1] != codexBarReferenceCommit {
 		t.Errorf("relay CodexBar allow-list and helper provenance differ: %v", relayRef)
 	}
+	cpamc := regexp.MustCompile(`(?s)id:\s*'cpamc'.*?commit:\s*'([^']+)'`).FindStringSubmatch(text)
+	if cpamc == nil || cpamc[1] != cpamcReferenceCommit {
+		t.Errorf("coverage CPAMC commit and helper provenance differ: %v", cpamc)
+	}
+	relayCpamc := regexp.MustCompile(`\['cpamc',\s*'([^']+)'\]`).FindStringSubmatch(string(relay))
+	if relayCpamc == nil || relayCpamc[1] != cpamcReferenceCommit {
+		t.Errorf("relay CPAMC allow-list and helper provenance differ: %v", relayCpamc)
+	}
 	relayRolesBlock := regexp.MustCompile(`(?s)const CODEXBAR_ROLE_BY_PROVIDER = new Map\(\[(.*?)\]\);`).FindSubmatch(relay)
 	if relayRolesBlock == nil {
 		t.Fatal("could not find relay's provider/reference-role allow-list")
@@ -148,6 +156,9 @@ func TestCollectorProvenanceIsPinnedAndTruthful(t *testing.T) {
 	fullCommit := regexp.MustCompile(`^[0-9a-f]{40}$`)
 	if !fullCommit.MatchString(codexBarReferenceCommit) {
 		t.Fatalf("CodexBar reference %q is not a full commit", codexBarReferenceCommit)
+	}
+	if !fullCommit.MatchString(cpamcReferenceCommit) {
+		t.Fatalf("CPAMC reference %q is not a full commit", cpamcReferenceCommit)
 	}
 	for id, role := range codexBarReferenceRoles {
 		if !shipped[id] {

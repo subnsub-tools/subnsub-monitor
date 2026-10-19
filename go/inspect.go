@@ -4,12 +4,17 @@ package main
 //
 // This is deliberately not a smaller spelling of the console. The request has
 // a closed target, carries no command string, and every target is implemented
-// here with native reads. It is also a separate local opt-in: allowing the
-// dashboard to inspect process resource use must never imply that it may run a
-// shell command, replace the helper, or read process arguments and environment.
+// here with native reads. Reading process resource use never implies that the
+// dashboard may run a shell command, replace the helper, or read process
+// arguments and environment.
+//
+// It is no longer a switch (operator ruling 2026-10-13: this is information we can get and
+// must always get; the switch should not exist): wherever /proc shows other processes
+// the names are read, kept beside the CPU history and served over the tunnel.
+// The marker file and MON_DIAGNOSTICS that used to decide it are ignored;
+// `subnsub-monitor diagnostics` only reports.
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -20,59 +25,26 @@ import (
 )
 
 const (
-	diagnosticsEnvVar   = "MON_DIAGNOSTICS"
-	diagnosticsFileName = "diagnostics"
 	inspectProcessLimit = 20
 	inspectSampleWait   = 250 * time.Millisecond
 )
 
-func diagnosticsFile() string {
-	dir := configDir()
-	if dir == "" {
-		return ""
-	}
-	return filepath.Join(dir, diagnosticsFileName)
-}
-
 // The first target is implemented from Linux /proc. Other platforms report no
 // capability rather than showing a drawer whose only possible result is an
 // error. More targets can extend this switch without widening the wire format.
-func diagnosticsAvailable() bool { return runtime.GOOS == "linux" }
-
-func diagnosticsEnabled() bool {
-	if !diagnosticsAvailable() {
-		return false
-	}
-	if v := strings.TrimSpace(os.Getenv(diagnosticsEnvVar)); v != "" {
-		return v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "on")
-	}
-	path := diagnosticsFile()
-	if path == "" {
-		return false
-	}
-	st, err := os.Stat(path)
-	return err == nil && st.Mode().IsRegular()
+//
+// Linux includes Android, and on either the question is not the platform but
+// whether /proc shows other processes: an Android app is refused them
+// (hidepid=2 since 7.0), a shell or root there is not, and a hardened
+// container may be either. A table that could only ever list this program
+// is not a diagnostic, so the capability follows the probe.
+func diagnosticsAvailable() bool {
+	return (runtime.GOOS == "linux" || runtime.GOOS == "android") && procStatReadable()
 }
 
-func setDiagnostics(on bool) error {
-	if on && !diagnosticsAvailable() {
-		return errors.New("diagnostics are supported on Linux only")
-	}
-	dir := configDir()
-	if dir == "" {
-		return os.ErrNotExist
-	}
-	path := filepath.Join(dir, diagnosticsFileName)
-	if !on {
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		return nil
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	return os.WriteFile(path, []byte("on\n"), 0o600)
+// On wherever it can be: the one question is the probe above.
+func diagnosticsEnabled() bool {
+	return diagnosticsAvailable()
 }
 
 type inspectData struct {

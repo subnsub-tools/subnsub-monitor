@@ -1,0 +1,13 @@
+{
+  "name": "Your own quota",
+  "tiles": [
+    {
+      "id": "demo-quota",
+      "name": "Demo platform",
+      "type": "quota",
+      "exec": "printf '%s' '{\"plan\":\"Demo\",\"windows\":[{\"key\":\"monthly\",\"label\":\"30d\",\"used\":7.5,\"total\":20,\"unit\":\"usd\",\"minutes\":43200},{\"key\":\"weekly\",\"used_percent\":62}],\"balance\":\"12.50\"}'",
+      "interval": 300,
+      "timeout": 10
+    }
+  ]
+}

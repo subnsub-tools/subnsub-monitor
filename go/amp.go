@@ -10,10 +10,17 @@ package main
 // It isn't, because Amp ships a CLI that will answer the question itself:
 //
 //	$ amp usage
-//	Signed in as someone@example.com
+//	Signed in as someone@example.com (team)
+//	**Amp Megawatt Tier:** agent usage $19.79 of $20 remaining (99%), orb usage 750h of 750h a1.small orb hours remaining (100%) - period 2026-09-22 to 2026-10-22, resets upon renewal in 15 days
+//	**Individual credits:** $8.71 remaining (set up auto-reload ...) - https://...
+//
+// Those rows are display text Amp's servers render — the same displayText its
+// usage API returns; none of it is in the CLI binary — so they change shape
+// without a CLI release. Earlier shapes, all still read below:
+//
 //	Amp Free: 100% remaining today (resets daily) - https://ampcode.com/...
 //	Subscription Megawatt: 19% other usage and 100% orb usage remaining - resets upon renewal in 23 days
-//	Individual credits: $8.71 remaining (set up auto-reload ...) - https://...
+//	**Amp Megawatt Subscription:** 68% other usage and 97% orb usage remaining - resets upon renewal in 5 days
 //
 // That makes this a THIRD cost tier, cheaper than the one Claude sits in and
 // worth naming: Codex is a local file (no credential, no network), Claude is a
@@ -37,17 +44,20 @@ package main
 //     it, run with stdin on the null device and a 15s deadline, and its output
 //     is read into a bounded buffer.
 //
-// ON THE FIRST LINE, WHICH MUST NOT TRAVEL: `amp usage` prints the signed-in
-// email address. This collector publishes to a relay and onto other people's
-// screens. Nothing below captures that line — the sign-in check deliberately
-// matches its shape and throws the address away, and every value that becomes
-// part of a Provider comes from a numeric capture group. Same rule as
-// system.go: identity is not a quota reading.
+// ON THE FIRST LINE: `amp usage` prints the signed-in e-mail address. It is
+// the reading's account (ampAddress): the name the tile is shown by, and,
+// through accountkey.go's HMAC, the key that folds this machine's Amp with
+// the same account's on another. Until 2026-10-18 only the key travelled
+// and the address was thrown away; it is a name now like every other
+// account's (operator ruling 2026-10-18: that privacy rule no longer exists;
+// everything is open source and users carry their own responsibility). Every
+// figure still comes from a numeric capture group.
 
 import (
 	"bytes"
 	"context"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -55,6 +65,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	// America/New_York for the free tier's reset (ampNextFreeReset), on the
+	// boxes that ship no zoneinfo — Windows, Android, OpenWrt.
+	_ "time/tzdata"
 )
 
 const (
@@ -71,7 +84,7 @@ const (
 	// failure. `amp usage` is a network call and will blip; flipping the card
 	// to an error and back every half minute is worse than a number that is
 	// visibly a few minutes old. Past this, the error is the truth.
-	ampStaleMax = 600.0
+	ampStaleMax = 1800.0 // three quota floors, as provStaleMax is
 
 	ampTimeout = 15 * time.Second
 	ampMaxOut  = 64 << 10 // the real output is four lines; this is a runaway guard
@@ -92,11 +105,13 @@ var ampCache struct {
 	fetchedAt   float64   // when that reading was actually fetched
 	fail        *Provider // last failure, served while the floor holds
 	attemptedAt float64   // when the CLI last ran at all
+	pace        paceMark  // refresh / watched floor, see pace.go
 }
 
 func collectAmp() Provider {
 	ampCache.Lock()
 	defer ampCache.Unlock()
+	ampCache.pace.id = "amp"
 
 	t := now()
 	serve := func(p *Provider) Provider {
@@ -105,18 +120,15 @@ func collectAmp() Provider {
 		return out
 	}
 
-	if ampCache.last != nil && t-ampCache.fetchedAt < ampMinInterval {
-		return serve(ampCache.last)
-	}
-	if ampCache.attemptedAt > 0 && t-ampCache.attemptedAt < ampMinInterval {
-		// Inside the floor with no fresh success: whatever the last attempt
-		// produced stands, rather than running the CLI again.
-		if ampCache.last != nil && t-ampCache.fetchedAt < ampStaleMax {
+	// Not due — no press, and not watched or the floor holds (pace.go): whatever the
+	// last run produced stands, rather than running the CLI again. The last
+	// success outlives a later failure only for ampStaleMax.
+	if !ampCache.pace.due(t, ampCache.fetchedAt, ampCache.attemptedAt, ampMinInterval, ampCache.last != nil) &&
+		(ampCache.last != nil || ampCache.fail != nil) {
+		if ampCache.last != nil && (ampCache.fail == nil || t-ampCache.fetchedAt < ampStaleMax) {
 			return serve(ampCache.last)
 		}
-		if ampCache.fail != nil {
-			return serve(ampCache.fail)
-		}
+		return serve(ampCache.fail)
 	}
 
 	ampCache.attemptedAt = t
@@ -364,6 +376,10 @@ func (l *limitedWriter) Write(p []byte) (int, error) {
 // matches contributes nothing rather than contributing a wrong number. If Amp
 // renames a row we lose that row and keep the others; the failure mode is a
 // gauge going missing, never a gauge going wrong.
+//
+// Markdown bold around the labels ("**Amp Free:** 0% remaining today") is
+// removed before any of them is matched, the same way colour codes are:
+// emphasis is presentation, and a label wrapped in it is still the label.
 
 // Two rules hold every pattern below together, and both were mistakes in the
 // first version worth naming so they do not come back.
@@ -385,12 +401,18 @@ var (
 	amount = `([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)`
 	days   = `([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)`
 
-	// "Signed in as someone@example.com" — matched for its shape only. The
-	// address is deliberately outside every capture group.
+	// "Signed in as someone@example.com" — matched for its shape: whether
+	// the CLI is signed in at all.
 	ampSignedInRE = regexp.MustCompile(`(?im)^[ \t]*Signed in as[ \t]+\S`)
+	// The same line with the address captured — the reading's account
+	// (ampAddress), and its key.
+	ampSignedInAddrRE = regexp.MustCompile(`(?im)^[ \t]*Signed in as[ \t]+(\S+)`)
 
-	// "Amp Free: 100% remaining today (resets daily)"
-	ampFreePctRE = regexp.MustCompile(`(?im)^[ \t]*Amp Free:[ \t]*` + amount + `[ \t]*%[ \t]+remaining`)
+	// "Amp Free: 100% remaining today (resets daily)" — the parenthesis is
+	// its own capture, because a row that does not say "resets daily" has no
+	// reset to name (CodexBar AmpUsageParser, steipete/CodexBar@6fb316165e:
+	// a percentage alone does not imply the daily reset).
+	ampFreePctRE = regexp.MustCompile(`(?im)^[ \t]*Amp Free:[ \t]*` + amount + `[ \t]*%[ \t]+remaining(?:[ \t]+today)?(?:[ \t]*(\(resets[ \t]+daily\)))?`)
 
 	// "Amp Free: $4.20 / $10.00 remaining (replenishes +$0.42/hour)" — the
 	// balance-shaped variant of the same row.
@@ -398,12 +420,32 @@ var (
 		`[ \t]*/[ \t]*\$?` + amount + `[ \t]+remaining(?:[ \t]*\(replenishes[ \t]*\+?\$?` +
 		amount + `[ \t]*/[ \t]*hour\))?`)
 
+	// The countdown both plan rows end on. A monthly plan counts in months
+	// ("resets upon renewal in 1 month"), and a pattern that knew only days
+	// dropped its reset.
+	renewal = `resets[ \t]+upon[ \t]+renewal[ \t]+in[ \t]+` + days + `[ \t]+(days?|months?)\b`
+
 	// "Subscription Megawatt: 19% other usage and 100% orb usage remaining -
-	//  resets upon renewal in 23 days"
-	ampSubRE = regexp.MustCompile(`(?im)^[ \t]*Subscription[ \t]+(.+?):[ \t]*` + amount +
+	//  resets upon renewal in 23 days", and the same row as it was spelled
+	// next: "Amp Megawatt Subscription: 68% other usage and …".
+	ampSubRE = regexp.MustCompile(`(?im)^[ \t]*(?:Subscription[ \t]+(.+?)|Amp[ \t]+(.+?)[ \t]+Subscription):[ \t]*` + amount +
 		`[ \t]*%[ \t]+other[ \t]+usage[ \t]+and[ \t]+` + amount +
-		`[ \t]*%[ \t]+orb[ \t]+usage[ \t]+remaining(?:[ \t]*-[ \t]*resets[ \t]+upon[ \t]+renewal[ \t]+in[ \t]+` +
-		days + `[ \t]+days?)?`)
+		`[ \t]*%[ \t]+orb[ \t]+usage[ \t]+remaining(?:[ \t]*-[ \t]*` + renewal + `)?`)
+
+	// "Amp Megawatt Tier: agent usage $19.79 of $20 remaining (99%), orb usage
+	//  750h of 750h a1.small orb hours remaining (100%) - period 2026-09-22 to
+	//  2026-10-22, resets upon renewal in 15 days" — the plan row since
+	// 2026-09, quoting the agent pool in dollars and the orb pool in hours.
+	// The row is found by its label and its clauses are read one at a time, so
+	// a clause that changes shape costs that clause and not the whole row. The
+	// clause shapes follow CodexBar's AmpUsageParser (steipete/CodexBar@9699239f),
+	// which read this row first.
+	ampTierRE      = regexp.MustCompile(`(?im)^[ \t]*Amp[ \t]+([^:\r\n]+?)[ \t]+Tier:([^\r\n]*)`)
+	ampTierAgentRE = regexp.MustCompile(`(?i)\bagent[ \t]+usage[ \t]+\$` + amount + `[ \t]+of[ \t]+\$` + amount + `[ \t]+remaining\b`)
+	ampTierOrbRE   = regexp.MustCompile(`(?i)\borb[ \t]+usage[ \t]+` + amount + `h[ \t]+of[ \t]+` + amount +
+		`h[ \t]+[A-Za-z0-9][A-Za-z0-9._-]*[ \t]+orb[ \t]+hours[ \t]+remaining\b`)
+	ampPeriodRE  = regexp.MustCompile(`(?i)\bperiod[ \t]+([0-9]{4}-[0-9]{2}-[0-9]{2})[ \t]+to[ \t]+([0-9]{4}-[0-9]{2}-[0-9]{2})\b`)
+	ampRenewalRE = regexp.MustCompile(`(?i)\b` + renewal)
 
 	// "Individual credits: $8.71 remaining"
 	ampCreditsRE = regexp.MustCompile(`(?im)^[ \t]*Individual credits:[ \t]*\$?` + amount + `[ \t]+remaining`)
@@ -438,17 +480,12 @@ func parseAmpUsage(p Provider, out string, t float64, exited bool) Provider {
 		p.failWith(err, code, arg...)
 		return p
 	}
-	text := ansiRE.ReplaceAllString(out, "")
+	text := strings.ReplaceAll(ansiRE.ReplaceAllString(out, ""), "**", "")
 
-	if m := ampFreePctRE.FindStringSubmatch(text); m != nil {
-		if v, ok := ampNum(m[1]); ok {
-			// "resets daily" names no time of day, and inventing one would put
-			// a countdown on the page that is wrong by up to 24 hours. The row
-			// carries its length and no reset.
-			p.Limits = append(p.Limits, Limit{
-				Key: "free", UsedPercent: ampUsed(v), WindowLabel: sp("1d")})
-		}
-	} else if m := ampFreeAmtRE.FindStringSubmatch(text); m != nil {
+	// The balance-shaped row before the percentage one, as CodexBar reads
+	// them (freeUsage ?? freePercentUsage): the dollars carry more than the
+	// share does.
+	if m := ampFreeAmtRE.FindStringSubmatch(text); m != nil {
 		remaining, ok1 := ampNum(m[1])
 		quota, ok2 := ampNum(m[2])
 		if ok1 && ok2 && quota > 0 {
@@ -466,37 +503,59 @@ func parseAmpUsage(p Provider, out string, t float64, exited bool) Provider {
 			}
 			// A balance that refills at a fixed rate has an implied window: how
 			// long a full one takes to rebuild. That is the same quantity the
-			// percentage rows call a window length, so it is labelled the same.
+			// percentage rows call a window length, so it is labelled the same;
+			// and what has been spent refills by the same clock, which is when
+			// this balance is whole again (CodexBar AmpUsageParser: now + used
+			// / hourly).
 			if hourly, ok := ampNum(m[3]); ok && hourly > 0 {
 				lim.WindowMinutes = fp(round2(quota / hourly * 60))
 				lim.WindowLabel = windowLabel(*lim.WindowMinutes)
+				if used > 0 {
+					lim.ResetsAt = fp(math.Round(t + used/hourly*3600))
+				}
+			}
+			p.Limits = append(p.Limits, lim)
+		}
+	} else if m := ampFreePctRE.FindStringSubmatch(text); m != nil {
+		if v, ok := ampNum(m[1]); ok {
+			lim := Limit{Key: "free", UsedPercent: ampUsed(v), WindowLabel: sp("1d")}
+			// "(resets daily)" is 8 PM New York time, every day (CodexBar
+			// AmpUsageSnapshot.nextFreeTierReset, steipete/CodexBar@ad966eb54f;
+			// docs/amp.md: "resets at 8:00 PM America/New_York"). Only when the
+			// row says so: a percentage alone names no reset.
+			if m[2] != "" {
+				lim.WindowMinutes = fp(1440)
+				lim.ResetsAt = ampNextFreeReset(t)
 			}
 			p.Limits = append(p.Limits, lim)
 		}
 	}
 
-	if m := ampSubRE.FindStringSubmatch(text); m != nil {
+	if m := ampTierRE.FindStringSubmatch(text); m != nil {
+		ampTier(&p, m[1], m[2], t)
+	} else if m := ampSubRE.FindStringSubmatch(text); m != nil {
 		// Day granularity is all upstream gives. Rendering it as a to-the-second
 		// countdown overstates the precision by less than the alternative
 		// (no countdown at all) understates the information, and the same
 		// rounding already applies to every other reset on the page.
-		var resets *float64
-		if days, ok := ampNum(m[4]); ok && days > 0 {
-			resets = fp(t + days*86400)
-		}
-		if v, ok := ampNum(m[2]); ok {
+		resets := ampRenewal(t, m[5], m[6])
+		if v, ok := ampNum(m[3]); ok {
 			p.Limits = append(p.Limits, Limit{
 				Key: "subscription", UsedPercent: ampUsed(v),
 				WindowLabel: sp("plan"), ResetsAt: resets})
 		}
-		if v, ok := ampNum(m[3]); ok {
+		if v, ok := ampNum(m[4]); ok {
 			p.Limits = append(p.Limits, Limit{
 				Key: "orb", UsedPercent: ampUsed(v),
 				WindowLabel: sp("orb"), ResetsAt: resets})
 		}
 		// The plan name comes out of the CLI's output, so it goes through the
 		// same sieve as Claude's subscriptionType before being published.
-		if name := tame(m[1], 32); name != "" {
+		name := m[1]
+		if name == "" {
+			name = m[2]
+		}
+		if name := tame(name, 32); name != "" {
 			p.PlanType = sp(name)
 		}
 	}
@@ -536,8 +595,152 @@ func parseAmpUsage(p Provider, out string, t float64, exited bool) Provider {
 		p.PlanType = sp("Amp Free")
 	}
 	p.OK = true
+	p.Account = cleanText(ampAddress(text), 60)
+	p.AccountKey = ampAccountKey(text)
 	// Live: `amp usage` asks Amp's servers every time it runs, so unlike Codex
 	// there is no gap between the number and the last time the tool was used.
 	p.RecordedAt = fp(t)
 	return p
+}
+
+// ampAddress is the address on the sign-in line, or "" without one; a
+// trailing "(team)" or punctuation the CLI may append is not part of it.
+func ampAddress(text string) string {
+	m := ampSignedInAddrRE.FindStringSubmatch(text)
+	if m == nil {
+		return ""
+	}
+	addr := strings.Trim(m[1], "().,;:<>\"'")
+	if !strings.Contains(addr, "@") {
+		return ""
+	}
+	return addr
+}
+
+// ampAccountKey is the account key for that address, or "" without one (or
+// without a room to key it in).
+func ampAccountKey(text string) string {
+	if addr := ampAddress(text); addr != "" {
+		return accountKey("amp", addr)
+	}
+	return ""
+}
+
+// The Tier row's clauses (ampTierRE): the agent pool, the orb pool, and when
+// both renew. They land on the same keys the percentage-shaped row used, so a
+// machine's card and history carry straight across the change of shape.
+func ampTier(p *Provider, name, rest string, t float64) {
+	// The billing period is the steadier answer to "when": the countdown is
+	// rounded to whole days and moves with every refresh, the period's end
+	// does not. Day precision either way, read as UTC midnight as CodexBar
+	// reads it. A period already over is not the current one, and only a real
+	// period has a length to call the window — the countdown has none.
+	var resets, window *float64
+	if start, end, ok := ampPeriod(rest); ok && end > t {
+		resets, window = fp(end), fp((end-start)/60)
+	} else if m := ampRenewalRE.FindStringSubmatch(rest); m != nil {
+		resets = ampRenewal(t, m[1], m[2])
+	}
+
+	added := false
+	// The pool's own dollars rather than the "(99%)" beside them, which is
+	// rounded: $0.21 of $20 is 1.05% used, not 1%. A $0 pool has no share to
+	// show, and inventing an empty or a full bar for it would be a reading of
+	// nothing.
+	if m := ampTierAgentRE.FindStringSubmatch(rest); m != nil {
+		remaining, ok1 := ampNum(m[1])
+		limit, ok2 := ampNum(m[2])
+		if ok1 && ok2 && limit > 0 {
+			used := limit - remaining
+			if used < 0 {
+				used = 0
+			}
+			p.Limits = append(p.Limits, Limit{
+				Key: "subscription", UsedPercent: ampUsed(remaining / limit * 100),
+				WindowLabel: sp("plan"), WindowMinutes: window, ResetsAt: resets,
+				UsedAmount: fp(round2(used)), TotalAmount: fp(round2(limit)),
+				RemainingAmount: fp(round2(remaining)), Unit: "usd",
+			})
+			added = true
+		}
+	}
+	// Hours of whatever orb size the tier counts in: the size changes what an
+	// hour buys, not the share of them left. Hours are not a unit the relay
+	// carries (clean.js QUOTA_UNITS), so this pool travels as its share alone.
+	if m := ampTierOrbRE.FindStringSubmatch(rest); m != nil {
+		remaining, ok1 := ampNum(m[1])
+		limit, ok2 := ampNum(m[2])
+		if ok1 && ok2 && limit > 0 {
+			p.Limits = append(p.Limits, Limit{
+				Key: "orb", UsedPercent: ampUsed(remaining / limit * 100),
+				WindowLabel: sp("orb"), WindowMinutes: window, ResetsAt: resets,
+			})
+			added = true
+		}
+	}
+	// A plan chip on a reading that has no pool of that plan's in it would
+	// be a label with nothing under it.
+	if name := tame(name, 32); added && name != "" {
+		p.PlanType = sp(name)
+	}
+}
+
+// The next 20:00 in America/New_York strictly after t, Unix seconds — the
+// free tier's daily reset, following the clock through daylight saving
+// (00:00Z in summer, 01:00Z in winter). Nil when the zone cannot be loaded,
+// which the tzdata import above makes a build error rather than a runtime
+// one on the platforms without a zoneinfo of their own.
+func ampNextFreeReset(t float64) *float64 {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		return nil
+	}
+	at := time.Unix(int64(math.Floor(t)), 0).In(loc)
+	next := time.Date(at.Year(), at.Month(), at.Day(), 20, 0, 0, 0, loc)
+	if !next.After(at) {
+		next = time.Date(at.Year(), at.Month(), at.Day()+1, 20, 0, 0, 0, loc)
+	}
+	return fp(float64(next.Unix()))
+}
+
+// "period 2026-09-22 to 2026-10-22" as Unix seconds, UTC midnight. A date the
+// calendar does not have ("2026-02-30") or a period that runs backwards is no
+// period at all — time.Parse refuses the first, the order check the second.
+func ampPeriod(s string) (start, end float64, ok bool) {
+	m := ampPeriodRE.FindStringSubmatch(s)
+	if m == nil {
+		return 0, 0, false
+	}
+	a, errA := time.Parse("2006-01-02", m[1])
+	b, errB := time.Parse("2006-01-02", m[2])
+	if errA != nil || errB != nil || !b.After(a) {
+		return 0, 0, false
+	}
+	return float64(a.Unix()), float64(b.Unix()), true
+}
+
+// "in 23 days" or "in 1 month", counted from t. A month is a calendar month,
+// the way a monthly plan renews, not thirty days — and a day the target month
+// does not have is its last day: Jan 31 plus a month is Feb 28, where
+// time.AddDate would roll on to Mar 3. No count, no reset.
+func ampRenewal(t float64, count, unit string) *float64 {
+	n, ok := ampNum(count)
+	if !ok || n <= 0 {
+		return nil
+	}
+	if strings.HasPrefix(strings.ToLower(unit), "month") {
+		if n > 1200 {
+			return nil
+		}
+		from := time.Unix(int64(t), 0).UTC()
+		y, mo, d := from.Date()
+		// time.Date carries a month past December into the next year.
+		first := time.Date(y, mo+time.Month(n), 1, 0, 0, 0, 0, time.UTC)
+		if last := first.AddDate(0, 1, -1).Day(); d > last {
+			d = last
+		}
+		at := time.Date(first.Year(), first.Month(), d, from.Hour(), from.Minute(), from.Second(), 0, time.UTC)
+		return fp(t + float64(at.Unix()-from.Unix()))
+	}
+	return fp(t + n*86400)
 }

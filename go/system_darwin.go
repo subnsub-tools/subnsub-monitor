@@ -24,8 +24,8 @@ package main
 // this file reported disk and nothing else and named the rest missing, on the
 // reasoning that a fabricated number is worse than an absent one. That
 // reasoning is still right; the conclusion drawn from it was too broad.
-// Running a subprocess is not a new capability here — the Amp, Kiro, Auggie
-// and arkcli collectors have always done it — and these five are Apple's, on
+// Running a subprocess is not a new capability here — the Amp and Kiro
+// collectors have always done it — and these five are Apple's, on
 // the read-only system volume, addressed by absolute path, handed a
 // four-variable environment, bounded, deadlined, and parsed by something that
 // refuses everything it does not fully recognise (see macstats.go). The bar
@@ -57,6 +57,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -123,7 +124,7 @@ func systemSnapshot() System {
 	s.miss(mSwap)
 	macLoad(&s, ctl)
 	macUptime(&s, ctl)
-	statfsRoot(&s)
+	statfsRoot(&s, "/")
 	macMounts(&s)
 	// Disk THROUGHPUT is a different matter from disk capacity, and macOS has
 	// no cgo-free counter for it: the figure lives behind IOKit, and the one
@@ -133,6 +134,7 @@ func systemSnapshot() System {
 	s.miss(mDiskIO)
 	macNet(&s, net, netAt)
 	macProcs(&s, pids)
+	fillTemps(&s, macTempsRefreshSec, macTempsChild)
 
 	// "ok" means the collector ran and produced at least one measurement — not
 	// that everything worked. Matches Linux: a machine where one tool is
@@ -239,6 +241,17 @@ func runMacTool(bin string, args []string, deadline time.Duration, tolerateExit 
 		}
 	}
 	return stdout.String()
+}
+
+// The sensors, read by this same binary run as `temps` — mactemps.go says why
+// it is a child. A child that fails in any way is no readings, and the
+// snapshot goes out without them.
+func macTempsChild() []Temp {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil
+	}
+	return parseTempRows(runMacTool(exe, []string{"temps"}, 5*time.Second, false))
 }
 
 func macCPU(s *System, out string) {

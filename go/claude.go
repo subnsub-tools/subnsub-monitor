@@ -38,6 +38,11 @@ import (
 
 const claudeUsageURL = "https://api.anthropic.com/api/oauth/usage"
 
+// Where Claude Code keeps the credential document on macOS: a generic
+// password in the login keychain, under this service name. The file below is
+// written there only when the keychain is unavailable (keychain_darwin.go).
+const claudeKeychainService = "Claude Code-credentials"
+
 // How often the usage endpoint may actually be called.
 //
 // Codex costs nothing to read — it is a local file, and the push loop can run
@@ -50,18 +55,27 @@ const claudeUsageURL = "https://api.anthropic.com/api/oauth/usage"
 // Between calls the last answer is served as-is. That is not a lie about
 // freshness — recorded_at carries the time the numbers were actually fetched,
 // and the page renders the age from it, so a cached reading visibly ages.
+//
+// 2026-09-12: the two-minute floor became the retry floor. A real call is
+// made when a refresh is pressed on the page, or on pace.go's ten-minute
+// floor on a machine set to refresh on its own while its dashboard is open
+// (2026-09-28: a per-machine setting, manual unless chosen); between those
+// the last answer is served whatever its age.
 const (
-	claudeMinInterval = 120.0 // seconds between real calls
+	claudeMinInterval = 120.0 // seconds between attempts
 	claudeBackoffBase = 60.0  // first pause after a 429, doubling
 	claudeBackoffMax  = 1800.0
 )
 
 var claudeCache struct {
 	sync.Mutex
-	last      *Provider // last successful reading, served while cooling down
-	fetchedAt float64
-	coolUntil float64
-	strikes   float64
+	last        *Provider // last successful reading, served while cooling down
+	fetchedAt   float64
+	fail        *Provider // last refusal, served while the retry floor holds
+	attemptedAt float64
+	coolUntil   float64
+	strikes     float64
+	pace        paceMark
 }
 
 // Window kinds the usage endpoint reports, and the label each carries. The API
@@ -108,7 +122,12 @@ func readClaudeAuth() (claudeAuth, bool) {
 	}
 	raw, err := os.ReadFile(filepath.Join(home, ".claude", ".credentials.json"))
 	if err != nil {
-		return claudeAuth{}, false
+		// macOS: the same document, in the keychain (the table names the
+		// same item for the local rung, local.go).
+		var ok bool
+		if raw, ok = readKeychain(claudeKeychainService); !ok {
+			return claudeAuth{}, false
+		}
 	}
 	// Decode only the subtree we want. The MCP nodes never become values in
 	// this program.
@@ -156,31 +175,51 @@ type claudeLimit struct {
 func collectClaude() Provider {
 	claudeCache.Lock()
 	defer claudeCache.Unlock()
+	claudeCache.pace.id = "claude"
 
 	t := now()
 	// Serve the cached reading rather than call again, whether we're merely
 	// inside the polling interval or actively being told to back off. Handing
 	// back a stale-but-real answer beats replacing a good number with an
 	// error nobody can act on.
-	if claudeCache.last != nil && (t < claudeCache.coolUntil || t-claudeCache.fetchedAt < claudeMinInterval) {
-		cached := *claudeCache.last
-		cached.CapturedAt = t // when we looked; RecordedAt still says when it was fetched
-		return cached
-	}
 	if t < claudeCache.coolUntil {
+		// A press during the backoff is consumed, not banked (pace.go).
+		claudeCache.pace.consume()
+		if claudeCache.last != nil {
+			cached := *claudeCache.last
+			cached.CapturedAt = t // when we looked; RecordedAt still says when it was fetched
+			return cached
+		}
 		// Cooling down with nothing cached to fall back on.
 		cooling := Provider{ID: "claude", Name: "Claude Code", Source: "api", CapturedAt: t}
 		cooling.failWith("rate-limited", "rate-hold")
 		return cooling
 	}
+	// Not due — no press, and not watched or the floor holds (pace.go): the last
+	// success stands whatever its age, else the last refusal. A cache with
+	// nothing at all asks anyway, so a tile is never blank for want of one
+	// call.
+	if !claudeCache.pace.due(t, claudeCache.fetchedAt, claudeCache.attemptedAt, claudeMinInterval, claudeCache.last != nil) &&
+		(claudeCache.last != nil || claudeCache.fail != nil) {
+		held := claudeCache.fail
+		if claudeCache.last != nil && (claudeCache.fail == nil || t-claudeCache.fetchedAt < provStaleMax) {
+			held = claudeCache.last
+		}
+		cached := *held
+		cached.CapturedAt = t
+		return cached
+	}
 
+	claudeCache.attemptedAt = t
 	p := fetchClaude()
 	if p.OK {
 		claudeCache.last = &p
 		claudeCache.fetchedAt = t
+		claudeCache.fail = nil
 		claudeCache.strikes = 0
 		return p
 	}
+	claudeCache.fail = &p
 	if p.Error == "rate-limited" {
 		// Exponential, so a service that is genuinely unhappy is left alone
 		// rather than poked every two minutes.

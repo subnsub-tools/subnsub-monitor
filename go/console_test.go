@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -175,31 +174,37 @@ func TestConsoleWaitClampsWhateverTheRelaySays(t *testing.T) {
 	}
 }
 
-func TestDiagnosticsHasAnIndependentFailClosedSwitch(t *testing.T) {
+// A shell line rides the tunnel alone (user 2026-10-06): the mailbox refuses
+// one whatever it is signed with — "sh", and the bare line an older relay
+// sends with no kind at all — and still passes every closed kind on to
+// runCommand, which judges those (and refuses one it does not know) as before.
+func TestMailboxRefusesShellLines(t *testing.T) {
+	for _, kind := range []string{"", "sh"} {
+		if got := mailboxRefusal(consoleCmd{ID: "c1", Kind: kind, Cmd: "uptime"}); got != "tunnel-only" {
+			t.Fatalf("kind %q: mailbox took a shell line (%q)", kind, got)
+		}
+		if got := mailboxRefusal(consoleCmd{ID: "c2", Kind: kind, Cmd: "uptime", Sig: "x", IssuedAt: 1}); got != "tunnel-only" {
+			t.Fatalf("kind %q: a signature let a shell line through the mailbox (%q)", kind, got)
+		}
+	}
+	for _, kind := range []string{"update", "refresh", "rename", "allow", "inspect", "pty", "something-new"} {
+		if got := mailboxRefusal(consoleCmd{ID: "c3", Kind: kind}); got != "" {
+			t.Fatalf("kind %q refused by the mailbox gate (%q); runCommand is its judge", kind, got)
+		}
+	}
+}
+
+// Diagnostics follow the probe alone (2026-10-13): no marker file, no
+// environment variable, and never a reason for the console to be on.
+func TestDiagnosticsFollowTheProbeAndImplyNoConsole(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv(consoleEnvVar, "")
-	t.Setenv(diagnosticsEnvVar, "")
-	if !diagnosticsAvailable() {
-		t.Skip("the first diagnostics target is Linux-only")
-	}
-	if diagnosticsEnabled() {
-		t.Fatal("diagnostics on with no file and no env")
-	}
-	if err := setDiagnostics(true); err != nil {
-		t.Fatalf("setDiagnostics(true): %v", err)
-	}
-	if !diagnosticsEnabled() {
-		t.Fatal("diagnostics still off after opt-in")
-	}
-	if st, err := os.Stat(diagnosticsFile()); err != nil || st.Mode().Perm() != 0o600 {
-		t.Fatalf("diagnostics marker mode = %v, err=%v; want 0600", st, err)
+	t.Setenv("MON_DIAGNOSTICS", "0")
+	if diagnosticsEnabled() != diagnosticsAvailable() {
+		t.Fatalf("diagnosticsEnabled = %v, available = %v", diagnosticsEnabled(), diagnosticsAvailable())
 	}
 	if consoleEnabled() {
-		t.Fatal("diagnostics opt-in also enabled the shell console")
-	}
-	t.Setenv(diagnosticsEnvVar, "0")
-	if diagnosticsEnabled() {
-		t.Fatal("MON_DIAGNOSTICS=0 was overruled by the marker")
+		t.Fatal("diagnostics being on enabled the shell console")
 	}
 }
 

@@ -3,9 +3,11 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 func itoa(n int) string { return strconv.Itoa(n) }
@@ -76,6 +78,33 @@ func dumpIndent(v any) []byte {
 }
 
 func warnf(format string, a ...any) { fmt.Fprintf(stderr, format+"\n", a...) }
+
+// A setting the installer may have written to the private token file, with
+// the process environment taking precedence — the same lookup the CLI Proxy
+// API and the machine label use.
+func envSetting(key string, file map[string]string) string {
+	if v, ok := os.LookupEnv(key); ok {
+		return v
+	}
+	return file[key]
+}
+
+// cleanText is the rule for any free text that will be shown on the
+// dashboard: no control characters, no bidi overrides, cut at `max` BYTES on
+// a rune boundary. Mirrors clean.js's displayText; the relay applies it again.
+func cleanText(s string, max int) string {
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(s) {
+		if unicode.IsControl(r) || (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) {
+			continue
+		}
+		if b.Len()+len(string(r)) > max {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
 
 // A dollar amount for a balance string: two decimals when they carry
 // information, none when they are zeros — "$8.71" and "$5", never "$5.00".

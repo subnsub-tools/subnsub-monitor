@@ -137,3 +137,38 @@ func TestHintDormantOnlyOnTheColdHintingCase(t *testing.T) {
 		t.Fatal("a relay that sent no next is not saying cold")
 	}
 }
+
+// The outage record's acknowledgement rides the push response; a body
+// without it is a relay that keeps no such record.
+func TestHintOutagesUntilAcks(t *testing.T) {
+	outagePush.Lock()
+	outagePush.ack, outagePush.sent = 0, 7
+	outagePush.Unlock()
+	t.Cleanup(func() {
+		outagePush.Lock()
+		outagePush.ack, outagePush.sent = 0, 0
+		outagePush.Unlock()
+	})
+	var b *hintBox
+	b.absorb([]byte(`{"poll":false,"outages_until":1800000300}`))
+	outagePush.Lock()
+	got := outagePush.ack
+	outagePush.Unlock()
+	if got != 1_800_000_300 {
+		t.Fatalf("ack = %d, want the relay's figure", got)
+	}
+	b.absorb([]byte(`{"poll":false}`))
+	outagePush.Lock()
+	got = outagePush.ack
+	outagePush.Unlock()
+	if got != 1_800_000_300 {
+		t.Fatalf("ack after a body without the field = %d, want it kept (sent was lower)", got)
+	}
+	b.absorb([]byte(`not json`))
+	outagePush.Lock()
+	got = outagePush.ack
+	outagePush.Unlock()
+	if got != 1_800_000_300 {
+		t.Fatalf("ack after a non-protocol body = %d, want it untouched", got)
+	}
+}

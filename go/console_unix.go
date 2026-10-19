@@ -15,6 +15,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"syscall"
 )
@@ -23,11 +24,31 @@ import (
 // than a PATH lookup, because what runs here is decided by this file and not by
 // the environment the service manager happened to hand us.
 func consoleCommand(ctx context.Context, line string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", line)
+	cmd := exec.CommandContext(ctx, consoleShell(), "-c", line)
 	// Own process group, so the deadline can take the whole tree down rather
 	// than the shell only.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	return cmd
+}
+
+// Which shell: from a fixed list, never from PATH. /bin/sh on every Unix this
+// is published for. Android has no /bin of its own — the Termux shell lives
+// under Termux's prefix, and the system's (toybox) under /system/bin — and a
+// Termux user typing at the dashboard expects Termux's, so that one is asked
+// first where it exists. The static binary sees none of Termux's LD_PRELOAD
+// path rewriting, so the choice has to be made here.
+func consoleShell() string {
+	candidates := make([]string, 0, 3)
+	if p := androidPrefix(); p != "" {
+		candidates = append(candidates, p+"/bin/sh")
+	}
+	candidates = append(candidates, "/bin/sh", "/system/bin/sh")
+	for _, c := range candidates {
+		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
+			return c
+		}
+	}
+	return "/bin/sh"
 }
 
 // Nothing to do once it is running: Setpgid took effect at fork, and a process

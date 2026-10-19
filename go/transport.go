@@ -8,9 +8,12 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -82,10 +85,16 @@ func serve(port int) {
 		   so the deadline is refreshed per write instead. */
 		rc := http.NewResponseController(w)
 		for {
+			// Collect first, then arm the deadline: it bounds the WRITE, and
+			// a collection that runs a vendor's CLI (kiro-cli 30 s, agy 45 s)
+			// would otherwise spend the window before the first byte went out
+			// and close a healthy stream (review 2026-10-14; direct.go's
+			// stream already orders it this way).
+			body := dump(collectAll())
 			if err := rc.SetWriteDeadline(time.Now().Add(15 * time.Second)); err != nil {
 				return
 			}
-			if _, err := fmt.Fprintf(w, "data: %s\n\n", dump(collectAll())); err != nil {
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", body); err != nil {
 				return // client went away or stopped reading
 			}
 			if err := rc.Flush(); err != nil {
@@ -124,13 +133,35 @@ func cors(w http.ResponseWriter, origin string) {
 	}
 }
 
-// Bounds on the push interval. The ceiling is the relay's own offline
-// threshold minus a margin: push slower and a healthy helper reads as silent
-// between pushes. Zero would make every sleep — including the backoff — a
-// no-op and turn the retry loop into a hot loop against the relay.
+// The push interval is FIXED at 30 s and is not a setting (operator ruling 2026-10-11:
+// the reporting interval is not to be changed — a helper that pushed faster would run up the
+// relay's bill, which is ours; the direct road's knobs are the machine
+// owner's, the relay's cadence is the relay's). `connect` takes no interval
+// any more, no environment variable reads one, and the relay enforces the
+// same floor on its side (index.js MIN_PUSH_GAP: a push inside 25 s of the
+// last accepted one is answered 429 with Retry-After, and the loop below
+// sleeps exactly that), so a rebuilt helper gains nothing by trying.
+//
+// It was 10 s for one release (2026.10.11.3, the same day): the relay's
+// presence record dates a stop by the last push before it, so the cadence
+// is the record's precision — but every push is a billed request and a
+// storage row at the relay, and three times the pushes was three times the
+// bill for a record ten seconds sharper (operator ruling 2026-10-11:
+// consolidate everything into one push every 30 seconds). Everything else the helper says to the relay already rides
+// this push or its answer: the console polls only when the answer says the
+// mailbox has something (hint.go), sessions sync sends nothing when nothing
+// is new, and the version check is hourly.
+//
+// minInterval / maxInterval still bound `watch`, the local printer, which
+// talks to nobody.
 const (
-	minInterval = 5.0
-	maxInterval = 60.0
+	defaultInterval = 30.0
+	minInterval     = 5.0
+	maxInterval     = 60.0
+	// The least time between two SENDS, whatever the period arithmetic says:
+	// just under the period less its jitter, and over the relay's 25 s floor
+	// with the network's variance to spare.
+	minSendGap = 28 * time.Second
 	// A dual-stack machine ordinarily lets Go choose between A and AAAA. That
 	// is the right default for generic HTTP, but this particular connection is
 	// also how the relay observes the machine's egress address. Give IPv4 a
@@ -143,7 +174,9 @@ const (
 // Wrap a dial function with the relay's address-family preference. Kept at
 // the dial boundary — rather than asking a third-party "what is my IP" service
 // and putting its answer in the payload — so the address remains an observation
-// made by the relay, not a claim made by the helper.
+// made by the relay, not a claim made by the helper. (The machine's IPv4 is the
+// one exception, reported beside it as public_ipv4 for when this preference
+// cannot work: see ipv4.go.)
 func ipv4FirstDialContext(
 	dial func(context.Context, string, string) (net.Conn, error),
 	timeout time.Duration,
@@ -184,16 +217,18 @@ func relayTransport() *http.Transport {
 // you cannot reach — behind NAT, behind a cloud firewall, on a laptop that
 // moves. Nothing here listens; it only makes outbound HTTPS, which is the one
 // thing that works everywhere.
-func connect(base, token string, every float64) {
-	every = clampInterval(every)
+func connect(base, token string) {
+	every := defaultInterval
 	url := strings.TrimRight(base, "/") + "/push"
 	// The token is not fixed for the life of the process: it expires, and it is
 	// traded for a fresh one before it does. See renew.go for why that happens
 	// against the site rather than against the relay, and why renewal never
 	// trusts anything a relay answers. The push response — once discarded
-	// unread by everyone — is now read on machines that take instructions,
-	// under the rule and the bound in hint.go; a monitoring-only machine
-	// still closes it unread.
+	// unread by everyone — is now read on every machine, under the rule and
+	// the bound in hint.go: two bits, whether to poll for work (acted on
+	// only where an instruction switch is on) and whether this machine is
+	// watched and set to refresh its quota on its own (pace.go, every
+	// machine).
 	renew := newRenewer(base)
 	// The console runs beside this loop, not inside it: a held poll must never
 	// delay a reading, and a command that takes 30 seconds must not make the
@@ -201,15 +236,42 @@ func connect(base, token string, every float64) {
 	// rather than a copy, because renewal rotates that string underneath it.
 	tok := &tokenBox{}
 	tok.set(token)
+	// The account keys on every reading are HMACs under this token's account
+	// part (accountkey.go) — seeded once, because a renewal keeps that part.
+	setAccountRoom(token)
 	// The channel back: each push response may say whether /commands has
 	// anything, and the console loop stretches its idle timer when the relay
 	// has taken over the pacing. Written by this loop, read by that one.
 	hints := newHintBox()
 	go consoleLoop(base, tok, hints)
+	// And the archive, on its own clock for the same reason: a backfill that
+	// takes ten minutes must not delay a single reading, and a relay that is
+	// refusing chunks must not be able to make this machine look silent. It
+	// checks its own switch on every pass and does nothing at all while that
+	// switch is off, which is every install until an operator says otherwise.
+	go syncLoop(base, tok)
+	// And the update timer, which does nothing at all until an operator has
+	// turned on both remote updates and autoupdate at the machine
+	// (update.go), and re-reads both switches on every pass.
+	startAutoUpdate()
+	// And the direct tunnel, when this machine's operator switched it on:
+	// independent of the push in every way — its own clock, its own peers,
+	// its own switch — so a tunnel that misbehaves can cost nothing but its
+	// own watchers. It is also the console's only road (console.go): commands
+	// ride it from a pinned browser, never the relay's mailbox.
+	// MON_TRANSPORT=relay keeps it down for a run without touching the switch
+	// (see direct.go), and with it the console.
+	if directEnabled() {
+		ensureDirect()
+	}
 	// Started before the first collection, so no push ever measures the system
 	// for itself — the first one to do that would take the baseline every
 	// subsequent sample's delta is measured against (see sampler.go).
 	startSysSampler()
+	startProbes()
+	startCustom()
+	startSpaces(base, tok)
+	startIPv4()
 	client := &http.Client{
 		Timeout:   15 * time.Second,
 		Transport: relayTransport(),
@@ -224,8 +286,23 @@ func connect(base, token string, every float64) {
 		},
 	}
 	fails := 0
+	// When the previous push was SENT. The period is measured from the start
+	// of a round (below), which keeps the cadence at `every` whatever the
+	// collection costs — but it also means two sends can land closer than
+	// `every` when one round's collection was slow and the next's was
+	// instant (review 2026-10-11: 10 s of collecting, then a cached round,
+	// is a 20 s gap on the wire). The relay's floor (25 s) judges arrivals,
+	// so sends keep a floor of their own, just under the period.
+	var lastSent time.Time
 
 	for {
+		// The period is measured from HERE, so collecting and sending are
+		// inside it rather than added to it: a sleep of `every` after a push
+		// that took eight seconds to collect made the real cadence `every`
+		// plus eight, and the relay's offline line (90 s) and the presence
+		// threshold (100 s) are set against the cadence, not the sleep
+		// (review 2026-10-11).
+		started := time.Now()
 		// Before the push, not after: a token that expires between two pushes
 		// would otherwise cost a failed report and a card that goes silent for
 		// an interval, for a renewal that was already due.
@@ -234,7 +311,14 @@ func connect(base, token string, every float64) {
 			tok.set(token)
 		}
 
-		req, err := http.NewRequest("POST", url, bytes.NewReader(dump(collectAll())))
+		body := dump(pushBody())
+		if !lastSent.IsZero() {
+			if gap := minSendGap - time.Since(lastSent); gap > 0 {
+				time.Sleep(gap)
+			}
+		}
+		lastSent = time.Now()
+		req, err := http.NewRequest("POST", url, bytes.NewReader(body))
 		if err != nil {
 			warnf("cannot build request")
 			return
@@ -246,6 +330,11 @@ func connect(base, token string, every float64) {
 		req.Header.Set("User-Agent", "subnsub-monitor")
 
 		wait := every
+		// A wait the relay dictated (Retry-After) counts from the response,
+		// not from the start of the round: the subtraction below is for the
+		// period, and taking this round's collection off a relay's number
+		// would land the retry inside the same floor (review 2026-10-11).
+		fixedWait := false
 		resp, err := client.Do(req)
 		switch {
 		case err != nil:
@@ -273,17 +362,44 @@ func connect(base, token string, every float64) {
 			// so the pair that collided once collides on every subsequent
 			// round, forever. A short RANDOM wait is what breaks the lock:
 			// after it, the two are no longer in step.
+			// The relay may say how long: its per-machine floor answers with
+			// the seconds left until the next push it will accept (Retry-After),
+			// and sleeping exactly that costs one request instead of a retry
+			// every few seconds until the floor passes. Bounded, because the
+			// header is the relay's word and the push loop is the machine's
+			// heartbeat: never longer than the offline line.
+			retryAfter := 0.0
+			if v, err := strconv.ParseFloat(strings.TrimSpace(resp.Header.Get("Retry-After")), 64); err == nil && v > 0 && v <= 60 {
+				retryAfter = v
+			}
 			resp.Body.Close()
 			warnf("relay is pacing us; retrying shortly")
 			hints.wakeNow() // a paced push carried no hint either
-			wait = 2 + 3*jitter()
+			if retryAfter > 0 {
+				wait = retryAfter + jitter()
+				fixedWait = true
+			} else {
+				wait = 2 + 3*jitter()
+			}
 		default:
 			// 4xx means this client is wrong (bad token, room not enabled) and
 			// retrying at speed won't fix it. Back off rather than hammer.
 			code := resp.StatusCode
-			resp.Body.Close()
+			// 409 is the relay saying the ROOM is full of machines that are all
+			// still reporting — nothing wrong with this client or its token, and
+			// the operator's fix is on the dashboard (forget one) or in the
+			// plan. The body says so in words; a bounded slice of it goes to
+			// the log, because "push rejected: 409" alone sends somebody
+			// reading it to the token first.
+			if code == 409 {
+				b, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
+				resp.Body.Close()
+				warnf("push rejected: %d (%s)", code, strings.Map(printableASCII, strings.TrimSpace(string(b))))
+			} else {
+				resp.Body.Close()
+				warnf("push rejected: %d", code)
+			}
 			fails++
-			warnf("push rejected: %d", code)
 			hints.wakeNow() // rejected pushes carry no hint; see the err case
 			// 401/403 is the relay saying this token is not (or is no longer)
 			// one it will take — the other moment worth asking the site for a
@@ -303,7 +419,34 @@ func connect(base, token string, every float64) {
 		if wait == every {
 			wait = every * (0.95 + 0.1*jitter())
 		}
-		time.Sleep(time.Duration(wait * float64(time.Second)))
+		// Less what this round already spent; never to zero (the relay's
+		// per-machine gap is 2 s, and a hot loop is the one thing the sleep
+		// must never become).
+		if spent := time.Since(started).Seconds(); spent > 0 && !fixedWait {
+			wait -= spent
+		}
+		if wait < 1 {
+			wait = 1
+		}
+		// A refresh pressed on the page ends this sleep early (pushWake), so
+		// the figures it asked for ride the next push now rather than up to
+		// a minute later. One token, and only a sleep listens: a wake that
+		// lands mid-push is banked and ends the following sleep at once.
+		select {
+		case <-pushWake:
+		case <-time.After(time.Duration(wait * float64(time.Second))):
+		}
+	}
+}
+
+// pushWake ends the push loop's current sleep. Holds one token; see the
+// select above.
+var pushWake = make(chan struct{}, 1)
+
+func wakePush() {
+	select {
+	case pushWake <- struct{}{}:
+	default:
 	}
 }
 
@@ -329,7 +472,7 @@ func jitter() float64 {
 // falls back to the default.
 func clampInterval(v float64) float64 {
 	if math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 {
-		return 30
+		return defaultInterval
 	}
 	if v < minInterval {
 		return minInterval
@@ -338,4 +481,98 @@ func clampInterval(v float64) float64 {
 		return maxInterval
 	}
 	return v
+}
+
+// printableASCII keeps a relay's error body fit for a log line: one line, no
+// control characters, nothing that a terminal would interpret. Anything else
+// is dropped rather than escaped — the words are what matter.
+func printableASCII(r rune) rune {
+	if r >= 0x20 && r <= 0x7e {
+		return r
+	}
+	return -1
+}
+
+// Beacon is what the relay push shrinks to once this machine's tunnel is up
+// (user 2026-09-01: a machine on the direct road must not hold a relay seat).
+// Enough for a dashboard to find the road — the address — and to know what
+// the machine will do and whether it takes a signed enrolment; no reading, no
+// history, a few hundred bytes. The relay files it outside the room's seats.
+type Beacon struct {
+	Beacon        bool    `json:"beacon"`
+	CapturedAt    float64 `json:"captured_at"`
+	AgentID       string  `json:"agent_id,omitempty"`
+	AgentLabel    string  `json:"agent_name,omitempty"`
+	Rename        bool    `json:"rename"`
+	HelperVersion string  `json:"helper_version,omitempty"`
+	DirectAddr    string  `json:"direct_addr"`
+	// The console's spare-road key (econ.go): carried here too, so a machine
+	// whose own tunnel is up but whose WATCHER cannot reach it can still use
+	// the sealed relay road (amp review 2026-10-10, finding 6).
+	Econ        string `json:"econ,omitempty"`
+	Console     bool   `json:"exec"`
+	Update      bool   `json:"upd"`
+	AutoUpdate  bool   `json:"auto"`
+	Diagnostics bool   `json:"diag"`
+	Signed      bool   `json:"sgn"`
+	// Whether a pinned browser may press this machine's tiles (tileaction.go).
+	Act bool `json:"act"`
+	// Whether this machine takes the `myip` command (myip.go).
+	MyIP bool `json:"myip"`
+	// The other namespaces' exits ride the beacon too (spaces.go): on the
+	// direct road the beacon is the only thing of this machine's the relay
+	// sees, and the relay is what turns a stamp into an address.
+	Spaces []Space `json:"spaces,omitempty"`
+	// And the last rebuild (types.go Wiped): the relay's record of a wiped
+	// machine must not depend on which road it came back on.
+	Wiped []int64 `json:"wiped,omitempty"`
+	// And the record's unacknowledged rows (types.go Outages): on the
+	// direct road the relay is still the record's one durable home.
+	Outages      []outageRow `json:"outages,omitempty"`
+	OutagesSince int64       `json:"outages_since,omitempty"`
+	// And the archive's newest closed five-minute buckets, without process
+	// names (history.go historyCoarseClosed): the relay files them, so a
+	// browser that cannot reach the tunnel still has a trend to draw.
+	Hist []histRow `json:"hist,omitempty"`
+	// And the machine's own IPv4 (ipv4.go), for the card the beacon makes
+	// before the tunnel connects.
+	PublicIPv4 string      `json:"public_ipv4,omitempty"`
+	PublicCC   string      `json:"public_cc,omitempty"`
+	UpdateNext int64       `json:"update_next,omitempty"`
+	UpdateLast *updateLast `json:"update_last,omitempty"`
+}
+
+// beaconHistRows: how many closed five-minute buckets ride each beacon.
+const beaconHistRows = 2
+
+// beaconMode: whether a machine with its tunnel up sends the relay a beacon
+// instead of the reading. On by default; MON_BEACON=off keeps the full push
+// for a fleet that wants the relay's history too.
+func beaconMode() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("MON_BEACON"))) {
+	case "0", "off", "false", "no":
+		return false
+	}
+	return true
+}
+
+// pushBody is one relay push: the whole reading while the machine has no
+// tunnel, the beacon once it does. The reading is collected either way — the
+// collection is what records history and feeds the sampler.
+func pushBody() any {
+	snap := collectAll()
+	// What this push carries of the outage record, for the answer that
+	// acknowledges it (outages.go outageAcked).
+	outageSent(snap.Outages)
+	if addr := directAddress(); addr != "" && beaconMode() {
+		return Beacon{Beacon: true, CapturedAt: snap.CapturedAt, AgentID: snap.AgentID,
+			AgentLabel: snap.AgentLabel, HelperVersion: helperVersion, DirectAddr: addr,
+			Rename: snap.Rename, Econ: snap.Econ,
+			Console: snap.Console, Update: snap.Update, AutoUpdate: snap.AutoUpdate, Diagnostics: snap.Diagnostics, Signed: snap.Signed, Act: snap.Act, MyIP: snap.MyIP,
+			Spaces: snap.Spaces, Wiped: snap.Wiped, Outages: snap.Outages, OutagesSince: snap.OutagesSince,
+			Hist:       historyCoarseClosed(beaconHistRows),
+			PublicIPv4: snap.PublicIPv4, PublicCC: snap.PublicCC,
+			UpdateNext: snap.UpdateNext, UpdateLast: snap.UpdateLast}
+	}
+	return snap
 }

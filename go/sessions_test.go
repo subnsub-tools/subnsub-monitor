@@ -29,12 +29,8 @@ func sessTestWorld(t *testing.T) (claude, codex string, sources []sessSource) {
 		}
 	}
 	sources = []sessSource{
-		{agent: "claude", root: claude,
-			match: func(n string) bool { return strings.HasSuffix(n, ".jsonl") }},
-		{agent: "codex", root: codex,
-			match: func(n string) bool {
-				return strings.HasPrefix(n, "rollout-") && strings.HasSuffix(n, ".jsonl")
-			}},
+		{agent: "claude", root: claude, match: sessClaudeMatch},
+		{agent: "codex", root: codex, match: sessCodexMatch},
 	}
 	return claude, codex, sources
 }
@@ -145,13 +141,13 @@ func TestSessionsSearchAllTermsMustShareOneMessage(t *testing.T) {
 func TestSessionsSearchFoldAndCJK(t *testing.T) {
 	claude, _, sources := sessTestWorld(t)
 	sessWrite(t, filepath.Join(claude, "p", "a.jsonl"), time.Now(),
-		claudeLine("2026-08-17T10:00:00Z", "/p", "Deploy THE Relay 部署中继完成"))
-	for _, q := range [][]string{{"deploy"}, {"RELAY"}, {"部署中继"}} {
+		claudeLine("2026-08-17T10:00:00Z", "/p", "Deploy THE Relay \u90e8\u7f72\u4e2d\u7ee7\u5b8c\u6210"))
+	for _, q := range [][]string{{"deploy"}, {"RELAY"}, {"\u90e8\u7f72\u4e2d\u7ee7"}} {
 		if rep := sessionsSearch(sources, sessAsk(q...)); len(rep.Matches) != 1 {
 			t.Fatalf("query %v should hit once", q)
 		}
 	}
-	if rep := sessionsSearch(sources, sessAsk("部署完成")); len(rep.Matches) != 0 {
+	if rep := sessionsSearch(sources, sessAsk("\u90e8\u7f72\u5b8c\u6210")); len(rep.Matches) != 0 {
 		t.Fatal("non-adjacent CJK must not match as one term")
 	}
 }
@@ -374,8 +370,8 @@ func TestSessContainsFold(t *testing.T) {
 		{"hell", "hello", false},
 		{"", "", true},
 		{"abc", "", true},
-		{"部署完成", "部署", true},
-		{"部署完成", "完成了", false},
+		{"\u90e8\u7f72\u5b8c\u6210", "\u90e8\u7f72", true},
+		{"\u90e8\u7f72\u5b8c\u6210", "\u5b8c\u6210\u4e86", false},
 		{"Ärger", "ärger", false}, // ASCII fold only, by design
 		{"xxAbCxx", "abc", true},
 	}
@@ -407,8 +403,8 @@ func TestSessSnippet(t *testing.T) {
 	if short := sessSnippet("just this", "just"); short != "just this" {
 		t.Fatalf("a short text is itself: %q", short)
 	}
-	cjk := sessSnippet(strings.Repeat("多字节字符", 200)+"目标词条", "目标词条")
-	if !strings.Contains(cjk, "目标词条") || !utf8ValidString(cjk) {
+	cjk := sessSnippet(strings.Repeat("\u591a\u5b57\u8282\u5b57\u7b26", 200)+"\u76ee\u6807\u8bcd\u6761", "\u76ee\u6807\u8bcd\u6761")
+	if !strings.Contains(cjk, "\u76ee\u6807\u8bcd\u6761") || !utf8ValidString(cjk) {
 		t.Fatalf("CJK snippet broken: %q", cjk)
 	}
 }
@@ -429,7 +425,7 @@ func TestSessIDFromName(t *testing.T) {
 		"p/notes.jsonl": "notes",
 	}
 	for in, want := range cases {
-		if got := sessIDFromName(in); got != want {
+		if got := sessIDFromName(sessSource{}, in); got != want {
 			t.Errorf("sessIDFromName(%q) = %q, want %q", in, got, want)
 		}
 	}
@@ -516,7 +512,7 @@ func TestSessEncodeCapped(t *testing.T) {
 			Project: "project", Agent: "claude",
 			Timestamp: "2026-08-17T10:00:00Z",
 			SessionID: "11111111-2222-3333-4444-555555555555",
-			Snippet:   strings.Repeat("多", sessSnippetRunes),
+			Snippet:   strings.Repeat("\u591a", sessSnippetRunes),
 		})
 	}
 	out, err := sessEncodeCapped(&rep)

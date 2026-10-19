@@ -1,0 +1,13 @@
+{
+  "name": "systemd",
+  "tiles": [
+    {
+      "id": "systemd_failed",
+      "name": "Failed units",
+      "type": "status",
+      "icon": "gear",
+      "exec": "raw=$(systemctl --failed --no-legend --plain) || exit 1\nunits=$(printf '%s\\n' \"$raw\" | awk 'NF{print $1}')\nn=$(printf '%s\\n' \"$units\" | grep -c .)\nif [ \"$n\" -gt 0 ]; then echo \"bad $n failed · $(printf '%s' \"$units\" | head -n 2 | tr '\\n' ' ')\"; else echo \"ok none failed\"; fi",
+      "interval": 120
+    }
+  ]
+}

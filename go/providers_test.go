@@ -6,22 +6,7 @@ package main
 // implementation, which this protocol was worked out from; what OUR code does
 // with a payload is the part a refactor can silently break.
 
-import (
-	"os"
-	"path/filepath"
-	"testing"
-)
-
-func writeTestEnvFile(t *testing.T, home, content string) {
-	t.Helper()
-	dir := filepath.Join(home, ".factory")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
+import "testing"
 
 // ── Copilot ───────────────────────────────────────────────────────────────
 
@@ -70,68 +55,6 @@ func TestCopilotAmountsKeepTheAbsolutePair(t *testing.T) {
 	}
 	if u, n, r := copilotAmounts(&copilotSnapshot{Entitlement: 0.0, Remaining: 0.0}); u != nil || n != nil || r != nil {
 		t.Fatalf("placeholder must carry no amounts, got %v / %v / %v", u, n, r)
-	}
-}
-
-// ── Droid (Factory) ───────────────────────────────────────────────────────
-
-func TestFactoryResetDisambiguatesUnits(t *testing.T) {
-	t0 := 1_754_000_000.0
-	// secondsRemaining wins over windowEnd.
-	w := &factoryWindow{SecondsRemaining: 120.0, WindowEnd: 9_999_999_999_999.0}
-	if r := factoryReset(w, t0); r == nil || *r != t0+120 {
-		t.Fatalf("secondsRemaining: got %v", r)
-	}
-	// Epoch milliseconds are folded to seconds.
-	w = &factoryWindow{WindowEnd: (t0 + 300) * 1000}
-	if r := factoryReset(w, t0); r == nil || *r != t0+300 {
-		t.Fatalf("ms windowEnd: got %v", r)
-	}
-	// ISO-8601 string.
-	w = &factoryWindow{WindowEnd: "2100-01-01T00:00:00Z"}
-	if r := factoryReset(w, t0); r == nil {
-		t.Fatal("iso windowEnd: got nil")
-	}
-	// A window already over yields no reset.
-	w = &factoryWindow{WindowEnd: t0 - 10}
-	if r := factoryReset(w, t0); r != nil {
-		t.Fatalf("past windowEnd: got %v", *r)
-	}
-}
-
-func TestFactoryUsedZeroesExpiredWindows(t *testing.T) {
-	t0 := 1_754_000_000.0
-	// Expired five-hour window still carrying 96%: Factory's own UI treats it
-	// as reset, and publishing the stale figure is the bug this pins.
-	w := &factoryWindow{UsedPercent: 96.0, WindowEnd: t0 - 10}
-	reset := factoryReset(w, t0)
-	if got := factoryUsed(w, reset); got == nil || *got != 0 {
-		t.Fatalf("expired window: want 0, got %v", got)
-	}
-	// Live window passes through, clamped.
-	w = &factoryWindow{UsedPercent: 104.0, SecondsRemaining: 60.0}
-	if got := factoryUsed(w, factoryReset(w, t0)); got == nil || *got != 100 {
-		t.Fatalf("live window: want 100, got %v", got)
-	}
-	// No windowEnd and no secondsRemaining at all — a fresh account shape —
-	// is NOT the expired case: the percentage stands on its own.
-	w = &factoryWindow{UsedPercent: 12.5}
-	if got := factoryUsed(w, factoryReset(w, t0)); got == nil || *got != 12.5 {
-		t.Fatalf("bare percent: want 12.5, got %v", got)
-	}
-}
-
-func TestFactoryKeyParsesDotenvShapes(t *testing.T) {
-	// The parser tolerates export, quotes and noise, and never runs a shell.
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-	t.Setenv(factoryKeyEnv, "")
-	if got := factoryKey(); got != "" {
-		t.Fatalf("no file: want empty, got %q", got)
-	}
-	writeTestEnvFile(t, dir, "# comment\nOTHER=x\nexport FACTORY_API_KEY=\"fk-abc123\"\n")
-	if got := factoryKey(); got != "fk-abc123" {
-		t.Fatalf("want fk-abc123, got %q", got)
 	}
 }
 
@@ -197,6 +120,8 @@ func TestKimiResetAcceptsEveryShapeSeen(t *testing.T) {
 // ── shared plumbing ───────────────────────────────────────────────────────
 
 func TestProvCacheFloorsOnAttemptsAndServesStale(t *testing.T) {
+	// The floors are a reader's: the daemon asks only when pressed (pace.go).
+	paceReader(t)
 	var c provCache
 	calls := 0
 	okFetch := func() Provider {
@@ -216,10 +141,11 @@ func TestProvCacheFloorsOnAttemptsAndServesStale(t *testing.T) {
 	if p = c.collect(failFetch); !p.OK || calls != 1 {
 		t.Fatalf("inside floor: want cached success and 1 call, got ok=%v calls=%d", p.OK, calls)
 	}
-	// Age the success past the floor but not past staleness: a failing fetch
-	// runs once, and the STALE SUCCESS is still what gets served.
-	c.fetchedAt -= provMinInterval + 1
-	c.attemptedAt -= provMinInterval + 1
+	// Age the success past the floor (pace.go's, since 2026-09-12) but not
+	// past staleness: a failing fetch runs once, and the STALE SUCCESS is
+	// still what gets served.
+	c.fetchedAt -= quotaFloor + 1
+	c.attemptedAt -= quotaFloor + 1
 	if p = c.collect(failFetch); !p.OK || calls != 2 {
 		t.Fatalf("stale-but-real: want cached success and 2 calls, got ok=%v calls=%d", p.OK, calls)
 	}
@@ -238,6 +164,78 @@ func TestTrimAmount(t *testing.T) {
 	}{{8.71, "8.71"}, {5, "5"}, {5.5, "5.5"}, {0.1, "0.1"}} {
 		if got := trimAmount(tc.in); got != tc.want {
 			t.Errorf("trimAmount(%v) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// A placeholder snapshot beside the month's figures: `monthly_quotas` is
+// the allowance, `limited_user_quotas` what is left, keyed completions
+// (premium) and chat (CodexBar CopilotUsageModels.monthlyQuotaFallback).
+func TestCopilotMonthlyQuotasStandInForThePlaceholder(t *testing.T) {
+	monthly := map[string]any{"completions": 300.0, "chat": 1000.0}
+	limited := map[string]any{"completions": 75.0, "chat": "900"}
+	m := copilotMonthly(monthly, limited, "premium_interactions")
+	if m == nil || m.UsedPercent != 75 || *m.UsedAmount != 225 || *m.TotalAmount != 300 || *m.RemainingAmount != 75 {
+		t.Fatalf("premium from the month: %+v", m)
+	}
+	if m := copilotMonthly(monthly, limited, "chat"); m == nil || m.UsedPercent != 10 {
+		t.Fatalf("chat from the month: %+v", m)
+	}
+	// No allowance, a remainder above it, or a key with no month: nothing.
+	if m := copilotMonthly(map[string]any{"completions": 0.0}, limited, "premium_interactions"); m != nil {
+		t.Errorf("zero allowance: %+v", m)
+	}
+	if m := copilotMonthly(monthly, map[string]any{"completions": 301.0}, "premium_interactions"); m != nil {
+		t.Errorf("remainder above the allowance: %+v", m)
+	}
+	if m := copilotMonthly(monthly, limited, "other"); m != nil {
+		t.Errorf("unknown key: %+v", m)
+	}
+	if m := copilotMonthly(nil, limited, "chat"); m != nil {
+		t.Errorf("no month: %+v", m)
+	}
+}
+
+// ── Kimi ──────────────────────────────────────────────────────────────────
+
+// The rate window's length: a {duration, timeUnit} pair (the gateway's
+// shape), a bare number (an older one), or the five-hour default.
+func TestKimiWindowMinutes(t *testing.T) {
+	cases := []struct {
+		in   any
+		want float64
+	}{
+		{map[string]any{"duration": 300.0, "timeUnit": "TIME_UNIT_MINUTE"}, 300},
+		{map[string]any{"duration": "5", "timeUnit": "TIME_UNIT_HOUR"}, 300},
+		{map[string]any{"duration": 1.0, "timeUnit": "TIME_UNIT_DAY"}, 1440},
+		{map[string]any{"duration": 7.0, "timeUnit": "TIME_UNIT_FORTNIGHT"}, 300},
+		{map[string]any{}, 300},
+		{300.0, 300},
+		{"120", 120},
+		{nil, 300},
+	}
+	for _, c := range cases {
+		if got := kimiWindowMinutes(c.in); got != c.want {
+			t.Errorf("%v: got %v want %v", c.in, got, c.want)
+		}
+	}
+}
+
+// The plan is the active subscription's goods title; an inactive one, or
+// a balance's TYPE ("SUBSCRIPTION", which a chip once showed), is not.
+func TestKimiPlanFromSubscription(t *testing.T) {
+	if got := kimiPlan([]byte(`{"subscription":{"active":true,"status":"SUBSCRIPTION_STATUS_ACTIVE","goods":{"title":"Allegro"}}}`)); got != "Allegro" {
+		t.Errorf("active: %q", got)
+	}
+	for _, body := range []string{
+		`{"subscription":{"active":false,"status":"SUBSCRIPTION_STATUS_ACTIVE","goods":{"title":"Allegro"}}}`,
+		`{"subscription":{"active":true,"status":"SUBSCRIPTION_STATUS_EXPIRED","goods":{"title":"Allegro"}}}`,
+		`{"subscription":{"active":true,"status":"SUBSCRIPTION_STATUS_ACTIVE"}}`,
+		`{"subscriptionBalance":{"type":"SUBSCRIPTION"}}`,
+		`not json`,
+	} {
+		if got := kimiPlan([]byte(body)); got != "" {
+			t.Errorf("%s: %q", body, got)
 		}
 	}
 }

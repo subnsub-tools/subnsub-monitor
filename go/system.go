@@ -4,14 +4,22 @@ package main
 //
 // THE BAR EVERY FIELD HERE HAS TO CLEAR: useful for deciding whether a machine
 // needs attention, useless for working out whose machine it is. No hostname, no
-// username, no path, no process list, no serial, no MAC, no public IP. "93% of
-// the disk is gone" is actionable; "93% of /home/alice on build-07 is gone" is
-// the same fact wearing an identity, and the relay has no business holding the
-// second one. On-demand diagnostics are the explicit exception: when separately
-// enabled they return a bounded process resource summary to the requesting
-// dashboard only, and never enter this snapshot or its history. The kernel
-// version is deliberately cut to major.minor for the
-// same reason — "6.8" tells you whether a box is ancient, "6.8.0-1050-oracle"
+// username, no serial, no MAC; mount paths folded so a home directory's name
+// never travels (foldMountPath). "93% of the disk is gone" is actionable; "93% of
+// /home/alice on build-07 is gone" is the same fact wearing an identity, and
+// the relay has no business holding the second one.
+//
+// Two lines that were once held here have since been lifted by the operator,
+// and the public threat-model page (monitor-security.html) says so in plain
+// words rather than this file pretending otherwise: interface names and the
+// addresses bound to them ARE sent (NICs below, nics.go, since 2026-08-06),
+// and the machine's public IPv4 IS looked up and sent unless MON_IPV4=off
+// (ipv4.go). Process NAMES are still never part of a snapshot: the twenty
+// busiest processes go only on request (inspect.go) — in clear through the
+// relay to the asking browser, which does not keep them — and the machine's
+// OWN history file keeps the busiest program names per bucket (prochist.go),
+// served over the tunnel only. The kernel version is deliberately cut to
+// major.minor — "6.8" tells you whether a box is ancient, "6.8.0-1050-oracle"
 // also tells an attacker who reads the relay which cloud to look at and which
 // CVEs to try.
 //
@@ -93,6 +101,20 @@ type System struct {
 	// can hand back.
 	MemAvailable *float64 `json:"mem_available,omitempty"`
 	MemCached    *float64 `json:"mem_cached,omitempty"`
+
+	// Bytes the hypervisor has taken back through a virtio balloon, in bytes.
+	//
+	// On an overcommitted host (the Grok sandbox machines are the case in
+	// hand) the guest's balloon driver hands idle pages to the host, and from
+	// inside the VM those pages are neither free nor cache: they count as
+	// used, MemAvailable shrinks by exactly that much, and a machine running
+	// 2 GB of processes reads 80% full. The percentage above is honest — the
+	// memory really is unavailable right now — but a reader has no way to
+	// tell "a process grew" from "the host took it", and only the first is
+	// something to do anything about. Linux only, from /proc/vmstat, and sent
+	// only while it is non-zero: a VM whose balloon is deflated and a bare
+	// metal box look the same, and should.
+	MemBalloon *float64 `json:"mem_balloon,omitempty"`
 
 	SwapTotal       *float64 `json:"swap_total,omitempty"`
 	SwapUsedPercent *float64 `json:"swap_used_percent,omitempty"`
@@ -206,10 +228,15 @@ type System struct {
 	// person run", which is the question this file refuses.
 	Procs *float64 `json:"procs,omitempty"`
 
-	// Hottest thermal zone, °C. Absent-and-silent when the platform exposes no
+	// Hottest sensor, °C. Absent-and-silent when the platform exposes no
 	// sensor — which is every VM — so, unlike the fields above, absence here is
 	// a configuration and never reported in `missing`. Same judgement as swap.
 	TempC *float64 `json:"temp_c,omitempty"`
+
+	// The sensors that number is the hottest of, one row each (temps.go):
+	// driver name, channel label, reading and the driver's own limits. Linux
+	// only, and absent on the same machines temp_c is.
+	Temps []Temp `json:"temps,omitempty"`
 
 	// What this platform could not read, so the page can say "not available
 	// here" rather than leaving a reader to guess whether the machine is idle
@@ -268,6 +295,10 @@ type SysSeries struct {
 	Mem []*float64 `json:"mem,omitempty"`
 	Rx  []*float64 `json:"rx,omitempty"`
 	Tx  []*float64 `json:"tx,omitempty"`
+	// The disk's two rates, a second at a time (audit 2026-10-16): the
+	// history keeps their peak, as it keeps the network's.
+	IORead  []*float64 `json:"io_read,omitempty"`
+	IOWrite []*float64 `json:"io_write,omitempty"`
 }
 
 // Ordered so the page can render a stable list; also the vocabulary Missing

@@ -5,6 +5,7 @@ package main
 // that shells out to somebody's actual CLI proves nothing repeatable anyway.
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -493,5 +494,44 @@ func TestCodexPrefersTheNewestNodeVersion(t *testing.T) {
 	}
 	if !strings.Contains(got[1], "v22.9.0") {
 		t.Errorf("minor versions compare as numbers too, got %v", got)
+	}
+}
+
+// A workspace seat's monthly credit pool rides on the bucket as
+// `individualLimit` (CodexBar UsageFetcher RPCSpendControlLimitSnapshot):
+// the limit must be positive; used is as sent, else from the remaining
+// percent, else nothing is used. Same key as the table's, so the two roads
+// meet on the card.
+func TestCodexLiveReadsTheMonthlyCreditPool(t *testing.T) {
+	bucket := func(il string) codexBucketRef {
+		var b codexLiveBucket
+		if err := json.Unmarshal([]byte(`{"limitId":"codex","primary":{"usedPercent":10,"windowDurationMins":300},"individualLimit":`+il+`}`), &b); err != nil {
+			t.Fatal(err)
+		}
+		return codexBucketRef{id: "codex", b: &b, primary: true}
+	}
+	lims := codexBucketLimits(bucket(`{"limit":"1000","used":"36.79748725891113","remainingPercent":96,"resetsAt":1788220800}`))
+	if len(lims) != 2 || lims[1].Key != "monthly_credits" || lims[1].UsedPercent != 3.68 || lims[1].Unit != "credits" ||
+		*lims[1].UsedAmount != 36.8 || *lims[1].TotalAmount != 1000 || *lims[1].RemainingAmount != 963.2 || *lims[1].ResetsAt != 1788220800 {
+		t.Fatalf("pool: %+v", lims)
+	}
+	if lims[1].WindowLabel == nil || *lims[1].WindowLabel != "month" {
+		t.Errorf("label: %+v", lims[1])
+	}
+	// Used from the remaining percent when it is not sent; zero when
+	// neither is.
+	lims = codexBucketLimits(bucket(`{"limit":100000,"remainingPercent":92.239}`))
+	if len(lims) != 2 || lims[1].UsedPercent != 7.76 || *lims[1].UsedAmount != 7761 {
+		t.Fatalf("from remaining percent: %+v", lims)
+	}
+	lims = codexBucketLimits(bucket(`{"limit":500}`))
+	if len(lims) != 2 || lims[1].UsedPercent != 0 || *lims[1].RemainingAmount != 500 {
+		t.Fatalf("nothing used: %+v", lims)
+	}
+	// No limit, a zero limit, a strange shape: no pool.
+	for _, il := range []string{`null`, `{"limit":0,"used":5}`, `{"used":5}`, `"text"`, `{"limit":"n/a"}`} {
+		if lims := codexBucketLimits(bucket(il)); len(lims) != 1 {
+			t.Errorf("%s: %+v", il, lims)
+		}
 	}
 }

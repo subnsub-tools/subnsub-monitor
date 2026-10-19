@@ -1,0 +1,13 @@
+{
+  "name": "Cloudflare",
+  "tiles": [
+    {
+      "id": "cloudflare",
+      "name": "Cloudflare",
+      "type": "quota",
+      "exec": "sh ~/.config/subnsub-monitor/metrics.d/cloudflare-bill.sh",
+      "interval": 600,
+      "timeout": 60
+    }
+  ]
+}

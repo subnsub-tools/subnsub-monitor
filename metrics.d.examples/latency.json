@@ -1,0 +1,43 @@
+{
+  "name": "Latency",
+  "tiles": [
+    {
+      "id": "ping_cloudflare",
+      "name": "Ping 1.1.1.1",
+      "type": "number",
+      "unit": "ms",
+      "warn": 100,
+      "bad": 300,
+      "icon": "pulse",
+      "history": true,
+      "exec": "ping -c 3 -q 1.1.1.1 | awk -F/ '/^(rtt|round-trip)/{print $5}'",
+      "interval": 60,
+      "timeout": 15
+    },
+    {
+      "id": "ping_loss",
+      "name": "Packet loss",
+      "type": "gauge",
+      "unit": "percent",
+      "warn": 5,
+      "bad": 25,
+      "icon": "signal",
+      "exec": "ping -c 5 -q 1.1.1.1 | awk '/packet loss/{for(i=1;i<=NF;i++) if($i ~ /%$/){print $i; exit}}'",
+      "interval": 120,
+      "timeout": 20
+    },
+    {
+      "id": "https_example",
+      "name": "HTTPS example.com",
+      "type": "number",
+      "unit": "ms",
+      "warn": 800,
+      "bad": 2000,
+      "icon": "globe",
+      "history": true,
+      "exec": "t=$(curl -o /dev/null -sS --fail --max-time 8 -w '%{time_total}' https://example.com/) || exit 1; echo \"$t\" | awk '{printf \"%.0f\\n\", $1 * 1000}'",
+      "interval": 120,
+      "timeout": 10
+    }
+  ]
+}

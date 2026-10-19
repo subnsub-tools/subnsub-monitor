@@ -5,6 +5,13 @@ package main
 // Linux reads everything out of /proc and one statfs. No cgo, no shelling out,
 // no /etc/os-release (that file carries a pretty name and sometimes a build ID,
 // and the kernel release alone answers the question this field is for).
+//
+// Android is Linux and compiles this file, but an app there is refused most of
+// /proc (android_linux.go says which files and since when). Where a syscall
+// answers the same question, the collector falls back to it; where nothing
+// does, it reports the gap like every other platform. The one place Android
+// changes WHAT is measured rather than how: "/" there is a read-only system
+// image, so the root disk is /data — see linuxRootPath.
 
 import (
 	"os"
@@ -19,14 +26,18 @@ func systemSnapshot() System {
 
 	if v, ok := readSmall("/proc/sys/kernel/osrelease"); ok {
 		s.OSVersion = shortKernel(v)
+	} else if v := unameRelease(); v != "" {
+		// The file is refused to Android apps; uname(2) is refused to nobody.
+		s.OSVersion = shortKernel(v)
 	}
 
 	linuxCPU(&s)
 	linuxMem(&s)
+	linuxBalloon(&s)
 	linuxSwapIO(&s)
 	linuxLoad(&s)
 	linuxUptime(&s)
-	statfsRoot(&s)
+	statfsRoot(&s, linuxRootPath())
 	linuxMounts(&s)
 	linuxDiskIO(&s)
 	linuxNet(&s)
@@ -194,6 +205,61 @@ func linuxCached(kb map[string]float64, total float64) *float64 {
 	return fp(v)
 }
 
+// Memory the host has taken back through a virtio balloon, from /proc/vmstat.
+//
+// balloon_inflate and balloon_deflate are cumulative page counts (the
+// counters exist only when the kernel was built with the balloon driver and
+// are zero until a device shows up), so their difference is the number of
+// pages the balloon holds right now. Held pages are what the host has
+// reclaimed: the guest cannot touch them until the host deflates, or — with
+// DEFLATE_ON_OOM negotiated — until the guest is about to kill something.
+//
+// Only reported while non-zero. The counters are present on every distro
+// kernel, including bare metal where they will never move, and "0 B taken by
+// host" on every card would be noise saying nothing.
+func linuxBalloon(s *System) {
+	raw, ok := readSmall("/proc/vmstat")
+	if !ok {
+		return
+	}
+	if v, ok := balloonBytes(raw, float64(os.Getpagesize())); ok {
+		s.MemBalloon = fp(v)
+	}
+}
+
+// The balloon's current size in bytes, or false when there is nothing to
+// say: no counters, a page size that makes no sense, or a deflate count
+// ahead of inflate (which a real kernel never produces and which would
+// otherwise turn into a negative figure on a card).
+func balloonBytes(vmstat string, page float64) (float64, bool) {
+	var inflate, deflate float64
+	var okIn, okDe bool
+	for _, line := range strings.Split(vmstat, "\n") {
+		k, v, found := strings.Cut(line, " ")
+		if !found {
+			continue
+		}
+		n, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err != nil || n < 0 || !finite(n) {
+			continue
+		}
+		switch k {
+		case "balloon_inflate":
+			inflate, okIn = n, true
+		case "balloon_deflate":
+			deflate, okDe = n, true
+		}
+	}
+	if !okIn || !okDe || page <= 0 || deflate > inflate {
+		return 0, false
+	}
+	held := (inflate - deflate) * page
+	if held <= 0 || !finite(held) {
+		return 0, false
+	}
+	return held, true
+}
+
 // Swap traffic, from /proc/vmstat's cumulative page counters.
 //
 // pswpin/pswpout count PAGES, and the page size is read from the runtime
@@ -263,7 +329,8 @@ func fsBlockSize(st *syscall.Statfs_t) float64 {
 func linuxNet(s *System) {
 	raw, ok := readSmall("/proc/net/dev")
 	if !ok {
-		s.miss(mNetwork)
+		// Refused to Android apps since 10. sysfs may still answer.
+		linuxNetSysfs(s)
 		return
 	}
 	var rx, tx float64
@@ -348,6 +415,95 @@ func linuxNet(s *System) {
 		return
 	}
 	s.NetRxBps, s.NetTxBps = rxBps, txBps
+}
+
+// The whole-box byte counters from sysfs, for a process that may not read
+// /proc/net/dev. /sys/class/net lists the interfaces and each one's
+// statistics directory holds one number per file. Packets, errors and drops
+// are left out here on purpose: six more files per interface for a fallback
+// road, when the rate and the totals are what the card cannot do without.
+func linuxNetSysfs(s *System) {
+	perRx, perTx, ok := sysfsNetCounters()
+	if !ok {
+		s.miss(mNetwork)
+		return
+	}
+	var rx, tx float64
+	for name := range perRx {
+		rx += perRx[name]
+		tx += perTx[name]
+	}
+	s.NetRxTotal, s.NetTxTotal = fp(rx), fp(tx)
+	nicCounters(s, perRx, perTx)
+	rxBps, txBps := netDelta(rx, tx, now())
+	if rxBps == nil {
+		s.miss(mNetwork)
+		return
+	}
+	s.NetRxBps, s.NetTxBps = rxBps, txBps
+}
+
+func sysfsNetCounters() (rx, tx map[string]float64, ok bool) {
+	entries, err := os.ReadDir("/sys/class/net")
+	if err != nil {
+		return nil, nil, false
+	}
+	rx, tx = map[string]float64{}, map[string]float64{}
+	for _, e := range entries {
+		name := e.Name()
+		if name == "" || name == "lo" {
+			continue
+		}
+		r, okR := readSysfsNumber("/sys/class/net/" + name + "/statistics/rx_bytes")
+		t, okT := readSysfsNumber("/sys/class/net/" + name + "/statistics/tx_bytes")
+		if !okR || !okT {
+			continue
+		}
+		rx[name], tx[name] = r, t
+	}
+	return rx, tx, len(rx) > 0
+}
+
+func readSysfsNumber(path string) (float64, bool) {
+	raw, ok := readSmall(path)
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || n < 0 || !finite(n) {
+		return 0, false
+	}
+	return n, true
+}
+
+// The filesystem that answers "is this machine running out of room". On a
+// Linux distribution that is "/". On Android "/" is the system image — a
+// read-only partition shipped nearly full, whose 97% would be a permanent
+// false alarm — and everything the machine writes lives on /data, which is
+// also the one partition an app may statfs beyond its own directories.
+func linuxRootPath() string {
+	if onAndroid() {
+		var st syscall.Statfs_t
+		if syscall.Statfs("/data", &st) == nil {
+			return "/data"
+		}
+	}
+	return "/"
+}
+
+// Android's mount table is mostly the operating system talking to itself: a
+// dozen /apex/* module images, /system, /vendor, /product, /odm, each an ext4
+// or erofs partition sized to its contents and therefore always "full", and a
+// FUSE view of /data at /storage/emulated. None is a disk a person can fill
+// or empty. What is: /data (the root, above) and removable or adopted media,
+// which the platform mounts under these roots.
+func androidMountWorthListing(path string) bool {
+	for _, p := range []string{"/storage/", "/mnt/media_rw/", "/mnt/expand/"} {
+		if strings.HasPrefix(path, p) {
+			return !strings.HasPrefix(path, "/storage/emulated")
+		}
+	}
+	return false
 }
 
 // Parse a fixed group of counters, all or nothing. Whole numbers that only
@@ -457,21 +613,25 @@ func linuxDiskIO(s *System) {
 	s.DiskReadBps, s.DiskWriteBps = rBps, wBps
 }
 
-// The filesystems other than root, from /proc/mounts.
+// The filesystems other than root, from /proc/self/mounts.
 //
 // Read there rather than from /etc/fstab (which describes intent, not what is
 // mounted) and parsed with the kernel's own escaping in mind: a mount point
 // containing a space arrives as `\040`, and a parser that misses that reads one
-// path as two fields and measures the wrong thing.
+// path as two fields and measures the wrong thing. /proc/self/mounts rather
+// than /proc/mounts: the same table (the latter is a link to the former), but
+// the link is one of the /proc entries Android refuses to apps and the file
+// behind it is not.
 func linuxMounts(s *System) { fillMounts(s, scanLinuxMounts) }
 
 // The bool is "could the mount table be read at all", not "were there any
 // extra filesystems" — see fillMounts for why the two must not collapse.
 func scanLinuxMounts() ([]Mount, bool) {
-	raw, ok := readSmall("/proc/mounts")
+	raw, ok := readSmall("/proc/self/mounts")
 	if !ok {
 		return nil, false
 	}
+	root, android := linuxRootPath(), onAndroid()
 	var found []Mount
 	seenDev := make(map[string]bool, 8)
 	for _, line := range strings.Split(raw, "\n") {
@@ -480,7 +640,10 @@ func scanLinuxMounts() ([]Mount, bool) {
 			continue
 		}
 		dev, path, fstype := unescapeMountField(f[0]), unescapeMountField(f[1]), f[2]
-		if !realFsTypes[fstype] || path == "/" {
+		if !realFsTypes[fstype] || path == "/" || path == root {
+			continue
+		}
+		if android && !androidMountWorthListing(path) {
 			continue
 		}
 		// One row per DEVICE. A btrfs volume with four subvolumes mounted is
@@ -602,6 +765,12 @@ func linuxTCP(s *System) {
 // refuses (see the header — cmdlines are exactly what this walk does NOT
 // read).
 func linuxProcs(s *System) {
+	if !procTreeVisible() {
+		// hidepid: the directories under /proc are this program's own, and
+		// counting them would report a machine of six processes.
+		s.miss(mProcs)
+		return
+	}
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		s.miss(mProcs)
@@ -634,35 +803,13 @@ func linuxProcs(s *System) {
 	s.Procs = fp(float64(n))
 }
 
-// Hottest thermal zone. Millidegrees in, °C out; a zone that reads absurd
-// (≤0 or >150°C) is a broken or sleeping sensor and contributes nothing.
-// No reading at all is silent by design — see TempC in system.go.
-func linuxTemp(s *System) {
-	// A fixed, shallow scan: zone indices are small integers in practice, and a
-	// bounded loop cannot be steered by whatever else lives under /sys.
-	best := 0.0
-	found := false
-	for i := 0; i < 24; i++ {
-		raw, ok := readSmall("/sys/class/thermal/thermal_zone" + strconv.Itoa(i) + "/temp")
-		if !ok {
-			continue
-		}
-		n, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
-		if err != nil || !finite(n) {
-			continue
-		}
-		c := n / 1000
-		if c <= 0 || c > 150 {
-			continue
-		}
-		if !found || c > best {
-			best, found = c, true
-		}
-	}
-	if found {
-		s.TempC = fp(round2(best))
-	}
-}
+// Every temperature sensor the kernel exposes, and the hottest of them. The
+// scan and what it reads are in temps.go. No reading at all is silent by
+// design — see TempC in system.go.
+func linuxTemp(s *System) { fillTemps(s, tempsRefreshSec, localTemps) }
+
+// What `subnsub-monitor temps` prints, and what the collector reads.
+func localTemps() []Temp { return scanTemps("/sys/class/hwmon", "/sys/class/thermal") }
 
 func linuxLoad(s *System) {
 	raw, ok := readSmall("/proc/loadavg")
@@ -690,6 +837,11 @@ func linuxLoad(s *System) {
 func linuxUptime(s *System) {
 	raw, ok := readSmall("/proc/uptime")
 	if !ok {
+		// Refused to Android apps; the clock behind it is refused to nobody.
+		if v, ok := bootSeconds(); ok {
+			s.UptimeSec = fp(round2(v))
+			return
+		}
 		s.miss(mUptime)
 		return
 	}

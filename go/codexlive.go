@@ -51,6 +51,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -84,7 +85,7 @@ const (
 	codexKeyMax = 24
 )
 
-var codexLiveCache provCache
+var codexLiveCache = provCache{pace: paceMark{id: "codex"}}
 
 // Everything that can vary is decoded as `any` for the same reason codex.go
 // does it: this is another program's output, and one unrelated field arriving
@@ -117,6 +118,70 @@ type codexLiveBucket struct {
 	Secondary json.RawMessage `json:"secondary"`
 	PlanType  any             `json:"planType"`
 	Credits   json.RawMessage `json:"credits"`
+	// A workspace's monthly credit pool for this seat (Team, Enterprise,
+	// Edu): {limit, used, remainingPercent, resetsAt}, the same figures the
+	// usage endpoint's individual_limit carries (adapters.json). Read as
+	// CodexBar's UsageFetcher reads it (RPCSpendControlLimitSnapshot): the
+	// limit must be positive; used is taken as sent, else from the
+	// remaining percent, else nothing is used.
+	IndividualLimit json.RawMessage `json:"individualLimit"`
+}
+
+// The pool's fields, every one loose — numbers have arrived as strings.
+type codexLiveIndividualLimit struct {
+	Limit            any `json:"limit"`
+	Used             any `json:"used"`
+	RemainingPercent any `json:"remainingPercent"`
+	ResetsAt         any `json:"resetsAt"`
+}
+
+// The monthly pool as a window, or nil when the bucket carries none worth
+// drawing. Key "monthly_credits" on the account's own bucket — the table's
+// key for the same pool — so the card and the history meet.
+func codexIndividualLimit(ref codexBucketRef) *Limit {
+	if ref.b == nil || len(ref.b.IndividualLimit) == 0 {
+		return nil
+	}
+	var il codexLiveIndividualLimit
+	if json.Unmarshal(ref.b.IndividualLimit, &il) != nil {
+		return nil
+	}
+	// adapterNum rather than asNum: these arrive as strings as often as
+	// numbers ("1000", "36.797…"), as the usage endpoint sends them.
+	limit, ok := adapterNum(il.Limit)
+	if !ok || limit <= 0 {
+		return nil
+	}
+	used, ok := adapterNum(il.Used)
+	if !ok {
+		if rp, ok := adapterNum(il.RemainingPercent); ok {
+			used = limit * math.Max(0, math.Min(100, 100-rp)) / 100
+		} else {
+			used = 0
+		}
+	}
+	if used < 0 {
+		used = 0
+	}
+	key := "monthly_credits"
+	if !ref.primary {
+		key = codexLimitKey(ref.id, "monthly")
+	}
+	l := Limit{
+		Key: key, UsedPercent: round2(math.Min(100, used/limit*100)),
+		WindowLabel: sp("month"), Unit: "credits",
+		UsedAmount: fp(round2(used)), TotalAmount: fp(round2(limit)),
+		RemainingAmount: fp(round2(math.Max(0, limit-used))),
+	}
+	if !ref.primary {
+		if scope := asStr(ref.b.LimitName, 40); scope != "" {
+			l.Scope = sp(scope)
+		}
+	}
+	if e, ok := adapterNum(il.ResetsAt); ok && e > 0 {
+		l.ResetsAt = fp(e)
+	}
+	return &l
 }
 
 // Both views held raw, and that includes the map itself rather than only its
@@ -670,6 +735,9 @@ func codexBucketLimits(ref codexBucketRef) []Limit {
 		l.ResetsAt = asNum(win.ResetsAt)
 		out = append(out, l)
 	}
+	if il := codexIndividualLimit(ref); il != nil {
+		out = append(out, *il)
+	}
 	return out
 }
 
@@ -736,6 +804,17 @@ func codexLiveFetch() Provider {
 	return p
 }
 
+// The Codex tile: its quota from whichever leg answers, and what it spent on
+// this machine riding on either — that count is the session logs' whatever
+// leg the quota came from (codexactivity.go).
+func collectCodex() Provider {
+	p := collectCodexQuota()
+	if p.OK {
+		p.Activity = codexActivity(now())
+	}
+	return p
+}
+
 // Prefer the live reading; fall back to the session log.
 //
 // The fallback is deliberately silent about WHY it fell back, and that is not
@@ -764,7 +843,7 @@ func codexLiveFetch() Provider {
 // An unstamped live reading takes the same road for the same reason: unknown is
 // not fresh. codexLiveFetch always stamps one, so that branch stands as the
 // invariant holding rather than a case anyone expects to see.
-func collectCodex() Provider {
+func collectCodexQuota() Provider {
 	live := codexLiveCache.collect(codexLiveFetch)
 	if !live.OK {
 		return collectCodexLog()

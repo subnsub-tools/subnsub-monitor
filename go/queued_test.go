@@ -1,15 +1,14 @@
 package main
 
-// The six 2026-08 additions, tested at the parse seam. Kiro and Grok also got
+// The 2026-08 additions still shipped, tested at the parse seam. Kiro and Grok also got
 // a live run against the real CLI/endpoint on the machine this was built on;
 // these pin the shapes that live run cannot cover (older CLI vintages, the
 // protobuf scan, the tRPC fallbacks) and that a refactor could break quietly.
 
 import (
+	"bytes"
 	"encoding/binary"
 	"math"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -40,38 +39,6 @@ func TestKiroDisplayPlan(t *testing.T) {
 		if got := kiroDisplayPlan(in); got != want {
 			t.Errorf("kiroDisplayPlan(%q) = %q, want %q", in, got, want)
 		}
-	}
-}
-
-// ── Doubao ────────────────────────────────────────────────────────────────
-
-func TestDoubaoWindowVocabulary(t *testing.T) {
-	for _, tc := range []struct {
-		label string
-		key   string
-		mins  float64
-	}{
-		{"5-hour", "session", 300}, {"Weekly", "weekly", 10080}, {"month", "monthly", 43200},
-	} {
-		k, m := doubaoWindow(tc.label)
-		if k != tc.key || m == nil || *m != tc.mins {
-			t.Errorf("doubaoWindow(%q) = %q/%v, want %q/%v", tc.label, k, m, tc.key, tc.mins)
-		}
-	}
-	if k, m := doubaoWindow("annual"); k != "" || m != nil {
-		t.Errorf("unknown label must yield empty: %q/%v", k, m)
-	}
-}
-
-func TestDoubaoResetUnits(t *testing.T) {
-	if r := doubaoReset("2100-01-01T00:00:00Z"); r == nil {
-		t.Fatal("iso reset")
-	}
-	if r := doubaoReset(4_102_444_800_000.0); r == nil || *r != 4_102_444_800 {
-		t.Fatalf("ms epoch: %v", r)
-	}
-	if r := doubaoReset(-5.0); r != nil {
-		t.Fatal("non-positive must be nil")
 	}
 }
 
@@ -142,84 +109,247 @@ func protoFixed32(field int, f float32) []byte {
 	return b
 }
 
+// A length-delimited field: wire type 2, field number `field`, holding `inner`.
+// The tag is a varint — field 20's is two bytes.
+func protoMsg(field int, inner []byte) []byte {
+	var buf [10]byte
+	n := binary.PutUvarint(buf[:], uint64(field<<3|2))
+	out := append([]byte{}, buf[:n]...)
+	n = binary.PutUvarint(buf[:], uint64(len(inner)))
+	out = append(out, buf[:n]...)
+	return append(out, inner...)
+}
+
 func TestGrokParsesUsedPercentFromFrame(t *testing.T) {
-	// A nested message whose inner field 1 is 37.5% used.
+	// The real wire: message 1 (the config) whose field 1 is 37.5% used.
 	inner := protoFixed32(1, 37.5)
-	outer := append([]byte{byte(1<<3 | 2), byte(len(inner))}, inner...)
-	used, _, err := grokParseBilling(grokFrame(outer))
+	outer := protoMsg(1, inner)
+	bill, err := grokParseBilling(grokFrame(outer), 1000)
 	if err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
-	if used == nil || math.Abs(*used-37.5) > 0.01 {
-		t.Fatalf("used = %v, want 37.5", used)
+	if bill.used == nil || math.Abs(*bill.used-37.5) > 0.01 || bill.implicitZero {
+		t.Fatalf("used = %v, want 37.5 off the wire", bill.used)
 	}
 }
 
-func TestGrokRejectsAmbiguousAndSubnormalPercent(t *testing.T) {
+func TestGrokPercentIsTheShallowestFirstAndNeverASubnormal(t *testing.T) {
 	// An integer field 1 = 1 reads as the subnormal 1.4e-45; it must be
-	// rejected, not rounded to 0% and published over a real deeper value.
+	// rejected, not rounded to 0% and published over the real nested value.
 	subnormal := protoFixed32(1, math.Float32frombits(1))
-	inner := protoFixed32(1, 37.5)
-	nested := append([]byte{byte(1<<3 | 2), byte(len(inner))}, inner...)
-	used, _, err := grokParseBilling(grokFrame(append(subnormal, nested...)))
+	nested := protoMsg(1, protoFixed32(1, 37.5))
+	bill, err := grokParseBilling(grokFrame(append(subnormal, nested...)), 1000)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if used == nil || math.Abs(*used-37.5) > 0.01 {
-		t.Fatalf("subnormal should be ignored, real 37.5 kept; got %v", used)
+	if bill.used == nil || math.Abs(*bill.used-37.5) > 0.01 {
+		t.Fatalf("subnormal should be ignored, real 37.5 kept; got %v", bill.used)
 	}
-	// Two DISTINCT real percentages at field 1 is an ambiguous wire — publish
-	// nothing rather than guess which is the quota.
+	// Two field-1 floats at the same depth: the first in the walk is the
+	// one (CodexBar orders by depth, then by position).
 	a := protoFixed32(1, 20)
 	b := protoFixed32(1, 80)
-	used, _, err = grokParseBilling(grokFrame(append(a, b...)))
+	bill, err = grokParseBilling(grokFrame(protoMsg(1, append(a, b...))), 1000)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if used != nil {
-		t.Fatalf("ambiguous percents must yield nil, got %v", *used)
+	if bill.used == nil || *bill.used != 20 {
+		t.Fatalf("the first float at the shallowest depth wins, got %v", bill.used)
+	}
+}
+
+// A length-delimited field the billing descriptor does not declare as a
+// message is opaque bytes — a string, say — and bytes inside it that happen
+// to parse as a float32 tag must not become the percentage.
+func TestGrokDoesNotWalkIntoOpaqueBytes(t *testing.T) {
+	// [1,9] is not a declared message; a float32 field 1 inside it is a
+	// coincidence of bytes, not a reading.
+	opaque := protoMsg(9, protoFixed32(1, 99))
+	bill, err := grokParseBilling(grokFrame(protoMsg(1, opaque)), 1000)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if bill.used != nil {
+		t.Fatalf("a float inside an undeclared message is not a percentage, got %v", *bill.used)
+	}
+	// Whereas [1,6,3,2] is declared, and is walked.
+	deep := protoMsg(6, protoMsg(3, protoMsg(2, protoFixed32(1, 12))))
+	bill, _ = grokParseBilling(grokFrame(protoMsg(1, deep)), 1000)
+	if bill.used == nil || *bill.used != 12 {
+		t.Fatalf("a declared nested message is walked, got %v", bill.used)
 	}
 }
 
 func TestGrokFramingRejectsOverrunAndBadFlags(t *testing.T) {
 	// A length that overruns the body is an error, not a partial success.
 	bad := []byte{0x00, 0xff, 0xff, 0xff, 0xff, 0x01}
-	if _, _, err := grokParseBilling(bad); err == nil {
+	if _, err := grokParseBilling(bad, 1000); err == nil {
 		t.Fatal("overrunning frame length must error")
 	}
 	// A compressed/reserved flag byte we cannot read must error, not scan.
 	comp := grokFrame(protoFixed32(1, 50))
 	comp[0] = 0x01
-	if _, _, err := grokParseBilling(comp); err == nil {
+	if _, err := grokParseBilling(comp, 1000); err == nil {
 		t.Fatal("unsupported frame flags must error")
 	}
 }
 
-func TestGrokTrailerStatusFails(t *testing.T) {
-	// A trailer frame (flag 0x80) carrying grpc-status 7 must surface as error.
-	trailer := []byte("grpc-status:7\r\ngrpc-message:denied\r\n")
-	frame := make([]byte, 5+len(trailer))
+func grokTrailer(text string) []byte {
+	frame := make([]byte, 5+len(text))
 	frame[0] = 0x80
-	binary.BigEndian.PutUint32(frame[1:5], uint32(len(trailer)))
-	copy(frame[5:], trailer)
-	if _, _, err := grokParseBilling(frame); err == nil {
-		t.Fatal("non-zero grpc-status must be an error")
+	binary.BigEndian.PutUint32(frame[1:5], uint32(len(text)))
+	copy(frame[5:], text)
+	return frame
+}
+
+func TestGrokTrailerStatusIsClassified(t *testing.T) {
+	// A trailer frame (flag 0x80) carrying grpc-status 7 with a credential
+	// message is an authentication failure; 16 is one whatever it says
+	// (that is the WKE "no-credentials" rejection); 9 "no personal team" is
+	// a team account the consumer surface has nothing for; anything else is
+	// a failure of its own kind. The message is percent-encoded on the wire.
+	cases := []struct {
+		trailer string
+		auth    bool
+		team    bool
+	}{
+		{"grpc-status:7\r\ngrpc-message:bad-credentials\r\n", true, false},
+		{"grpc-status:7\r\ngrpc-message:oauth2%20token%20could%20not%20be%20validated\r\n", true, false},
+		{"grpc-status:16\r\ngrpc-message:no-credentials\r\n", true, false},
+		{"grpc-status:16\r\n", true, false},
+		{"grpc-status:9\r\ngrpc-message:No personal team.\r\n", false, true},
+		{"grpc-status:7\r\ngrpc-message:permission denied\r\n", false, false},
+		{"grpc-status:13\r\ngrpc-message:Missing request message.\r\n", false, false},
+	}
+	for _, c := range cases {
+		_, err := grokParseBilling(grokTrailer(c.trailer), 1000)
+		if err == nil {
+			t.Fatalf("%q: non-zero grpc-status must be an error", c.trailer)
+		}
+		rpc, ok := err.(*grokRPCError)
+		if !ok {
+			t.Fatalf("%q: want a classified rpc error, got %v", c.trailer, err)
+		}
+		if rpc.authFailure() != c.auth || rpc.teamUnsupported() != c.team {
+			t.Errorf("%q: auth=%v team=%v", c.trailer, rpc.authFailure(), rpc.teamUnsupported())
+		}
+	}
+	// grpc-status 0 in a trailer is the happy path.
+	body := append(grokFrame(protoMsg(1, protoFixed32(1, 5))), grokTrailer("grpc-status:0\r\n")...)
+	if bill, err := grokParseBilling(body, 1000); err != nil || bill.used == nil || *bill.used != 5 {
+		t.Fatalf("status 0 trailer: %v %+v", err, bill)
 	}
 }
 
-func TestGrokResetPicksSoonestFuture(t *testing.T) {
-	// Two varints in the epoch band; the one still in the future wins.
-	future := uint64(time.Now().Add(48 * time.Hour).Unix())
+func TestGrokResetPrefersTheDeclaredFieldThenTheSoonest(t *testing.T) {
+	now := float64(1_800_000_000)
+	soon := uint64(now) + 3600
+	later := uint64(now) + 48*3600
 	past := uint64(1_700_000_100)
-	payload := append(protoVarint(6, past), protoVarint(6, future)...)
-	// also a valid used% so the scan yields something
-	payload = append(payload, protoFixed32(1, 10)...)
-	_, resets, err := grokParseBilling(grokFrame(payload))
+	// [1,5,1] is the reset the descriptor declares: it wins over a sooner
+	// date elsewhere in the message.
+	payload := protoMsg(1, append(append(protoVarint(6, past), protoVarint(6, soon)...),
+		append(protoMsg(5, protoVarint(1, later)), protoFixed32(1, 10)...)...))
+	bill, err := grokParseBilling(grokFrame(payload), now)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if resets == nil || uint64(*resets) != future {
-		t.Fatalf("reset = %v, want %d", resets, future)
+	if bill.resets == nil || uint64(*bill.resets) != later {
+		t.Fatalf("reset = %v, want the declared [1,5,1] %d", bill.resets, later)
+	}
+	// Without it, the soonest date still ahead.
+	payload = protoMsg(1, append(append(protoVarint(6, past), protoVarint(6, later)...),
+		append(protoVarint(6, soon), protoFixed32(1, 10)...)...))
+	bill, _ = grokParseBilling(grokFrame(payload), now)
+	if bill.resets == nil || uint64(*bill.resets) != soon {
+		t.Fatalf("reset = %v, want the soonest %d", bill.resets, soon)
+	}
+}
+
+// proto3 omits a zero scalar: a message with a billing period but no
+// percentage at all is 0% used — accepted only when the current period
+// ([1,8]: type weekly/monthly, start, end) spans now, from one complete
+// payload (CodexBar@e7d0011a83).
+func TestGrokImplicitZeroNeedsAnActivePeriod(t *testing.T) {
+	now := float64(1_800_000_000)
+	start := uint64(now) - 86400
+	end := uint64(now) + 6*86400
+	period := protoMsg(8, append(append(protoVarint(1, 1), protoMsg(2, protoVarint(1, start))...),
+		protoMsg(3, protoVarint(1, end))...))
+	bill, err := grokParseBilling(grokFrame(protoMsg(1, period)), now)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if bill.used == nil || *bill.used != 0 || !bill.implicitZero {
+		t.Fatalf("an active period with no usage scalar is 0%% used: %+v", bill)
+	}
+	if bill.resets == nil || uint64(*bill.resets) != end {
+		t.Errorf("the period's end is the reset: %v", bill.resets)
+	}
+	// A period already over is not the current one: nothing is published.
+	stale := protoMsg(8, append(append(protoVarint(1, 1), protoMsg(2, protoVarint(1, start-14*86400))...),
+		protoMsg(3, protoVarint(1, uint64(now)-7*86400))...))
+	// …but a future date somewhere keeps the message in the no-usage shape.
+	stale = append(stale, protoVarint(12, end)...)
+	bill, _ = grokParseBilling(grokFrame(protoMsg(1, stale)), now)
+	if bill.used != nil {
+		t.Fatalf("a lapsed period must not read as 0%%: %+v", bill)
+	}
+	// Two payloads: the zero cannot be attributed, so nothing.
+	two := append(grokFrame(protoMsg(1, period)), grokFrame(protoMsg(1, period))...)
+	if bill, _ := grokParseBilling(two, now); bill.used != nil {
+		t.Fatalf("two payloads: %+v", bill)
+	}
+}
+
+// The reset coupons: repeated field 10, each {10: id, 20: granted, 30:
+// expires}; only the count and the expiries leave, soonest first.
+func TestGrokResetCoupons(t *testing.T) {
+	now := float64(1_800_000_000)
+	stamp := func(sec uint64) []byte { return protoVarint(1, sec) }
+	coupon := func(id string, exp uint64) []byte {
+		return protoMsg(10, append(append(protoMsg(10, []byte(id)), protoMsg(20, stamp(uint64(now)-86400))...),
+			protoMsg(30, stamp(exp))...))
+	}
+	body := grokFrame(append(append(coupon("tok-b", uint64(now)+20*86400), coupon("tok-a", uint64(now)+5*86400)...),
+		coupon("tok-old", uint64(now)-60)...))
+	rc := grokParseResets(body, now)
+	if rc == nil || rc.Left != 2 || len(rc.Expires) != 2 || rc.Expires[0] != now+5*86400 || rc.Expires[1] != now+20*86400 {
+		t.Fatalf("coupons: %+v", rc)
+	}
+	// An empty list is no coupons, not a failure to say so; a record with
+	// no id or no expiry is a wire this build does not know.
+	if rc := grokParseResets(grokFrame(nil), now); rc != nil {
+		t.Errorf("empty: %+v", rc)
+	}
+	broken := grokFrame(protoMsg(10, protoMsg(30, stamp(uint64(now)+86400))))
+	if rc := grokParseResets(broken, now); rc != nil {
+		t.Errorf("a record without an id must drop the lot: %+v", rc)
+	}
+}
+
+func TestGrokTokenNormalization(t *testing.T) {
+	cases := map[string]string{
+		"  abc.def  ":            "abc.def",
+		"Bearer abc.def":         "abc.def",
+		"bearer   abc.def":       "abc.def",
+		"cookie: sso=abc":        "",
+		"sso=abc; sso-rw=abc":    "",
+		"xai-management-api-key": "",
+		"":                       "",
+	}
+	for in, want := range cases {
+		if got := grokNormalizeToken(in); got != want {
+			t.Errorf("%q: got %q want %q", in, got, want)
+		}
+	}
+}
+
+func TestGrokRequestBodyNamesTheField(t *testing.T) {
+	// One frame of two bytes: field 1 varint 0 — exclude_legacy_monthly_usage
+	// = false. An empty frame is refused with status 13.
+	if !bytes.Equal(grokBillingBody, []byte{0, 0, 0, 0, 2, 0x08, 0x00}) {
+		t.Fatalf("body: % x", grokBillingBody)
 	}
 }
 
@@ -228,65 +358,6 @@ func protoVarint(field int, v uint64) []byte {
 	var buf [10]byte
 	n := binary.PutUvarint(buf[:], v)
 	return append(out, buf[:n]...)
-}
-
-// ── Wayfinder ─────────────────────────────────────────────────────────────
-
-func TestWayfinderBaseRejectsNonLoopback(t *testing.T) {
-	t.Setenv(wayfinderURLEnv, "")
-	if got := wayfinderBase(); got != wayfinderDefault {
-		t.Fatalf("empty env should give default, got %q", got)
-	}
-	t.Setenv(wayfinderURLEnv, "http://10.0.0.5:8088")
-	if got := wayfinderBase(); got != "" {
-		t.Fatalf("remote plain HTTP must be refused, got %q", got)
-	}
-	t.Setenv(wayfinderURLEnv, "http://127.0.0.1:9000")
-	if got := wayfinderBase(); got != "http://127.0.0.1:9000" {
-		t.Fatalf("loopback HTTP should pass, got %q", got)
-	}
-	t.Setenv(wayfinderURLEnv, "https://gw.example.com")
-	if got := wayfinderBase(); got != "https://gw.example.com" {
-		t.Fatalf("HTTPS should pass, got %q", got)
-	}
-	// A query string (where a token could hide) or a path is refused — the
-	// value has endpoint paths appended, and Detail travels to the relay.
-	t.Setenv(wayfinderURLEnv, "https://gw.example.com/?token=secret")
-	if got := wayfinderBase(); got != "" {
-		t.Fatalf("query string must be refused, got %q", got)
-	}
-	t.Setenv(wayfinderURLEnv, "https://gw.example.com/some/path")
-	if got := wayfinderBase(); got != "" {
-		t.Fatalf("path must be refused, got %q", got)
-	}
-}
-
-func TestWayfinderKeepsActivityAndSavings(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/healthz":
-			_, _ = w.Write([]byte(`{"status":"ok","offline":false}`))
-		case "/v1/savings":
-			_, _ = w.Write([]byte(`{"priced":true,"requests":1234,"tokens":987654,"saved":48.25,"saved_pct":72.5}`))
-		case "/router/models":
-			_, _ = w.Write([]byte(`{"models":[{"name":"a"},{"name":"b"}]}`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	t.Cleanup(srv.Close)
-	t.Setenv(wayfinderURLEnv, srv.URL)
-
-	p := fetchWayfinder()
-	if !p.OK || p.Activity == nil || p.Activity.Requests == nil || p.Activity.Tokens == nil {
-		t.Fatalf("provider activity = %+v", p)
-	}
-	if *p.Activity.Requests != 1234 || *p.Activity.Tokens != 987654 {
-		t.Fatalf("activity = %+v", p.Activity)
-	}
-	if p.Activity.Saved == nil || p.Activity.Saved.Amount != 48.25 || p.Activity.Saved.Unit != "usd" {
-		t.Fatalf("saved amount = %+v", p.Activity.Saved)
-	}
 }
 
 func TestKiloFallbackTriesCentsAndMicro(t *testing.T) {
@@ -309,5 +380,47 @@ func TestKiroMMDDRejectsImpossibleDates(t *testing.T) {
 	}
 	if kiroReset("13/01") != nil {
 		t.Fatal("month 13 must be refused")
+	}
+}
+
+// The newer CLI opens with a summary line; a managed plan may print nothing
+// else. The plan is the reading then — not a 0% gauge, not a failure
+// (CodexBar KiroStatusProbe, steipete/CodexBar@28b8dcbe8d).
+func TestKiroSummaryLineIsAPlanNotAGauge(t *testing.T) {
+	parse := func(out string) Provider {
+		return parseKiroUsage(Provider{ID: "kiro", Name: "Kiro", Source: "cli", CapturedAt: 1000}, out, false)
+	}
+	p := parse("\x1b[32mPlan: KIRO PRO MAX | 1 usage breakdowns\x1b[0m\n")
+	if !p.OK || len(p.Limits) != 0 || p.Credits != nil {
+		t.Fatalf("summary alone: %+v", p)
+	}
+	if p.PlanType == nil || *p.PlanType != "Kiro Pro Max" {
+		t.Errorf("plan stops at the pipe and is title-cased: %v", p.PlanType)
+	}
+	// With a credits line under it, the gauge is read as before.
+	p = parse("Plan: KIRO PRO MAX | 1 usage breakdowns\nCredits (0 of 5000 covered in plan)\n")
+	if !p.OK || len(p.Limits) != 1 || p.Limits[0].UsedPercent != 0 || p.Credits == nil || p.Credits.Balance != "5000 / 5000" {
+		t.Fatalf("summary with credits: %+v", p)
+	}
+	// "Credits used" under "Overages" is overage spend, not plan usage: a
+	// summary with only that still reads as plan-only; without a summary it
+	// is no reading at all.
+	p = parse("Plan: KIRO PRO MAX | 1 usage breakdowns\nOverages: Enabled  billed at $0.04 per request\nCredits used: 40.29\nEst. cost: $1.61 USD\n")
+	if !p.OK || len(p.Limits) != 0 || p.Credits != nil {
+		t.Fatalf("overage spend must not become the plan's usage: %+v", p)
+	}
+	p = parse("Overages: Enabled\nCredits used: 40.29\n")
+	if p.OK || p.DetailCode != "cli-nolines" {
+		t.Fatalf("overage spend alone is no reading: %+v", p)
+	}
+	// The older "Plan: Q Developer Pro" shape still names the plan, and the
+	// classic header still wins over both.
+	p = parse("Plan: Q Developer Pro\n████████ 40%\n")
+	if !p.OK || p.PlanType == nil || *p.PlanType != "Q Developer Pro" || len(p.Limits) != 1 {
+		t.Fatalf("plain plan line: %+v", p)
+	}
+	p = parse("Estimated Usage | resets on 2026-09-01 | KIRO FREE\nPlan: KIRO PRO MAX | 1 usage breakdowns\nCredits (0.00 of 50 covered in plan)\n")
+	if p.PlanType == nil || *p.PlanType != "Kiro Free" {
+		t.Fatalf("the header's plan wins: %+v", p)
 	}
 }

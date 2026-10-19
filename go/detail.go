@@ -49,16 +49,7 @@ var detailPhrases = map[string]string{
 	// creds-missing and the command to re-run for the rest.
 	"creds-missing":   "{a} holds no usable credential",
 	"creds-expired":   "the stored credential has expired — run {a} once to renew it",
-	"creds-norefresh": "the credential expired and carries no refresh token — run {a} once to sign in again",
 	"no-subscription": "this GitHub account has no Copilot subscription",
-
-	// Trading a refresh token for an access token, which only gemini does.
-	"no-oauth-client": "no gemini-cli OAuth client could be found — is the CLI installed? GEMINI_OAUTH_CLIENT_ID/SECRET also work",
-	"refresh-failed":  "the token refresh did not go through",
-	"refresh-invalid": "the refresh token is no longer valid — run {a} to sign in again",
-	"refresh-refused": "the token endpoint refused the refresh ({a})",
-	"token-status":    "the token endpoint answered {a}",
-	"token-shape":     "the token endpoint answered in a shape this build does not recognise",
 
 	// Talking to the vendor's endpoint.
 	"req-build":     "the request could not be built",
@@ -86,12 +77,17 @@ var detailPhrases = map[string]string{
 	"latest-no-window":   "the newest record holds no usable quota window",
 
 	// Provider-specific enough to be worth their own line.
-	"other-auth":   "this machine's gemini-cli authenticates with {a}, so its quota is not on the personal-quota endpoint",
-	"gateway-url":  "MON_WAYFINDER_URL is not a valid loopback or HTTPS address",
-	"gateway-down": "no Wayfinder gateway answered at the configured address",
-	"no-savings":   "the Wayfinder gateway returned no savings data",
-	"ls-none":      "no Antigravity language server is listening",
-	"ls-no-quota":  "the Antigravity language server did not return a quota: {a}",
+	"ls-none":     "no Antigravity language server is listening",
+	"ls-no-quota": "the Antigravity language server did not return a quota: {a}",
+
+	// CLI Proxy API (cpa.go). {a} is a field name or a host, never the key.
+	"cpa-url":        "MON_CPA_URL is not a valid loopback or HTTPS address, or MON_CPA_KEY is missing",
+	"cpa-down":       "no CLI Proxy API answered at the configured address",
+	"cpa-key":        "the CLI Proxy API refused the management key",
+	"cpa-off":        "the CLI Proxy API's management API is switched off (404)",
+	"cpa-shape":      "the CLI Proxy API answered in a shape this build does not recognise",
+	"cpa-cred-field": "the credential lists no {a}, which the quota endpoint needs",
+	"adapter-host":   "the quota adapter names {a}, which is outside this build's allow-list",
 
 	"collector-panic": "the collector panicked",
 }

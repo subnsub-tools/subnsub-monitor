@@ -1,0 +1,12 @@
+{
+  "name": "ZFS",
+  "tiles": [
+    {
+      "id": "zfs",
+      "name": "ZFS",
+      "icon": "database",
+      "exec": "zpool list -H -o name,health,capacity 2>/dev/null | awk -F'\\t' '\nfunction add(s) { printf \"%s%s\", (n++ ? \",\" : \"\"), s }\nBEGIN { printf \"[\" }\n{\n  id = $1; gsub(/[^A-Za-z0-9_-]/, \"_\", id); cap = $3; sub(/%/, \"\", cap)\n  state = $2 == \"ONLINE\" ? \"ok\" : $2 == \"DEGRADED\" ? \"warn\" : \"bad\"\n  add(sprintf(\"{\\\"id\\\":\\\"zfs_%s_health\\\",\\\"name\\\":\\\"%s\\\",\\\"type\\\":\\\"status\\\",\\\"value\\\":\\\"%s\\\",\\\"label\\\":\\\"%s\\\"}\", id, $1, state, tolower($2)))\n  if (cap ~ /^[0-9]+$/) add(sprintf(\"{\\\"id\\\":\\\"zfs_%s_used\\\",\\\"name\\\":\\\"%s used\\\",\\\"type\\\":\\\"gauge\\\",\\\"value\\\":%s,\\\"unit\\\":\\\"percent\\\",\\\"warn\\\":80,\\\"bad\\\":90,\\\"history\\\":true}\", id, $1, cap))\n}\nEND { print \"]\" }'",
+      "interval": 120
+    }
+  ]
+}

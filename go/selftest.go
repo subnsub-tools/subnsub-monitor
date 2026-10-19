@@ -10,6 +10,9 @@ import (
 )
 
 func selftest() {
+	// What an Android process can and cannot reach, first: on a phone this is
+	// the whole question (android_linux.go).
+	androidSelftest()
 	root := codexSessionsDir()
 	fmt.Println("sessions root :", root)
 	st, err := os.Stat(root)

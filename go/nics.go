@@ -10,7 +10,9 @@ package main
 //
 // net.Interfaces() rather than a per-platform read, because it is stdlib
 // everywhere the helper builds — so a FreeBSD box with no collector of its own
-// still reports its addresses instead of nothing.
+// still reports its addresses instead of nothing. Linux has a second road for
+// where the stdlib's is refused (nics_linux.go); the wire shape is built here
+// from either.
 
 import (
 	"net"
@@ -40,36 +42,70 @@ func nicAddrWorthSending(ip net.IP) bool {
 	return true
 }
 
+// One interface as either road reports it, before the wire shape is built:
+// the stdlib's net.Interfaces(), or a platform's fallback for where that is
+// refused (nics_linux.go, for Android's app sandbox).
+type ifaceInfo struct {
+	name         string
+	up, loopback bool
+	ips          []net.IP
+}
+
+// A platform's second road to the same list, for where the stdlib's is shut.
+// nil where there is none.
+var interfacesFallback func() ([]ifaceInfo, bool)
+
+func stdlibInterfaces() ([]ifaceInfo, bool) {
+	ifaces, err := net.Interfaces()
+	if err != nil || len(ifaces) == 0 {
+		return nil, false
+	}
+	out := make([]ifaceInfo, 0, len(ifaces))
+	for _, iface := range ifaces {
+		info := ifaceInfo{
+			name:     strings.TrimSpace(iface.Name),
+			up:       iface.Flags&net.FlagUp != 0,
+			loopback: iface.Flags&net.FlagLoopback != 0,
+		}
+		// An interface whose addresses cannot be read still earns its row:
+		// the name and the up flag are the two things the card can always
+		// show.
+		if addrs, aerr := iface.Addrs(); aerr == nil {
+			for _, a := range addrs {
+				if ipnet, ok := a.(*net.IPNet); ok {
+					info.ips = append(info.ips, ipnet.IP)
+				}
+			}
+		}
+		out = append(out, info)
+	}
+	return out, true
+}
+
 // Fill s.NICs. Byte counters are left nil here — the platform collector that
 // already walks per-interface counters for the whole-box sum attaches them
 // afterwards through nicCounters, so no platform reads the table twice.
 func fillNICs(s *System) {
-	ifaces, err := net.Interfaces()
-	if err != nil || len(ifaces) == 0 {
+	list, ok := stdlibInterfaces()
+	if !ok && interfacesFallback != nil {
+		list, ok = interfacesFallback()
+	}
+	if !ok {
 		return
 	}
-	out := make([]NIC, 0, len(ifaces))
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagLoopback != 0 {
+	out := make([]NIC, 0, len(list))
+	for _, iface := range list {
+		if iface.loopback || iface.name == "" {
 			continue
 		}
-		name := strings.TrimSpace(iface.Name)
-		if name == "" {
-			continue
-		}
-		n := NIC{Name: name, Up: iface.Flags&net.FlagUp != 0}
-		// An interface whose addresses cannot be read still earns its row: the
-		// name and the up flag are the two things the card can always show.
-		if addrs, aerr := iface.Addrs(); aerr == nil {
-			for _, a := range addrs {
-				ipnet, ok := a.(*net.IPNet)
-				if !ok || !nicAddrWorthSending(ipnet.IP) {
-					continue
-				}
-				n.IPs = append(n.IPs, ipnet.IP.String())
-				if len(n.IPs) >= maxNICAddrs {
-					break
-				}
+		n := NIC{Name: iface.name, Up: iface.up}
+		for _, ip := range iface.ips {
+			if !nicAddrWorthSending(ip) {
+				continue
+			}
+			n.IPs = append(n.IPs, ip.String())
+			if len(n.IPs) >= maxNICAddrs {
+				break
 			}
 		}
 		// A down interface with no address is a slot the kernel keeps, not a

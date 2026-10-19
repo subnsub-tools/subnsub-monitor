@@ -1,0 +1,11 @@
+{
+  "name": "Sensors",
+  "tiles": [
+    {
+      "id": "sensors",
+      "name": "Sensors",
+      "exec": "sensors 2>/dev/null | awk '\nfunction add(s) { printf \"%s%s\", (n++ ? \",\" : \"\"), s }\nBEGIN { printf \"[\" }\n/^(Package id 0|Tctl|Tdie|CPU Temperature|CPU|temp1):/ && !cpu {\n  if (match($0, /[+-][0-9]+(\\.[0-9]+)?/)) { cpu = 1\n    add(sprintf(\"{\\\"id\\\":\\\"cpu_temp\\\",\\\"name\\\":\\\"CPU temp\\\",\\\"type\\\":\\\"gauge\\\",\\\"value\\\":%s,\\\"unit\\\":\\\"celsius\\\",\\\"max\\\":100,\\\"warn\\\":80,\\\"bad\\\":95,\\\"icon\\\":\\\"thermometer\\\",\\\"history\\\":true}\", substr($0, RSTART + 1, RLENGTH - 1))) }\n}\n/^fan[0-9]+:/ && $2 ~ /^[0-9]+$/ && $2 > 0 {\n  f = $1; sub(/:/, \"\", f)\n  add(sprintf(\"{\\\"id\\\":\\\"%s\\\",\\\"name\\\":\\\"Fan %s\\\",\\\"type\\\":\\\"number\\\",\\\"value\\\":%s,\\\"unit\\\":\\\"rpm\\\",\\\"icon\\\":\\\"fan\\\"}\", f, substr(f, 4), $2))\n}\nEND { print \"]\" }'",
+      "interval": 30
+    }
+  ]
+}

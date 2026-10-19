@@ -108,8 +108,8 @@ func TestLabelPrecedenceAndPersistence(t *testing.T) {
 	if _, label := resolveAgent(dir, "", ""); label != "from file" {
 		t.Fatalf("file label not read: %q", label)
 	}
-	if _, label := resolveAgent(dir, "", "from env"); label != "from env" {
-		t.Fatalf("env label should win: %q", label)
+	if _, label := resolveAgent(dir, "", "from env"); label != "from file" {
+		t.Fatalf("saved label must override the install-time environment: %q", label)
 	}
 	if _, label := resolveAgent(t.TempDir(), "", ""); label != "" {
 		t.Fatalf("an unnamed machine should have no label, got %q", label)
@@ -229,7 +229,7 @@ func TestCleanLabel(t *testing.T) {
 
 	// Cut by RUNE. A byte-cut of CJK ends mid-character and puts a replacement
 	// glyph on somebody's dashboard.
-	long := strings.Repeat("东", 40)
+	long := strings.Repeat("\u4e1c", 40)
 	got := cleanLabel(long)
 	if n := len([]rune(got)); n != maxLabel {
 		t.Errorf("CJK label cut to %d runes, want %d", n, maxLabel)
@@ -275,12 +275,44 @@ func TestSetLabelRoundTrip(t *testing.T) {
 	if strings.TrimSpace(string(b)) != "tokyo" {
 		t.Fatalf("stored %q, want %q", strings.TrimSpace(string(b)), "tokyo")
 	}
-	// Clearing removes the file: an empty one would read back as a label of "".
+	// Clearing is persisted, so the old environment cannot resurrect a name.
 	if err := setLabel(""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(conf, "name")); !os.IsNotExist(err) {
-		t.Fatal("clearing the label left the file behind")
+	if _, label := resolveAgent(conf, "", "old install name"); label != "" {
+		t.Fatalf("clear did not survive restart: %q", label)
+	}
+}
+
+func TestRunningAgentReadsPersistedRename(t *testing.T) {
+	scratchHome(t)
+	t.Setenv(labelEnv, "install name")
+	if got := agentLabel(); got != "install name" {
+		t.Fatalf("bootstrap = %q", got)
+	}
+	for _, want := range []string{"\u4e1c\u4eac\U0001f680", "second name", ""} {
+		if err := setLabel(want); err != nil {
+			t.Fatal(err)
+		}
+		if got := agentLabel(); got != want {
+			t.Fatalf("running helper reports %q, want %q", got, want)
+		}
+		if _, got := resolveAgent(configDir(), "", "install name"); got != want {
+			t.Fatalf("fresh process reports %q, want %q", got, want)
+		}
+	}
+	// A failed atomic replacement must neither acknowledge nor lose the name.
+	if err := setLabel("keep me"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(configDir(), "name.new"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := setLabel("lost write"); err == nil {
+		t.Fatal("write failure was reported as success")
+	}
+	if got := agentLabel(); got != "keep me" {
+		t.Fatalf("failed write changed live name to %q", got)
 	}
 }
 

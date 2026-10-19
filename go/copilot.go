@@ -10,6 +10,15 @@ package main
 //	  {"quota_snapshots":{"premium_interactions":{...},"chat":{...}},
 //	   "quota_reset_date":"2026-09-01","copilot_plan":"individual"}
 //
+// A seat whose snapshots are the all-zero placeholder (token-based billing,
+// Business) may still carry its month in `monthly_quotas` and what is left
+// of it in `limited_user_quotas`, keyed `completions` (premium) and `chat`;
+// those are read when the snapshot itself says nothing (CodexBar
+// CopilotUsageModels). The same seats report `credits_used`, a count of AI
+// credits with no ceiling anywhere in GitHub's API (CodexBar@2d76cd9e9f,
+// docs/copilot.md: every billing endpoint was probed and none returns one);
+// a count with no denominator has no slot on this wire and is not read.
+//
 // Same cost rung as Claude — we hold a credential and make one HTTPS call to
 // the vendor that issued it — and the same rules travel with it (claude.go):
 // read the one field, never refresh, never write back, and no transport error
@@ -35,7 +44,7 @@ const (
 	copilotTokenEnv = "MON_COPILOT_TOKEN"
 )
 
-var copilotCache provCache
+var copilotCache = provCache{pace: paceMark{id: "copilot"}}
 
 func collectCopilot() Provider {
 	return copilotCache.collect(fetchCopilot)
@@ -174,18 +183,23 @@ func fetchCopilot() Provider {
 	}
 
 	var doc struct {
-		QuotaSnapshots map[string]json.RawMessage `json:"quota_snapshots"`
-		QuotaResetDate string                     `json:"quota_reset_date"`
-		CopilotPlan    string                     `json:"copilot_plan"`
+		QuotaSnapshots    map[string]json.RawMessage `json:"quota_snapshots"`
+		QuotaResetDate    string                     `json:"quota_reset_date"`
+		CopilotPlan       string                     `json:"copilot_plan"`
+		MonthlyQuotas     map[string]any             `json:"monthly_quotas"`
+		LimitedUserQuotas map[string]any             `json:"limited_user_quotas"`
 	}
 	if json.Unmarshal(body, &doc) != nil {
 		return fail("api-error", "http-shape")
 	}
 
-	// The reset date is a bare YYYY-MM-DD. Day granularity is all upstream
-	// gives — same trade as amp.go's "in 23 days", rendered at UTC midnight.
+	// The reset date: a full timestamp when GitHub sends one, else the bare
+	// YYYY-MM-DD it usually does — day granularity, same trade as amp.go's
+	// "in 23 days", rendered at UTC midnight.
 	var resets *float64
-	if t, err := time.Parse("2006-01-02", doc.QuotaResetDate); err == nil {
+	if e := isoToEpoch(doc.QuotaResetDate); e > 0 {
+		resets = fp(e)
+	} else if t, err := time.Parse("2006-01-02", doc.QuotaResetDate); err == nil {
 		resets = fp(float64(t.Unix()))
 	}
 
@@ -213,19 +227,21 @@ func fetchCopilot() Provider {
 			unlimited = true
 			continue
 		}
-		used := copilotUsed(&s)
-		if used == nil {
-			continue
-		}
 		label := key
 		if key == "premium_interactions" {
 			label = "premium"
 		}
-		lim := Limit{
-			Key: tame(label, 24), UsedPercent: *used,
-			WindowLabel: sp("month"), ResetsAt: resets,
+		lim := Limit{Key: tame(label, 24), WindowLabel: sp("month"), ResetsAt: resets}
+		if used := copilotUsed(&s); used != nil {
+			lim.UsedPercent = *used
+			lim.UsedAmount, lim.TotalAmount, lim.RemainingAmount = copilotAmounts(&s)
+		} else if m := copilotMonthly(doc.MonthlyQuotas, doc.LimitedUserQuotas, key); m != nil {
+			// The placeholder snapshot said nothing; the month's figures do.
+			lim.UsedPercent = m.UsedPercent
+			lim.UsedAmount, lim.TotalAmount, lim.RemainingAmount = m.UsedAmount, m.TotalAmount, m.RemainingAmount
+		} else {
+			continue
 		}
-		lim.UsedAmount, lim.TotalAmount, lim.RemainingAmount = copilotAmounts(&s)
 		p.Limits = append(p.Limits, lim)
 	}
 	if unlimited {
@@ -241,4 +257,35 @@ func fetchCopilot() Provider {
 		p.PlanType = sp(plan)
 	}
 	return p
+}
+
+// The month's figures for a snapshot key, out of `monthly_quotas` (the
+// allowance) and `limited_user_quotas` (what is left of it): premium
+// interactions are `completions` there, chat is `chat`. Both sides must be
+// present and the allowance positive; a remainder above it is the same
+// placeholder trouble copilotUsed refuses, and reads as nothing. Per
+// CodexBar CopilotUsageModels.monthlyQuotaFallback.
+func copilotMonthly(monthly, limited map[string]any, key string) *Limit {
+	field := ""
+	switch key {
+	case "premium_interactions":
+		field = "completions"
+	case "chat":
+		field = "chat"
+	default:
+		return nil
+	}
+	if monthly == nil || limited == nil {
+		return nil
+	}
+	total, okT := adapterNum(monthly[field])
+	left, okL := adapterNum(limited[field])
+	if !okT || !okL || total <= 0 || left < 0 || left > total {
+		return nil
+	}
+	used := total - left
+	return &Limit{
+		UsedPercent: round2(used / total * 100),
+		UsedAmount:  fp(round2(used)), TotalAmount: fp(round2(total)), RemainingAmount: fp(round2(left)),
+	}
 }

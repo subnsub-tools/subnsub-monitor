@@ -25,12 +25,9 @@ import (
 )
 
 // `fail("not-signed-in", "creds-missing", …)` and `p.failWith("no-sessions",
-// "no-home")` — the collectors' two spellings of the same call.
-var detailCallRE = regexp.MustCompile(`fail(?:With)?\("[a-z-]*", "([a-z][a-z0-9-]*)"`)
-
-// gemini's token refresh answers with a (token, error, code, arg) tuple rather
-// than calling fail() itself, since its caller decides what to do with it.
-var detailTupleRE = regexp.MustCompile(`return "", "[a-z-]+", "([a-z][a-z0-9-]*)"`)
+// "no-home")` — the collectors' two spellings of the same call — and the CPA
+// rung's `noteErr("api-error", "http-403")`, which records one per account.
+var detailCallRE = regexp.MustCompile(`(?:fail(?:With)?|noteErr)\("[a-z-]*", "([a-z][a-z0-9-]*)"`)
 
 func codesUsedInPackage(t *testing.T) map[string]bool {
 	t.Helper()
@@ -47,10 +44,8 @@ func codesUsedInPackage(t *testing.T) map[string]bool {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, re := range []*regexp.Regexp{detailCallRE, detailTupleRE} {
-			for _, m := range re.FindAllStringSubmatch(string(src), -1) {
-				used[m[1]] = true
-			}
+		for _, m := range detailCallRE.FindAllStringSubmatch(string(src), -1) {
+			used[m[1]] = true
 		}
 	}
 	if len(used) == 0 {
@@ -83,7 +78,7 @@ func TestDetailTextSplicesAndRefusesUnknownCodes(t *testing.T) {
 	// A control character in a vendor's error string must not ride out to
 	// somebody else's screen, and the cut is by rune: half a character is not
 	// a character. 200 wide characters is well past the limit.
-	long := strings.Repeat("东", 200)
+	long := strings.Repeat("\u4e1c", 200)
 	if got := detailArgText(long); len([]rune(got)) != detailArgMax {
 		t.Errorf("argument cut to %d runes, want %d", len([]rune(got)), detailArgMax)
 	}
@@ -94,11 +89,11 @@ func TestDetailTextSplicesAndRefusesUnknownCodes(t *testing.T) {
 
 func TestFailWithFillsBothForms(t *testing.T) {
 	var p Provider
-	p.failWith("not-installed", "cli-missing", "auggie")
-	if p.Error != "not-installed" || p.DetailCode != "cli-missing" || p.DetailArg != "auggie" {
+	p.failWith("not-installed", "cli-missing", "kiro-cli")
+	if p.Error != "not-installed" || p.DetailCode != "cli-missing" || p.DetailArg != "kiro-cli" {
 		t.Fatalf("failWith left a field unset: %+v", p)
 	}
-	if p.Detail != "no usable auggie command was found" {
+	if p.Detail != "no usable kiro-cli command was found" {
 		t.Errorf("sentence and code disagree: %q", p.Detail)
 	}
 	// No argument is a normal case, and must not leave a hole behind.

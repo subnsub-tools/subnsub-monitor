@@ -199,3 +199,108 @@ func TestAgCsrfRefusesAnythingHeaderUnsafe(t *testing.T) {
 		t.Fatalf("absent: %q", got)
 	}
 }
+
+// The summary in the shapes its three sources send (CodexBar
+// AntigravityQuotaSummaryParser, steipete/CodexBar@62acfd8ead): a `summary`
+// wrapper and `id` / `name` spellings from the CLI's report; a stated
+// `window` that overrides the id; a `disabled` bucket that says nothing.
+func TestAgLimitsReadsTheCLIReportShape(t *testing.T) {
+	var s agSummary
+	body := `{"summary":{"groups":[{"name":"Gemini Models","buckets":[
+	  {"id":"gemini-weekly","name":"Weekly Limit Remaining","window":"weekly","remainingFraction":0.86,"resetTime":"2026-09-17T18:40:27Z"},
+	  {"id":"gemini-5h","name":"Five Hour Limit Remaining","window":"5h","remainingFraction":0.95},
+	  {"id":"3p-5h","window":"5h","remainingFraction":0.5,"disabled":true}]}]}}`
+	if err := json.Unmarshal([]byte(body), &s); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	lims := agLimits(s.groups())
+	if len(lims) != 2 {
+		t.Fatalf("two live buckets, one disabled: %+v", lims)
+	}
+	if lims[0].Key != "gemini-weekly" || lims[0].UsedPercent != 14 || lims[0].WindowLabel == nil || *lims[0].WindowLabel != "7d" ||
+		lims[0].Scope == nil || *lims[0].Scope != "Gemini Models" || lims[0].ResetsAt == nil {
+		t.Errorf("weekly: %+v", lims[0])
+	}
+	if lims[1].Key != "gemini-5h" || *lims[1].WindowLabel != "5h" {
+		t.Errorf("5h: %+v", lims[1])
+	}
+}
+
+// The CLI's own report (`agy -p /usage --output-format json`, agy 1.3.4 as
+// observed on 2026-10-14): the `command.data` wrapper, snake_case buckets,
+// a banner before the document — and the failure ladder when what came
+// back is not a report.
+func TestParseAgyReportReadsThePrintShape(t *testing.T) {
+	p := Provider{ID: "antigravity", Name: "Antigravity", Source: "cli"}
+	report := `{"conversation_id":"","status":"SUCCESS","response":"Gemini Models\tWeekly Limit Remaining\t100%\t2026-10-21T01:25:17Z\n","duration_seconds":0,"num_turns":0,` +
+		`"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0},"command":{"name":"usage","data":{"description":"Within each group, models share a weekly limit and a 5-hour limit.","groups":[` +
+		`{"name":"Gemini Models","description":"Models within this group: Gemini Flash, Gemini Pro","buckets":[` +
+		`{"id":"gemini-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":0.86,"reset_time":"2026-10-21T01:25:17Z"},` +
+		`{"id":"gemini-5h","name":"Five Hour Limit Remaining","window":"5h","remaining_fraction":1,"reset_time":"2026-10-14T06:25:17Z"}]},` +
+		`{"name":"Claude and GPT models","description":"Models within this group: Claude Opus, Claude Sonnet, GPT-OSS","buckets":[` +
+		`{"id":"3p-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":0.5,"reset_time":"2026-10-21T01:25:17Z"},` +
+		`{"id":"3p-5h","name":"Five Hour Limit Remaining","window":"5h","remaining_fraction":0.25,"disabled":true}]}]}}}`
+	got := parseAgyReport(p, "A new agy is available.\n"+report+"\n", false)
+	if !got.OK || got.Source != "cli" || len(got.Limits) != 3 || got.RecordedAt == nil {
+		t.Fatalf("report not read: %+v", got)
+	}
+	w := got.Limits[0]
+	if w.Key != "gemini-weekly" || w.UsedPercent != 14 || w.WindowLabel == nil || *w.WindowLabel != "7d" ||
+		w.Scope == nil || *w.Scope != "Gemini Models" || w.ResetsAt == nil || *w.ResetsAt != isoToEpoch("2026-10-21T01:25:17Z") {
+		t.Errorf("gemini weekly: %+v", w)
+	}
+	if h := got.Limits[1]; h.Key != "gemini-5h" || h.UsedPercent != 0 || *h.WindowLabel != "5h" {
+		t.Errorf("gemini 5h: %+v", h)
+	}
+	if c := got.Limits[2]; c.Key != "3p-weekly" || c.UsedPercent != 50 || *c.Scope != "Claude and GPT models" {
+		t.Errorf("claude/gpt weekly (and the disabled 5h bucket dropped): %+v", c)
+	}
+
+	// Not a report: the sign-in phrase claims that diagnosis, a failing exit
+	// or a failed status is reported as that, a clean exit with no report is
+	// a shape this build does not know, and a report with no bucket is empty.
+	if f := parseAgyReport(p, "Error: You are not logged into Antigravity.\n", true); f.OK || f.Error != "not-signed-in" || f.DetailCode != "cli-signin" || f.DetailArg != "agy" {
+		t.Errorf("signed out: %+v", f)
+	}
+	if f := parseAgyReport(p, `{"status":"FAILURE","response":"something broke","command":{"name":"usage"}}`, false); f.OK || f.DetailCode != "cli-exit" {
+		t.Errorf("failed status: %+v", f)
+	}
+	if f := parseAgyReport(p, "panic: something\n", true); f.OK || f.DetailCode != "cli-exit" {
+		t.Errorf("non-zero exit: %+v", f)
+	}
+	if f := parseAgyReport(p, `{"status":"SUCCESS","command":{"name":"help","data":{}}}`, false); f.OK || f.DetailCode != "cli-shape" {
+		t.Errorf("not the usage command: %+v", f)
+	}
+	if f := parseAgyReport(p, `{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[]}}}`, false); f.OK || f.DetailCode != "cli-nolines" {
+		t.Errorf("empty report: %+v", f)
+	}
+}
+
+// A stated window names the period whatever the id says; a window this
+// build does not know is no period, not a guess from the id.
+func TestAgWindowStatedBeatsTheID(t *testing.T) {
+	cases := []struct{ window, id, want string }{
+		{"", "gemini-5h", "5h"},
+		{"", "WEEKLY", "7d"},
+		{"weekly", "gemini-5h", "7d"},
+		{"5h", "gemini-weekly", "5h"},
+		{"Five Hour Limit", "gemini-weekly", "5h"},
+		{"unknown", "gemini-5h", ""},
+	}
+	for _, c := range cases {
+		if got := agWindow(c.window, c.id); got != c.want {
+			t.Errorf("window %q id %q: got %q want %q", c.window, c.id, got, c.want)
+		}
+	}
+}
+
+// The desktop app ships as Gemini.app since 2026-08 (CodexBar
+// AntigravityStatusProbe, @a2444e62ec): its server's path is identity enough.
+func TestAgIsServerKnowsTheGeminiBundle(t *testing.T) {
+	if !agIsServer([]string{"/applications/gemini.app/contents/resources/bin/language_server", "--csrf_token", "abc"}) {
+		t.Fatal("the Gemini.app bundle's server should match")
+	}
+	if agIsServer([]string{"/applications/gemini.app/contents/resources/bin/other_tool", "--csrf_token", "abc"}) {
+		t.Fatal("only the server's own name, even in the bundle")
+	}
+}

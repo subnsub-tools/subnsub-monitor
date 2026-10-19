@@ -33,7 +33,7 @@ const (
 	kiloTokenEnv = "MON_KILO_TOKEN"
 )
 
-var kiloCache provCache
+var kiloCache = provCache{pace: paceMark{id: "kilo"}}
 
 func collectKilo() Provider {
 	return kiloCache.collect(fetchKilo)

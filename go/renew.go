@@ -290,8 +290,13 @@ func installedEnv() map[string]string {
 			continue
 		}
 		switch k {
-		case tokenEnv, siteEnv:
+		case tokenEnv, siteEnv, cpaURLEnv, ipv4EnvVar, myipEnvVar:
 			out[k] = strings.TrimSpace(v)
+		case cpaKeyEnv:
+			// Credentials are opaque data. Leading and trailing spaces can be
+			// part of a password or API key, so only the fields whose grammar
+			// permits surrounding whitespace are trimmed.
+			out[k] = v
 		}
 	}
 	return out
@@ -299,10 +304,11 @@ func installedEnv() map[string]string {
 
 // ── where a renewed token lives ────────────────────────────────────────────
 //
-// NOT the file above. That one is written once by the installer and is a
-// systemd EnvironmentFile besides — writing a renewal into it would take effect
-// on one platform, after a restart, and never on the others. A file the HELPER
-// owns works the same everywhere and leaves the installer's formats alone.
+// NOT the file above. That one is written once by the installer; Linux also
+// gets a token-only EnvironmentFile derived from it. Writing a renewal into
+// either would take effect on one platform, after a restart, and never on the
+// others. A file the HELPER owns works the same everywhere and leaves the
+// installer's formats alone.
 //
 // It records the RELAY the token belongs to. There is one such file per
 // install, and `connect` takes an arbitrary URL, so without that field a

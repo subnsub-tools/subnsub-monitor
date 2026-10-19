@@ -36,6 +36,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -73,13 +74,15 @@ const (
 	// Snippet length, in runes — what one hit contributes to the 16 KB pipe.
 	sessSnippetRunes = 200
 
-	// The ENCODED answer's ceiling, under the console's 16 KiB output cap
-	// with room to spare. Runes are not bytes — 200 runes of CJK is 600
-	// bytes, and encoding/json turns `<` into six — so the only honest
-	// budget is on the marshalled document itself (review 2026-08-18). A
-	// document over this drops its newest-last hits until it fits, marked
-	// partial, rather than letting the channel cut it mid-JSON into
-	// something the dashboard cannot read at all.
+	// The answer's ceiling, measured as sessFrameCost measures it: the size
+	// of the document AFTER console.go has escaped it into the result
+	// frame's one JSON string. Runes are not bytes, and marshalled bytes are
+	// not frame bytes either — every quote and backslash in the document
+	// doubles again inside the frame, and consoleReport halves anything
+	// whose frame runs past 20 KiB, mid-JSON and unreadable (review
+	// 2026-08-18). 15 KiB of frame cost leaves the envelope its room. A
+	// document over this sheds until it fits, marked, rather than letting
+	// the channel cut it into something the dashboard cannot read at all.
 	sessMaxJSONBytes = 15 << 10
 
 	// How deep sessCollectText follows nested structure before deciding the
@@ -88,49 +91,22 @@ const (
 	sessMaxDepth = 12
 )
 
-// One agent tool whose transcripts this machine searches. The root is the
-// tree the walk is confined to; match picks the file names that are
-// transcripts rather than the tool's other droppings.
-type sessSource struct {
-	agent string
-	root  string
-	match func(name string) bool
-}
-
-// The tools searched, in the order their hits should tie-break. Local
-// transcript trees only — a tool that is not installed simply has no
-// directory, and that is a normal answer, not an error.
-func sessSources() []sessSource {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return nil
-	}
-	return []sessSource{
-		{
-			agent: "claude",
-			root:  filepath.Join(home, ".claude", "projects"),
-			match: func(n string) bool { return strings.HasSuffix(n, ".jsonl") },
-		},
-		{
-			agent: "codex",
-			root:  codexSessionsDir(),
-			match: func(n string) bool {
-				return strings.HasPrefix(n, "rollout-") && strings.HasSuffix(n, ".jsonl")
-			},
-		},
-	}
-}
+// The sources themselves — which tools are read, and the per-tool hooks the
+// readers below take as given — live in sessionsources.go.
 
 // One hit, in exactly the field names the dashboard renders. `agent` is the
 // tool, `project` the working directory's base name when the transcript
 // recorded one, `session_id` something short enough to show and stable enough
-// to look up by hand.
+// to look up by hand. `line` is the 1-based transcript line the hit lives on
+// — the anchor `sessions open --around` accepts, which is what turns a
+// snippet into a place the dashboard can go back to.
 type sessHit struct {
 	Project   string `json:"project"`
 	Agent     string `json:"agent"`
 	Timestamp string `json:"timestamp"`
 	SessionID string `json:"session_id"`
 	Snippet   string `json:"snippet"`
+	Line      int    `json:"line,omitempty"`
 }
 
 // The whole answer. Matches is initialised, never nil: the far end asks
@@ -144,13 +120,179 @@ type sessReport struct {
 	Partial bool      `json:"partial,omitempty"`
 }
 
-// What a search was asked to do. Terms arrive lowercased and non-empty; a hit
-// is a single transcript line whose extracted text contains every one of
-// them. The deadline is absolute so tests can put it in the past.
+// What a search was asked to do. A hit is a single transcript message whose
+// extracted text holds every one of `terms` and matches every one of `res`,
+// and holds none of `nots` and matches none of `nres`. Terms arrive lowercased
+// and non-empty — a term may contain spaces, which is what a quoted phrase
+// becomes, and is the whole difference between searching for two words and
+// searching for two words in that order.
+//
+// The negative halves are why matching lives on this type rather than in the
+// scan loop: `recent` narrows the same way, the archive answers the same
+// query, and three copies of "…and none of these" would be three chances to
+// disagree about what a query means.
+//
+// The deadline is absolute so tests can put it in the past.
 type sessQuery struct {
-	terms    []string
+	terms []string
+	nots  []string
+	res   []*regexp.Regexp
+	nres  []*regexp.Regexp
+	// What the answer is narrowed to. The zero value means "everything", so a
+	// caller that does not filter says nothing about it.
+	filter   sessFilter
 	limit    int
 	deadline time.Time
+}
+
+// Whether one message's text answers the whole query.
+func (q sessQuery) match(text string) bool {
+	for _, t := range q.terms {
+		if sessIndexFold(text, t) < 0 {
+			return false
+		}
+	}
+	for _, t := range q.nots {
+		if sessIndexFold(text, t) >= 0 {
+			return false
+		}
+	}
+	for _, re := range q.res {
+		if !re.MatchString(text) {
+			return false
+		}
+	}
+	for _, re := range q.nres {
+		if re.MatchString(text) {
+			return false
+		}
+	}
+	return true
+}
+
+// Whether this query can match anything at all. A query of nothing but
+// exclusions would match every message ever written, which is not a search
+// anybody meant to run.
+func (q sessQuery) empty() bool {
+	return len(q.terms) == 0 && len(q.res) == 0
+}
+
+// The text a snippet should be cut around: the first term, or — for a query
+// made only of patterns — whatever the first pattern actually matched here, so
+// a regex hit is shown at the place it hit rather than from the top of a long
+// message.
+func (q sessQuery) anchor(text string) string {
+	if len(q.terms) > 0 {
+		return q.terms[0]
+	}
+	for _, re := range q.res {
+		if m := re.FindString(text); m != "" {
+			return sessLowerASCII(m)
+		}
+	}
+	return ""
+}
+
+// The first positive term, for the callers that want one without a message in
+// hand. Empty for a pattern-only query.
+func (q sessQuery) first() string {
+	if len(q.terms) > 0 {
+		return q.terms[0]
+	}
+	return ""
+}
+
+// The longest a search pattern may be, in CODE POINTS. A pattern is
+// caller-shaped and runs against every message of every candidate transcript;
+// RE2 makes that linear rather than catastrophic, but there is still no
+// question a longer pattern could ask that a shorter one could not.
+//
+// Counted in code points rather than bytes because the panel and the relay
+// count that way too, and a limit that means three different lengths would
+// accept a hundred Chinese characters in the browser and report this helper as
+// too old to run it (review 2026-08-19).
+const sessMaxPattern = 200
+
+// One search pattern, compiled the way both ends of this feature agree to read
+// one: case-insensitive, because every other kind of term here is, and RE2's
+// dialect, which has no backreferences and no lookaround — the panel refuses
+// those up front so that a query means the same thing whichever source answers
+// it.
+func sessCompile(pat string) (*regexp.Regexp, error) {
+	if pat == "" {
+		return nil, fmt.Errorf("empty pattern")
+	}
+	if utf8.RuneCountInString(pat) > sessMaxPattern {
+		return nil, fmt.Errorf("pattern longer than %d characters", sessMaxPattern)
+	}
+	return regexp.Compile("(?i)" + pat)
+}
+
+// When one message was written, in RFC3339, or "" when the transcript does
+// not say. Three spellings, because the tools genuinely disagree: a top-level
+// `timestamp` string (claude, codex), unix MILLISECONDS under the message's
+// own meta (amp), unix SECONDS under a nested one (kiro).
+//
+// Without this every hit in a session shares the FILE's mtime, which for a
+// thread spanning months puts every message in it at the same minute — the one
+// the conversation last moved (2026-08-19). The tools that record nothing at
+// all still fall back to mtime, which is the honest answer there.
+func sessMsgTime(raw map[string]any) string {
+	if ts, ok := raw["timestamp"].(string); ok {
+		if _, err := time.Parse(time.RFC3339, ts); err == nil {
+			return ts
+		}
+	}
+	if meta, ok := raw["meta"].(map[string]any); ok {
+		if ms, ok := meta["sentAt"].(float64); ok {
+			return sessEpoch(ms / 1000)
+		}
+	}
+	if data, ok := raw["data"].(map[string]any); ok {
+		if meta, ok := data["meta"].(map[string]any); ok {
+			if s, ok := meta["timestamp"].(float64); ok {
+				return sessEpoch(s)
+			}
+		}
+	}
+	return ""
+}
+
+// Unix seconds as an RFC3339 stamp, or "" for a number no clock produced.
+// The window is deliberately wide and the point of it is narrow: a field that
+// happens to be called `timestamp` and holds a sequence number must not become
+// a date in 1970 that a listing then sorts by.
+func sessEpoch(sec float64) string {
+	if sec < 946684800 || sec > 4102444800 { // 2000-01-01 … 2100-01-01
+		return ""
+	}
+	return time.Unix(int64(sec), 0).UTC().Format(time.RFC3339)
+}
+
+// Whether a parsed line is a tool's own system prompt rather than anything
+// somebody said. Some tools keep theirs in the transcript, as one message of
+// many kilobytes that mentions nearly every word a person might search for; a
+// search that counted it would return every session that tool ever opened, for
+// almost any query.
+// The {kind, data} kinds that hold a tool's plumbing rather than anything
+// said. Named rather than inferred: the format's whole point is that `kind`
+// says what `data` is, so the honest reading is to believe it.
+func sessPlumbingKind(kind string) bool {
+	switch kind {
+	case "toolUse", "toolResult":
+		return true
+	}
+	return false
+}
+
+func sessIsSystem(m map[string]any) bool {
+	if t, _ := m["type"].(string); t == "system" {
+		return true
+	}
+	if k, _ := m["kind"].(string); k == "system" {
+		return true
+	}
+	return false
 }
 
 // The CLI entry: `sessions search [--limit N] [--json] [--] TEXT...`.
@@ -163,9 +305,28 @@ type sessQuery struct {
 func runSessionsSearchCLI(rest []string) int {
 	limit := sessDefaultLimit
 	asJSON := false
+	var filter sessFilter
+	var q sessQuery
+	now := time.Now()
 	var parts []string
 	for i := 0; i < len(rest); i++ {
 		a := rest[i]
+		// Before the switch, so a filter flag is never mistaken for a term and
+		// never reaches the unknown-flag refusal below.
+		if handled, err := sessFilterFlag(&filter, rest, &i, now); handled {
+			if err != nil {
+				warnf("%v", err)
+				return 2
+			}
+			continue
+		}
+		if handled, err := sessQueryFlag(&q, rest, &i); handled {
+			if err != nil {
+				warnf("%v", err)
+				return 2
+			}
+			continue
+		}
 		switch {
 		case a == "--":
 			parts = append(parts, rest[i+1:]...)
@@ -198,9 +359,14 @@ func runSessionsSearchCLI(rest []string) int {
 			parts = append(parts, a)
 		}
 	}
-	terms := sessTerms(strings.Join(parts, " "))
-	if len(terms) == 0 {
-		warnf("usage: subnsub-monitor sessions search [--limit N] [--json] [--] TEXT...")
+	// Words written plainly are terms, and they come after any --term so that a
+	// query built from both keeps the flags' phrases first — which is what
+	// decides the term a snippet is cut around.
+	q.terms = append(q.terms, sessTerms(strings.Join(parts, " "))...)
+	if q.empty() {
+		warnf("usage: subnsub-monitor sessions search [--limit N] [--project NAME] [--since WHEN] [--until WHEN]")
+		warnf("       [--term TEXT] [--not TEXT] [--re PATTERN] [--not-re PATTERN] [--json] [--] TEXT...")
+		warnf("a search needs something to look FOR: exclusions alone would match every message ever written")
 		return 2
 	}
 	if limit < 1 {
@@ -209,12 +375,11 @@ func runSessionsSearchCLI(rest []string) int {
 	if limit > sessMaxLimit {
 		limit = sessMaxLimit
 	}
+	q.filter = filter
+	q.limit = limit
+	q.deadline = now.Add(sessBudget)
 
-	rep := sessionsSearch(sessSources(), sessQuery{
-		terms:    terms,
-		limit:    limit,
-		deadline: time.Now().Add(sessBudget),
-	})
+	rep := sessionsSearch(sessSources(), q)
 
 	if asJSON {
 		out, err := sessEncodeCapped(&rep)
@@ -243,7 +408,7 @@ func runSessionsSearchCLI(rest []string) int {
 		line = append(line, id, h.Snippet)
 		fmt.Println(strings.Join(line, "  "))
 	}
-	fmt.Printf("%d match(es) across %d file(s), %d scanned, %d ms", len(rep.Matches), rep.Files, rep.Scanned, rep.Ms)
+	fmt.Printf("%d match(es) across %d file(s), %d scanned, %d ms%s", len(rep.Matches), rep.Files, rep.Scanned, rep.Ms, filter.describe())
 	if rep.Partial {
 		fmt.Print(" (partial — some files could not be fully searched)")
 	}
@@ -251,12 +416,26 @@ func runSessionsSearchCLI(rest []string) int {
 	return 0
 }
 
+// What this document will cost inside the console result frame, where it
+// travels as ONE escaped JSON string. This — not len(doc) — is the number the
+// far end's 20 KiB body cap judges, and the difference is not pedantry: a
+// transcript full of code doubles its quotes and backslashes again at that
+// second encoding, and a document sized only by its own bytes sails through
+// here and comes back halved (review 2026-08-18).
+func sessFrameCost(doc []byte) int {
+	esc, err := json.Marshal(string(doc))
+	if err != nil {
+		return len(doc) * 2 // unreachable for valid UTF-8; fail conservative
+	}
+	return len(esc)
+}
+
 // The report as JSON, guaranteed to fit the channel. Hits leave from the end
 // — the end is the oldest-file tail of the list, so what survives is what the
 // ordering already ranked first — and any drop is declared in `partial`.
 func sessEncodeCapped(rep *sessReport) ([]byte, error) {
 	out, err := json.Marshal(rep)
-	for err == nil && len(out) > sessMaxJSONBytes && len(rep.Matches) > 0 {
+	for err == nil && sessFrameCost(out) > sessMaxJSONBytes && len(rep.Matches) > 0 {
 		rep.Matches = rep.Matches[:len(rep.Matches)-1]
 		rep.Partial = true
 		out, err = json.Marshal(rep)
@@ -325,6 +504,63 @@ func sessGateTerms(terms []string) []string {
 	return out
 }
 
+// The query flags, in the same shape sessFilterFlag has and parsed in the same
+// place, so `--since` and `--not` are one code path with one set of rules.
+//
+// Why these exist at all when a query can just be words: a word written
+// plainly cannot say "these two words, in this order" or "everything except
+// this", and the shell has already finished splitting by the time this program
+// sees its arguments. So the panel — which IS allowed to see the whole query
+// string — does the splitting, and hands the pieces down as flags. A person at
+// a terminal gets the same three powers by writing them out, with their own
+// shell doing the quoting.
+func sessQueryFlag(q *sessQuery, rest []string, i *int) (bool, error) {
+	a := rest[*i]
+	name, val := a, ""
+	inline := false
+	if eq := strings.IndexByte(a, '='); eq > 0 {
+		name, val, inline = a[:eq], a[eq+1:], true
+	}
+	switch name {
+	case "--term", "--not", "--re", "--not-re":
+	default:
+		return false, nil
+	}
+	if !inline {
+		if *i+1 >= len(rest) {
+			return true, fmt.Errorf("%s needs a value", name)
+		}
+		*i++
+		val = rest[*i]
+	}
+	switch name {
+	case "--term", "--not":
+		// Inner whitespace is kept — that is exactly what makes this a phrase
+		// rather than a word — but the ends are trimmed, because a trailing
+		// space is a typo in every query anybody has ever meant to write.
+		t := sessLowerASCII(strings.TrimSpace(val))
+		if t == "" {
+			return true, fmt.Errorf("%s needs some text", name)
+		}
+		if name == "--term" {
+			q.terms = append(q.terms, t)
+		} else {
+			q.nots = append(q.nots, t)
+		}
+	default:
+		re, err := sessCompile(strings.TrimSpace(val))
+		if err != nil {
+			return true, fmt.Errorf("%s needs a pattern: %v", name, err)
+		}
+		if name == "--re" {
+			q.res = append(q.res, re)
+		} else {
+			q.nres = append(q.nres, re)
+		}
+	}
+	return true, nil
+}
+
 // A transcript file waiting to be searched: which source it belongs to, where
 // it lives under that source's root, and when it last changed — the sort key
 // that decides what "the most recent matches" means.
@@ -351,7 +587,18 @@ func sessCandidates(src sessSource, srcIdx int, deadline time.Time) (out []sessF
 			partial = true
 			return nil
 		}
-		if d.IsDir() || !src.match(d.Name()) {
+		if d.IsDir() {
+			return nil
+		}
+		// The relative path first, because that is what a matcher is given:
+		// several of these tools say what a file is by the directory above it,
+		// not by its own name.
+		rel, err := filepath.Rel(src.root, p)
+		if err != nil {
+			partial = true
+			return nil
+		}
+		if !src.match(rel) {
 			return nil
 		}
 		info, err := d.Info()
@@ -362,15 +609,25 @@ func sessCandidates(src sessSource, srcIdx int, deadline time.Time) (out []sessF
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		rel, err := filepath.Rel(src.root, p)
-		if err != nil {
-			partial = true
-			return nil
-		}
 		out = append(out, sessFile{srcIdx, rel, info.ModTime()})
 		return nil
 	})
 	return out, partial
+}
+
+// Newest first, with a stable tie-break so equal mtimes cannot reorder
+// between runs — every sessions verb promises the same "recent" and this is
+// the one definition of it.
+func sessSortFiles(files []sessFile) {
+	sort.Slice(files, func(i, j int) bool {
+		if !files[i].mtime.Equal(files[j].mtime) {
+			return files[i].mtime.After(files[j].mtime)
+		}
+		if files[i].src != files[j].src {
+			return files[i].src < files[j].src
+		}
+		return files[i].rel < files[j].rel
+	})
 }
 
 // The search: newest transcripts first, across every source at once, stopping
@@ -382,39 +639,11 @@ func sessionsSearch(sources []sessSource, q sessQuery) sessReport {
 	started := time.Now()
 	rep := sessReport{Matches: []sessHit{}}
 
-	roots := make([]*os.Root, len(sources))
-	var files []sessFile
-	for i, src := range sources {
-		if src.root == "" {
-			continue
-		}
-		r, err := os.OpenRoot(src.root)
-		if err != nil {
-			// No such directory is the tool not being installed — normal, and
-			// not partial: there are no transcripts being missed.
-			if !os.IsNotExist(err) {
-				rep.Partial = true
-			}
-			continue
-		}
-		defer r.Close()
-		roots[i] = r
-		cs, partial := sessCandidates(src, i, q.deadline)
-		if partial {
-			rep.Partial = true
-		}
-		files = append(files, cs...)
+	roots, files, partial := sessAllCandidates(sources, q.deadline)
+	defer sessCloseRoots(roots)
+	if partial {
+		rep.Partial = true
 	}
-	sort.Slice(files, func(i, j int) bool {
-		if !files[i].mtime.Equal(files[j].mtime) {
-			return files[i].mtime.After(files[j].mtime)
-		}
-		// A stable tie-break so equal mtimes cannot reorder between runs.
-		if files[i].src != files[j].src {
-			return files[i].src < files[j].src
-		}
-		return files[i].rel < files[j].rel
-	})
 	rep.Files = len(files)
 
 	gate := sessGateTerms(q.terms)
@@ -426,7 +655,25 @@ func sessionsSearch(sources []sessSource, q sessQuery) sessReport {
 			rep.Partial = true
 			break
 		}
-		hits, trouble := sessScanFile(roots[f.src], sources[f.src], f, q, gate)
+		// The cheap half of the filter, before anything is opened. A file ruled
+		// out by its mtime is not scanned and does not count as scanned — which
+		// is what makes `--since` a budget saved rather than a result thrown
+		// away after the reading was already paid for.
+		if !q.filter.wantsTime(f.mtime) {
+			continue
+		}
+		// And the other half of it, for the tools that record where a session
+		// ran somewhere OTHER than inside the transcript. Those can be ruled
+		// out by project before the file is opened too; the tools that write
+		// their cwd into the transcript cannot, and pay one head read.
+		if !q.filter.wantsSession(sessIDFromName(sources[f.src], f.rel)) {
+			continue
+		}
+		pathCwd, ok := sessPathCwd(roots[f.src], sources[f.src], f, q.filter)
+		if !ok {
+			continue
+		}
+		hits, trouble := sessScanFile(roots[f.src], sources[f.src], f, pathCwd, q, gate)
 		if trouble {
 			rep.Partial = true
 		}
@@ -443,49 +690,146 @@ func sessionsSearch(sources []sessSource, q sessQuery) sessReport {
 	return rep
 }
 
-// One transcript, line by line. Returns the last few matching messages in the
-// order they happened, and whether anything kept the scan from being
-// complete. The open goes through os.Root and the link-count guard for the
-// reasons codexScanFile spells out; a file that fails either is reported as
-// trouble, never read.
-func sessScanFile(root *os.Root, src sessSource, f sessFile, q sessQuery, gate []string) (hits []sessHit, trouble bool) {
+// ── the shared read ──────────────────────────────────────────────────
+
+// A file inside a source's tree, opened under the discipline every verb here
+// shares: through the source's own os.Root, so a symlinked component cannot
+// walk the read out of the agent's directory, and refused outright when the
+// file answers to more than one name — a genuine second link inside the tree
+// can point at somebody else's inode. ok=false is always "trouble", never
+// "empty": a file that could not be opened must not become a confident
+// absence.
+func sessOpenIn(root *os.Root, rel string) (*os.File, bool) {
 	if root == nil {
-		return nil, true
+		return nil, false
 	}
-	file, err := root.Open(f.rel)
+	file, err := root.Open(rel)
 	if err != nil {
+		return nil, false
+	}
+	st, err := file.Stat()
+	if err != nil || !st.Mode().IsRegular() {
+		file.Close()
+		return nil, false
+	}
+	if n, known := openLinkCount(file, st); !known || n != 1 {
+		file.Close()
+		return nil, false
+	}
+	return file, true
+}
+
+// A whole small file out of a source's tree, under the same discipline, or
+// ok=false. For the sidecars a couple of these tools keep beside a transcript
+// — never for a transcript itself, which is streamed.
+func sessReadCapped(root *os.Root, rel string, max int64) ([]byte, bool) {
+	file, ok := sessOpenIn(root, rel)
+	if !ok {
+		return nil, false
+	}
+	defer file.Close()
+	b, err := io.ReadAll(io.LimitReader(file, max+1))
+	if err != nil || int64(len(b)) > max {
+		return nil, false
+	}
+	return b, true
+}
+
+// Every message of one transcript, in order, whatever shape the file stores
+// them in — one JSON object per line for most tools, one JSON document holding
+// a list of them for Amp. fn is handed the message's raw bytes and its 1-based
+// position, and returns false to stop the walk early; stopping is not trouble.
+//
+// This is the seam that keeps a document-shaped tool from being a second
+// implementation of everything: search, listing and reading all walk a
+// transcript through here, so a new format costs a `doc` hook rather than
+// three new loops that will drift apart.
+//
+// docCwd is whatever working directory a DOCUMENT named — line-shaped
+// transcripts return "" and let the caller read cwd off the lines as before.
+func sessEachMessage(file *os.File, src sessSource, fn func(no int, raw []byte) bool) (docCwd string, trouble bool) {
+	if src.doc != nil {
+		b, err := io.ReadAll(io.LimitReader(file, sessMaxDocBytes+1))
+		if err != nil || len(b) > sessMaxDocBytes {
+			return "", true
+		}
+		doc, ok := src.doc(b)
+		if !ok {
+			return "", true
+		}
+		for i, m := range doc.Msgs {
+			if !fn(i+1, m) {
+				return doc.Cwd, false
+			}
+		}
+		return doc.Cwd, false
+	}
+	sc := bufio.NewScanner(file)
+	sc.Buffer(make([]byte, 64*1024), sessMaxLineBytes)
+	for no := 1; sc.Scan(); no++ {
+		if !fn(no, sc.Bytes()) {
+			return "", false
+		}
+	}
+	return "", sc.Err() != nil
+}
+
+// Where a source says a transcript ran WITHOUT reading the transcript — from
+// the path it sits on, or a sidecar beside it. ok=false means the filter has
+// already ruled this file out and it need never be opened.
+//
+// Only asked of sources that have such a place. For a tool that writes its
+// working directory into the transcript, the file itself is the authority and
+// answering from anywhere else could rule out a session that does match: the
+// slug these paths carry is the cwd with its separators flattened, and
+// `a/b` and a directory genuinely named `a-b` flatten to the same thing.
+func sessPathCwd(root *os.Root, src sessSource, f sessFile, filter sessFilter) (string, bool) {
+	if src.cwd == nil {
+		return "", true
+	}
+	cwd := src.cwd(root, f.rel)
+	if cwd == "" {
+		return "", true
+	}
+	return cwd, filter.wantsProject(sessProjectLabel(cwd))
+}
+
+// One transcript, message by message. Returns the last few matching messages
+// in the order they happened, and whether anything kept the scan from being
+// complete. pathCwd is what the source already worked out about this file
+// without opening it, "" when it had nothing to say.
+func sessScanFile(root *os.Root, src sessSource, f sessFile, pathCwd string, q sessQuery, gate []string) (hits []sessHit, trouble bool) {
+	file, ok := sessOpenIn(root, f.rel)
+	if !ok {
 		return nil, true
 	}
 	defer file.Close()
-	st, err := file.Stat()
-	if err != nil || !st.Mode().IsRegular() {
-		return nil, true
-	}
-	if n, known := openLinkCount(file, st); !known || n != 1 {
-		return nil, true
-	}
 
 	// The working directory this transcript records, once one is seen. Claude
 	// stamps it on every line; codex only on the head of the file — so the
-	// head lines are given a cheap look even when they match nothing.
-	fileCwd := ""
+	// head lines are given a cheap look even when they match nothing. Some
+	// tools do not write it into the transcript at all, and for those the
+	// caller has already asked the source.
+	fileCwd := pathCwd
+	// Whether the project filter has already been put to fileCwd. The check is
+	// worth exactly one run per file: the label cannot change once the file has
+	// said what it is, and sessProjectLabel redacts and caps on every call.
+	cwdChecked := false
+	// The project filter ruled this transcript out mid-walk. A separate flag
+	// because the walk is a callback now and cannot return the verdict itself.
+	ruledOut := false
 
-	sc := bufio.NewScanner(file)
-	sc.Buffer(make([]byte, 64*1024), sessMaxLineBytes)
-	lineNo := 0
-	for sc.Scan() {
-		lineNo++
-		// Every few lines rather than every few hundred: lines here can be
+	docCwd, readTrouble := sessEachMessage(file, src, func(lineNo int, line []byte) bool {
+		// Every few messages rather than every few hundred: lines here can be
 		// megabytes each, and a check that comes around only after 256 of
 		// them can overshoot the budget so far the console's own timeout
 		// kills the command — which returns NOTHING, where this returns a
-		// partial answer (review 2026-08-18). Break, not return: the hits
+		// partial answer (review 2026-08-18). Stop, not abandon: the hits
 		// already found still deserve their timestamps and project below.
 		if lineNo%16 == 0 && time.Now().After(q.deadline) {
 			trouble = true
-			break
+			return false
 		}
-		line := sc.Bytes()
 		if fileCwd == "" && lineNo <= 4 && len(line) < 512*1024 && bytes.Contains(line, []byte(`"cwd"`)) {
 			var head struct {
 				Cwd     string `json:"cwd"`
@@ -501,6 +845,19 @@ func sessScanFile(root *os.Root, src sessSource, f sessFile, q sessQuery, gate [
 				}
 			}
 		}
+		// The moment this transcript admits where it ran, a project filter can
+		// rule it out for good — nothing later in the file can put it back in
+		// the asked-for project. Purely an early exit: the authoritative test is
+		// after the loop, for the transcripts that only reveal their cwd late or
+		// never — which includes every document-shaped one, whose cwd is not
+		// known until its walk has finished.
+		if fileCwd != "" && !cwdChecked {
+			cwdChecked = true
+			if !q.filter.wantsProject(sessProjectLabel(fileCwd)) {
+				ruledOut = true
+				return false
+			}
+		}
 
 		// Cheap gate first: a line whose raw bytes do not hold every GATE
 		// term cannot produce a message text that does, and almost every
@@ -508,50 +865,49 @@ func sessScanFile(root *os.Root, src sessSource, f sessFile, q sessQuery, gate [
 		// that JSON escaping could disguise are not in the gate (see
 		// sessGateTerms) — a query made only of those parses every line,
 		// which is slower and correct.
-		ok := true
 		for _, t := range gate {
 			if !sessContainsFold(line, t) {
-				ok = false
-				break
+				return true
 			}
-		}
-		if !ok {
-			continue
 		}
 
 		var m map[string]any
 		if json.Unmarshal(line, &m) != nil {
-			continue
+			return true
+		}
+		if sessIsSystem(m) {
+			// A tool that keeps its system prompt in the transcript keeps it as
+			// one enormous message, and it mentions nearly every word anybody
+			// searches for. Skipping it is the difference between a query for
+			// `git push` finding what somebody said and finding every session
+			// that tool ever opened.
+			return true
+		}
+		// Who said it, before the text is even joined: a message the role
+		// filter rules out cannot be a hit whatever it holds.
+		if !q.filter.wantsRole(sessRole(m)) {
+			return true
 		}
 		var texts []string
 		sessCollectText(m, 0, &texts)
 		if len(texts) == 0 {
-			continue
+			return true
 		}
 		joined := strings.Join(texts, "\n")
-		ok = true
-		for _, t := range q.terms {
-			if sessIndexFold(joined, t) < 0 {
-				ok = false
-				break
-			}
-		}
-		if !ok {
+		if !q.match(joined) {
 			// The terms lived in the line's plumbing — keys, ids, paths — not
-			// in anything a person said. Not a hit.
-			continue
+			// in anything a person said, or something the query excluded was in
+			// it. Not a hit.
+			return true
 		}
 
 		hit := sessHit{
 			Agent:     src.agent,
-			SessionID: sessIDFromName(f.rel),
-			Snippet:   sessRedact(sessSnippet(joined, q.terms[0])),
+			SessionID: sessIDFromName(src, f.rel),
+			Snippet:   sessRedact(sessSnippet(joined, q.anchor(joined))),
+			Line:      lineNo,
 		}
-		if ts, ok := m["timestamp"].(string); ok {
-			if _, err := time.Parse(time.RFC3339, ts); err == nil {
-				hit.Timestamp = ts
-			}
-		}
+		hit.Timestamp = sessMsgTime(m)
 		if cwd, ok := m["cwd"].(string); ok && cwd != "" {
 			fileCwd = cwd
 		}
@@ -561,16 +917,23 @@ func sessScanFile(root *os.Root, src sessSource, f sessFile, q sessQuery, gate [
 		if len(hits) > sessPerSession {
 			hits = hits[1:]
 		}
-	}
-	if sc.Err() != nil {
+		return true
+	})
+	if readTrouble {
 		trouble = true
 	}
-	project := ""
-	if fileCwd != "" {
-		// Bounded like everything else that rides the pipe: a directory can
-		// be NAMED five kilobytes, and one hit must not be able to spend the
-		// whole frame on its label.
-		project = sessCapRunes(filepath.Base(fileCwd), 64)
+	if ruledOut {
+		return nil, false
+	}
+	if fileCwd == "" {
+		fileCwd = docCwd
+	}
+	project := sessProjectLabel(fileCwd)
+	// The authoritative project test. A transcript that never said where it ran
+	// has no project, and no project is not a match for a named one — the other
+	// reading would file every unlabelled session under every project.
+	if !q.filter.wantsProject(project) {
+		return nil, trouble
 	}
 	for i := range hits {
 		if hits[i].Timestamp == "" {
@@ -579,6 +942,19 @@ func sessScanFile(root *os.Root, src sessSource, f sessFile, q sessQuery, gate [
 		hits[i].Project = project
 	}
 	return hits, trouble
+}
+
+// A working directory's base name, fit to ride the pipe: redacted FIRST —
+// a directory really can be named DB_PASSWORD=..., and a label that skips
+// the mask the message text wears would be the one unredacted string in the
+// answer (review 2026-08-18, round 2) — then capped, because a directory can
+// also be NAMED five kilobytes and one row must not spend the frame on its
+// label.
+func sessProjectLabel(cwd string) string {
+	if cwd == "" {
+		return ""
+	}
+	return sessCapRunes(sessRedact(filepath.Base(cwd)), 64)
 }
 
 // The first n runes of s, whole runes only.
@@ -601,6 +977,12 @@ func sessCapRunes(s string, n int) string {
 // base64 payloads under other names — is structure to walk through, not text
 // to quote. Keys are visited in sorted order so the same line always yields
 // the same joined text, which is what keeps snippets stable between runs.
+//
+// `data` is the awkward one and is why this looks at a sibling: Kiro writes
+// every piece of a message as {kind, data}, where data is the text when kind
+// says "text" and a nest of tool plumbing when it says anything else. Reading
+// it by key alone would either miss every Kiro message or quote every tool
+// argument as if somebody had said it.
 func sessCollectText(v any, depth int, out *[]string) {
 	if depth > sessMaxDepth {
 		return
@@ -612,9 +994,23 @@ func sessCollectText(v any, depth int, out *[]string) {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
+		kind, _ := t["kind"].(string)
 		for _, k := range keys {
 			val := t[k]
 			switch k {
+			case "data":
+				if s, ok := val.(string); ok {
+					if kind == "text" && s != "" {
+						*out = append(*out, s)
+					}
+				} else if !sessPlumbingKind(kind) {
+					// Walked only when the kind does not already say this is
+					// machinery. A tool call's arguments really do contain keys
+					// called `text` and `content` — an editor's replacement
+					// string, a fetch's prompt — and quoting those would answer
+					// searches with things nobody said (review 2026-08-19).
+					sessCollectText(val, depth+1, out)
+				}
 			case "text", "thinking":
 				if s, ok := val.(string); ok && s != "" {
 					*out = append(*out, s)
@@ -815,11 +1211,19 @@ func sessRedact(s string) string {
 }
 
 // The id worth showing for a transcript file. Claude names files by the
-// session's uuid; codex wraps the uuid in a rollout-<stamp>- prefix. When a
-// trailing uuid is there, it IS the id; otherwise the stem is the honest
-// answer.
-func sessIDFromName(rel string) string {
-	stem := strings.TrimSuffix(filepath.Base(rel), ".jsonl")
+// session's uuid; codex wraps the uuid in a rollout-<stamp>- prefix; amp uses
+// a T- prefixed one. When a trailing uuid is there, it IS the id; otherwise
+// the stem is the honest answer — except for a tool that gives every one of
+// its transcripts the SAME file name, where the stem would be an id shared by
+// every session on the machine and the source says where the id really lives.
+func sessIDFromName(src sessSource, rel string) string {
+	name := filepath.Base(rel)
+	if src.id != nil {
+		if v := src.id(rel); v != "" {
+			name = v
+		}
+	}
+	stem := strings.TrimSuffix(name, filepath.Ext(name))
 	if len(stem) >= 36 && sessLooksUUID(stem[len(stem)-36:]) {
 		return stem[len(stem)-36:]
 	}

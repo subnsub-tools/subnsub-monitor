@@ -513,7 +513,10 @@ func TestAfterPushCommitsOnlyOnAcceptance(t *testing.T) {
 	// Anything that is not a 200 must leave it pending. 429 is the one that
 	// matters: the relay paces a busy room routinely, and treating that as
 	// proof would commit a token the relay has not actually accepted.
-	for _, code := range []int{429, 500, 503} {
+	// 409 is "room full": the relay refusing the MACHINE, with the token as
+	// good as ever — renewing or rolling back would be answering a question
+	// nobody asked.
+	for _, code := range []int{409, 429, 500, 503} {
 		if got := r.afterPush(code, tok, now); got != tok {
 			t.Errorf("a %d should not change the token in hand", code)
 		}
@@ -642,7 +645,7 @@ func writeTokenFile(t *testing.T, body string) string {
 
 func TestInstalledEnvReadsWhatTheInstallerWrites(t *testing.T) {
 	// Byte for byte what install.sh and install.ps1 produce.
-	writeTokenFile(t, "SUBNSUB_MONITOR_TOKEN=abcdefghijklmnopqrstuvwxyz012345\nSUBNSUB_MONITOR_SITE=https://tools.example.com\n")
+	writeTokenFile(t, "SUBNSUB_MONITOR_TOKEN=abcdefghijklmnopqrstuvwxyz012345\nSUBNSUB_MONITOR_SITE=https://tools.example.com\nMON_CPA_URL=https://cpa.example.com\nMON_CPA_KEY=key\n")
 	env := installedEnv()
 	if got := env[tokenEnv]; got != "abcdefghijklmnopqrstuvwxyz012345" {
 		t.Fatalf("token: %q", got)
@@ -650,16 +653,19 @@ func TestInstalledEnvReadsWhatTheInstallerWrites(t *testing.T) {
 	if got := env[siteEnv]; got != "https://tools.example.com" {
 		t.Fatalf("site: %q", got)
 	}
+	if got := env[cpaURLEnv]; got != "https://cpa.example.com" || env[cpaKeyEnv] != "key" || len(env) != 4 {
+		t.Fatalf("CPA whitelist: %v", env)
+	}
 }
 
 func TestInstalledEnvIsNotAnEnvironment(t *testing.T) {
-	// A whitelist of two names, not a loader. Anything else in the file is
+	// A fixed whitelist, not a loader. Anything else in the file is
 	// somebody else's business and must not become a setting this program acts
 	// on — the file lives in a directory a local user may be able to write.
 	writeTokenFile(t, "PATH=/tmp/evil\nSUBNSUB_MONITOR_RELAY=https://elsewhere.example\nSUBNSUB_MONITOR_TOKEN=abcdefghijklmnopqrstuvwxyz012345\n")
 	env := installedEnv()
 	if len(env) != 1 {
-		t.Fatalf("read more than the two names it is allowed to read: %v", env)
+		t.Fatalf("read a name outside the fixed whitelist: %v", env)
 	}
 	if _, ok := env["PATH"]; ok {
 		t.Fatal("★ read PATH out of the token file")

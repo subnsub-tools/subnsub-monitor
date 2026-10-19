@@ -15,19 +15,24 @@ package main
 // today is in exactly that state and stays there until its operator says
 // otherwise.
 //
-// The transport is the same outbound-only shape as the push, for the same
-// reason: nothing listens here. The helper ASKS whether a command is waiting;
-// the relay answers. A machine behind NAT with no inbound port and no public
-// address works unchanged, and unplugging the console is deleting a file.
+// A SHELL LINE ARRIVES ONLY THROUGH THE TUNNEL (direct.go): end-to-end
+// encrypted between the dashboard's browser and this machine, from a browser
+// whose key is on the allow list, signed by one this machine has pinned. The
+// relay's mailbox, which consoleLoop below still polls, carries only the
+// closed kinds — update, refresh, rename, allow, inspect, act, myip — and a shell line
+// handed over by it is refused, not run (operator ruling 2026-10-06: no
+// console work at all without a tailcat connection, and a command never
+// travels by way of the relay). Both roads are outbound
+// from here — the tunnel is a dial to a DERP relay, the mailbox a poll — so
+// nothing listens on this machine either way, a machine behind NAT works
+// unchanged, and unplugging the console is still deleting a file.
 //
 // What runs is `/bin/sh -c <line>` — `cmd.exe /s /c <line>` on Windows; see
 // console_unix.go and console_windows.go — as the user the helper runs as, in
 // that user's home directory. It is not a shell session: each command is its
 // own process with its own environment, so `cd` does not persist and neither
-// does anything else. That is a real limitation and it is deliberate — a
-// persistent PTY is a much larger thing to get right, and the question this tab
-// exists to answer ("what is that box doing?") is answered by one-shot
-// commands.
+// does anything else. A real session is the terminal (pty.go), the console's
+// other door, on the same tunnel and behind the same switch.
 //
 // THE SHELL IS THE PLATFORM'S OWN, and nothing above this line translates
 // between them. A machine running Windows answers `dir` and not `ls`, which is
@@ -85,8 +90,9 @@ const (
 	// MAX_RESULT_BODY (24 KiB) with room for the rest of the document.
 	consoleMaxBody = 20 * 1024
 
-	// The relay holds a poll for ~25s when a console is open, so the client
-	// deadline has to clear that with room for a slow link.
+	// The client deadline on one poll. An older relay held a poll for ~25s
+	// while a console was open, and this clears that with room for a slow
+	// link; the current one answers at once.
 	consolePollTimeout = 45 * time.Second
 	// The same wait for a machine that only takes UPDATES — console off, the
 	// dedicated switch on. Nothing about that machine is interactive: nobody is
@@ -228,8 +234,9 @@ func consoleSandboxNote(on bool) string {
 type consoleCmd struct {
 	ID string `json:"id"`
 	// What KIND of thing this is. Absent or "sh" means the shell line in Cmd,
-	// which is everything this channel carried before and everything an older
-	// relay can send. "update" carries no command at all — it is a request that
+	// which is everything the mailbox carried before kinds existed — and which
+	// is taken now from the tunnel alone (mailboxRefusal). "update" carries no
+	// command at all — it is a request that
 	// this helper replace itself from the release bucket, and the payload comes
 	// from there rather than from here. See update.go for why those two
 	// authorities are kept apart.
@@ -265,6 +272,11 @@ type consolePoll struct {
 	// Absent or out of range falls back to this build's own interval, so an
 	// older relay that never sends it behaves exactly as before.
 	Next int `json:"next,omitempty"`
+	// The relay held this poll open waiting for a command and let it go
+	// empty: come straight back, there is somebody at a prompt (econ.go).
+	// Acted on only where the spare road is switched on here — elsewhere
+	// it is one more bit a relay cannot select work with.
+	Hold bool `json:"hold,omitempty"`
 }
 
 // Bounds on what the relay may ask for. The floor stops a relay from talking a
@@ -322,7 +334,10 @@ func consoleLoop(base string, tok *tokenBox, hints *hintBox) {
 		shell := consoleEnabled()
 		update := updateAllowed()
 		diagnostics := diagnosticsEnabled()
-		if !shell && !update && !diagnostics {
+		// Tile actions (tileaction.go) are their own reason: an action written
+		// in metrics.d, and a key pinned to take the press from.
+		actions := tileActionsOn()
+		if !shell && !update && !diagnostics && !actions {
 			// Neither: no request is made at all. This is the state every
 			// existing install is in, and it has to cost nothing.
 			time.Sleep(consoleIdleWait)
@@ -332,7 +347,16 @@ func consoleLoop(base string, tok *tokenBox, hints *hintBox) {
 			// Said once, on the machine, in its own log. Someone reading a
 			// journal to find out why a box did something should not have to
 			// already know this feature exists.
-			warnf("console is ENABLED: this machine will run commands sent from the dashboard")
+			if consoleRelayEnabled() {
+				warnf("console is ENABLED: this machine will run commands sent from the dashboard over the direct tunnel, and sealed ones through the relay's mailbox where the dashboard turns that road on")
+			} else {
+				warnf("console is ENABLED: this machine will run commands sent from the dashboard over the direct tunnel (never from the relay)")
+			}
+			// The one setting that leaves it with no road at all, said where
+			// somebody wondering why the console never opens will look.
+			if transportMode() == "relay" {
+				warnf("console: MON_TRANSPORT=relay keeps the direct tunnel down, and the console runs only over it — no command will reach this machine")
+			}
 			warnedConsole = true
 		}
 		if update && !shell && !warnedUpdate {
@@ -342,12 +366,12 @@ func consoleLoop(base string, tok *tokenBox, hints *hintBox) {
 			warnedUpdate = true
 		}
 		if diagnostics && !warnedDiagnostics {
-			warnf("read-only diagnostics are ENABLED: the dashboard may request bounded process resource summaries")
+			warnf("read-only diagnostics are ENABLED: the dashboard may request bounded process resource summaries, and the busiest program names are kept in this machine's own history")
 			warnedDiagnostics = true
 		}
 		// A machine that only takes updates is not waiting at a prompt.
 		idle := consoleIdleWait
-		if !shell && diagnostics {
+		if !shell && (diagnostics || actions) {
 			idle = diagnosticsIdleWait
 		} else if !shell {
 			idle = updateIdleWait
@@ -371,6 +395,12 @@ func consoleLoop(base string, tok *tokenBox, hints *hintBox) {
 			continue
 		}
 		fails = 0
+		if !poll.Open && poll.Hold && shell && consoleRelayEnabled() {
+			// The relay held the line for somebody at a prompt and nothing
+			// came in time: straight back, so the next line lands in the
+			// time a keystroke takes (econ.go).
+			continue
+		}
 		if !poll.Open {
 			// Nobody is looking. The relay answered immediately, so this sleep
 			// is the whole idle cost — and the relay, which knows whether
@@ -381,7 +411,7 @@ func consoleLoop(base string, tok *tokenBox, hints *hintBox) {
 			// The relay's cold hint is fleet-wide. A diagnostics-only helper has
 			// a deliberately smaller local ceiling so a first details click waits
 			// at most 30 seconds; after it is collected, the relay marks it warm.
-			if !shell && diagnostics && wait > diagnosticsIdleWait {
+			if !shell && (diagnostics || actions) && wait > diagnosticsIdleWait {
 				wait = diagnosticsIdleWait
 			}
 			// ...unless the relay speaks the push hint and just said nobody
@@ -415,26 +445,27 @@ func consoleLoop(base string, tok *tokenBox, hints *hintBox) {
 			// has to be the fast direction too, and a relay is free to hand back
 			// a batch — reading once above would let everything in that batch
 			// keep verifying against a key somebody had just removed.
+			if why := mailboxRefusal(c); why != "" {
+				// Not verified, not gated, not run: answered, so the page that
+				// sent it is told rather than left waiting, and said here, so
+				// the machine's own log shows that somebody tried.
+				warnf("console: refused a shell command handed over by the relay (id %q) — the console runs only over the direct tunnel", c.ID)
+				consoleReport(client, resultURL, id, tok,
+					consoleResult{ID: c.ID, Kind: c.Kind, Code: -1, Error: why})
+				continue
+			}
+			// The gate first, then the verdict: see cmdGate.
+			acquireCmd(context.Background())
 			if why := verifyCommand(c, id, loadTrust(), time.Now()); why != "" {
+				releaseCmd()
 				consoleReport(client, resultURL, id, tok,
 					consoleResult{ID: c.ID, Kind: c.Kind, Target: c.Target,
 						Code: -1, Error: why})
 				continue
 			}
-			// Re-read the switches between the poll and the command, and again
-			// between commands. The poll can be held for 25 seconds and a
-			// batch can take a minute to work through, so `console off` typed
-			// during either would otherwise be obeyed only after everything
-			// already in flight had run — which is the opposite of what
-			// somebody typing it in a hurry means by it.
-			switch c.Kind {
-			case "update":
-				if !updateAllowed() {
-					consoleReport(client, resultURL, id, tok,
-						consoleResult{ID: c.ID, Code: -1, Error: "update-off"})
-					continue
-				}
-				res, swap := runUpdate(c.ID)
+			res, swap := runCommand(c)
+			releaseCmd()
+			if c.Kind == "update" && res.Error == "" {
 				// Reported first, always, and RETRIED — on the path that works
 				// this process is about to stop existing, and a relay blip
 				// lasting one request would otherwise consume the only account
@@ -456,46 +487,207 @@ func consoleLoop(base string, tok *tokenBox, hints *hintBox) {
 					}
 					time.Sleep(2 * time.Second)
 				}
-				if swap {
-					// The new binary is already on disk under our own name.
-					// Everything after this line belongs to the next process,
-					// which systemd (Restart=always), launchd (KeepAlive) or
-					// the Windows task (a one-minute repetition trigger that
-					// starts nothing while an instance is already running)
-					// starts for us. A helper running under none of them ends
-					// here, which is the honest outcome for a foreground
-					// process that was asked to replace itself.
-					os.Exit(0)
-				}
-			case "inspect":
-				if !diagnosticsEnabled() {
-					consoleReport(client, resultURL, id, tok,
-						consoleResult{ID: c.ID, Kind: "inspect", Target: c.Target,
-							Code: -1, Error: "diagnostics-off"})
-					continue
-				}
-				consoleReport(client, resultURL, id, tok, runInspect(c.ID, c.Target))
-			case "", "sh":
-				if c.Cmd == "" {
-					continue
-				}
-				if !consoleEnabled() {
-					consoleReport(client, resultURL, id, tok,
-						consoleResult{ID: c.ID, Code: -1, Error: "console-off"})
-					continue
-				}
-				consoleReport(client, resultURL, id, tok, runConsoleCommand(c.ID, c.Cmd))
-			default:
-				// A kind this build does not know. Answered rather than
-				// dropped, so the dashboard says "that machine's helper is too
-				// old for this" instead of leaving a command that looks lost.
-				consoleReport(client, resultURL, id, tok,
-					consoleResult{ID: c.ID, Code: -1, Error: "unknown-kind"})
+			} else {
+				consoleReport(client, resultURL, id, tok, res)
+			}
+			if swap {
+				// The new binary is already on disk under our own name, and
+				// this is where the two versions change places — by this
+				// process becoming the new one, rather than by exiting and
+				// trusting that systemd (Restart=always), launchd (KeepAlive)
+				// or the Windows task will notice. Under a container init that
+				// supervises nothing, none of them would.
+				//
+				// It returns only when the handover did not happen, and then
+				// the right thing is exactly what the loop does next: carry on
+				// serving from the image already running. See restart.go.
+				restartSelf()
 			}
 		}
 		// Straight back round with no sleep: a console that is open should feel
 		// like a terminal, and the relay's own hold is what paces this loop.
 	}
+}
+
+// cmdGate: one command runs on this machine at a time, whichever road brought
+// it — the relay's mailbox or the tunnel, and any number of tunnels (each
+// reconnect is a new handler). Package-level for exactly that reason (review
+// 2026-09-01). Taken BEFORE a command is verified, so a signature's freshness
+// and its replay id are judged at the moment it can run, not minutes earlier
+// while it waited its turn.
+var cmdGate = make(chan struct{}, 1)
+
+// acquireCmd waits for the gate until ctx ends. The mailbox loop passes a
+// background context (it has nothing better to do than wait); the tunnel
+// passes the request's, so a browser that gave up releases nothing it never
+// held.
+func acquireCmd(ctx context.Context) bool {
+	select {
+	case cmdGate <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func releaseCmd() { <-cmdGate }
+
+// mailboxRefusal is why the relay's mailbox may not hand THIS command over,
+// or "" when it may. A shell line — "sh", or no kind at all, which is what
+// the mailbox carried before kinds existed — rides the tunnel alone (direct.go;
+// operator ruling 2026-10-06: a command never travels by way of the relay),
+// so one that arrives this way is
+// refused whatever it is signed with: a relay that queued it before the rule,
+// or one that never heard of it, gets an answer and runs nothing. The closed
+// kinds — update, refresh, rename, allow, inspect — still come this way, and
+// runCommand judges those as before.
+func mailboxRefusal(c consoleCmd) string {
+	switch c.Kind {
+	case "", "sh":
+		return "tunnel-only"
+	case "esh":
+		// A sealed line (econ.go): the spare road, only where this machine's
+		// operator opened it.
+		if !consoleRelayEnabled() {
+			return "econ-off"
+		}
+	case "clone", "unclone":
+		// Portable copies (clone.go) are enrolled and revoked over the
+		// tunnel the copy itself will use, never through the relay.
+		return "tunnel-only"
+	}
+	return ""
+}
+
+// runCommand is the one place a command's kind is turned into work, whichever
+// road delivered it — the relay's mailbox (consoleLoop, which never passes a
+// shell line: mailboxRefusal) or the tunnel (direct.go). The caller has
+// already run verifyCommand; what is decided here
+// is whether THIS machine does this KIND right now, with every switch re-read
+// at this moment rather than when the command was collected: a poll can be
+// held for 25 seconds and a batch can take a minute to work through, so
+// `console off` typed during either would otherwise be obeyed only after
+// everything already in flight had run — the opposite of what somebody typing
+// it in a hurry means by it. swap is true when an update installed a new
+// binary and this process must exit once the result is delivered.
+func runCommand(c consoleCmd) (res consoleResult, swap bool) {
+	switch c.Kind {
+	case "esh":
+		return runSealed(c), false
+	case "clone":
+		return runClone(c), false
+	case "unclone":
+		return runUnclone(c), false
+	case "rename":
+		// Persistent configuration requires a pinned dashboard signature, even
+		// on the relay road. The caller has already verified the envelope.
+		res = consoleResult{ID: c.ID, Kind: "rename", Code: -1}
+		if !loadTrust().sealed {
+			res.Error = "unpinned"
+		} else if err := setLabel(c.Cmd); err != nil {
+			res.Error = "name-save-failed"
+		} else {
+			res.Code = 0
+			res.Out = agentLabel()
+			wakePush()
+		}
+		return res, false
+	case "update":
+		if !updateAllowed() {
+			return consoleResult{ID: c.ID, Kind: "update", Code: -1, Error: "update-off"}, false
+		}
+		// The reading carries this press as well as the result frame does —
+		// and more reliably, because the reading is sent again every thirty
+		// seconds and the frame is sent once over a tunnel that can drop
+		// (operator ruling 2026-10-11: an online machine must report back that
+		// it is already updating). So: "installing" before the download starts, pushed at
+		// once; the outcome after, pushed at once. On the path that installed,
+		// "installing" stays as this process's last word, and the successor's
+		// first word is "installed" (noteInstalledFrom).
+		noteUpdatePass("installing")
+		wakePush()
+		res, swap := runUpdate(c.ID)
+		switch {
+		case swap:
+		case res.Error == "update-none":
+			noteUpdatePass("current")
+			wakePush()
+		case res.Error != "":
+			noteUpdatePass("failed")
+			wakePush()
+		}
+		return res, swap
+	case "act":
+		// A press on a tile (tileaction.go): an action the operator declared
+		// in metrics.d, a value inside the bounds declared with it. Judged
+		// there, a pinned key first, whichever road brought it.
+		return runTileAction(c), false
+	case "inspect":
+		if !diagnosticsEnabled() {
+			return consoleResult{ID: c.ID, Kind: "inspect", Target: c.Target, Code: -1, Error: "diagnostics-off"}, false
+		}
+		return runInspect(c.ID, c.Target), false
+	case "allow":
+		// A dashboard enrolling its own browser key as a watcher on the
+		// direct road — see runAllow for what it grants. The key rides in
+		// Target, which the signature covers, and is never a shell line. Two
+		// gates of its own (review 2026-09-01):
+		//  - a pinned key. Every other kind runs unsigned on a machine with
+		//    nothing pinned, as it always did — but those grant the relay
+		//    nothing that outlives the token, whereas a key on the allowlist
+		//    is standing access; so this one kind is taken only from a
+		//    browser this machine has been told to trust, and verifyCommand
+		//    has then already checked the signature.
+		//  - a mailbox switch still on: the poll that carried this may have
+		//    been held while the operator turned the last one off.
+		if !loadTrust().sealed {
+			return consoleResult{ID: c.ID, Kind: "allow", Target: c.Target, Code: -1, Error: "unpinned"}, false
+		}
+		if !consoleEnabled() && !updateAllowed() && !diagnosticsEnabled() {
+			return consoleResult{ID: c.ID, Kind: "allow", Target: c.Target, Code: -1, Error: "no-mailbox"}, false
+		}
+		return runAllow(c.ID, c.Target), false
+	case "refresh":
+		// The page asking for fresh quota figures now (pace.go): every
+		// provider asks its vendor once at the next collection, floor or
+		// no floor, and the push loop is woken so that collection is the
+		// next push. Nothing is run and nothing is read that the reading
+		// does not already carry, so the only gate is the one this mailbox
+		// already passed — a switch that lets the machine take instructions
+		// at all, re-read now like every other kind.
+		if !consoleEnabled() && !updateAllowed() && !diagnosticsEnabled() {
+			return consoleResult{ID: c.ID, Kind: "refresh", Code: -1, Error: "no-mailbox"}, false
+		}
+		// With a target, only the provider whose tile was pressed (its
+		// id, covered by the signature like every target). A helper older
+		// than this field asks them all, which is why the page offers the
+		// per-provider press only from the version that reads it.
+		if c.Target != "" && !forceTarget(c.Target) {
+			return consoleResult{ID: c.ID, Kind: "refresh", Code: -1, Error: "bad-target"}, false
+		}
+		quotaForceFor(c.Target)
+		wakePush()
+		return consoleResult{ID: c.ID, Kind: "refresh", Code: 0}, false
+	case "myip":
+		// The page's Exit tile (myip.go): My IP's six questions, asked from
+		// this machine's own way out — or from inside the namespace the
+		// target names — and the answers handed back as they came. A closed
+		// request: the origin is this machine's setting and the paths are
+		// fixed, so the gate is refresh's (a mailbox switch, re-read now)
+		// plus MON_MYIP not being off. runMyIP checks both, and the target.
+		return runMyIP(c), false
+	case "", "sh":
+		// From the tunnel only: consoleLoop refuses a shell line before it
+		// gets here (mailboxRefusal).
+		if !consoleEnabled() {
+			return consoleResult{ID: c.ID, Code: -1, Error: "console-off"}, false
+		}
+		return runConsoleCommand(c.ID, c.Cmd), false
+	}
+	// A kind this build does not know. Answered rather than dropped, so the
+	// dashboard says "that machine's helper is too old for this" instead of
+	// leaving a command that looks lost.
+	return consoleResult{ID: c.ID, Kind: c.Kind, Code: -1, Error: "unknown-kind"}, false
 }
 
 func consoleAsk(client *http.Client, pollURL, id, token string) (consolePoll, error) {
@@ -543,6 +735,8 @@ type consoleResult struct {
 	Truncated bool   `json:"truncated"`
 	Error     string `json:"error,omitempty"`
 	Data      any    `json:"data,omitempty"`
+	// Out is sealed to the browser that signed the command (econ.go).
+	Enc bool `json:"enc,omitempty"`
 }
 
 // Send a result back. Returns whether the relay took it.

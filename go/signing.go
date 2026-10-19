@@ -21,11 +21,16 @@ package main
 
    Two rules that shape everything below:
 
-     - Pinning is the switch. With no trusted key on the machine, nothing
-       changes: this helper behaves exactly as it did, because every existing
-       install would otherwise stop taking commands the moment it updated. With
-       one or more pinned, an unsigned or badly signed command is REFUSED, and
-       refused out loud so the dashboard can say why.
+     - Pinning is the switch. With no trusted key on the machine, the
+       closed-form mailbox commands (update, refresh, inspect, myip) are taken
+       unsigned, as every helper took them before signing existed — an
+       existing install would otherwise stop taking them the moment it
+       updated. That is the whole of what an unpinned machine runs: a shell
+       line never comes by the relay road (console.go, mailboxRefusal), and a
+       sealed line (econ.go) or any tunnel command (direct.go) is refused
+       until something is pinned. With one or more pinned, an unsigned or
+       badly signed command is REFUSED, and refused out loud so the dashboard
+       can say why.
      - Verifying the signature is not enough by itself. A signature is valid
        forever, so a relay could keep a command somebody legitimately sent and
        replay it later — at a worse moment, or a hundred times. Freshness and
@@ -268,6 +273,40 @@ func verifyCommand(c consoleCmd, agent string, t trust, now time.Time) string {
 	// remembering — and because burning an id on a bad signature would let a
 	// relay lock out the real command that follows it.
 	return rememberCommand(c.ID, now)
+}
+
+// commandSigner is the pinned key a command verifies under, or nil. For a
+// command verifyCommand has already passed, where what is wanted is WHO: a
+// terminal session is that key's, and ends when the key is unpinned.
+func commandSigner(c consoleCmd, agent string, t trust) ed25519.PublicKey {
+	sig, err := base64.StdEncoding.DecodeString(c.Sig)
+	if err != nil || len(sig) != ed25519.SignatureSize {
+		return nil
+	}
+	msg := commandSigningInput(agent, c.ID, c.Kind, c.Target, c.IssuedAt, c.Cmd)
+	for _, k := range t.keys {
+		if ed25519.Verify(k, msg, sig) {
+			return k
+		}
+	}
+	return nil
+}
+
+// trustsKey reports whether k is pinned on this machine right now.
+func trustsKey(k ed25519.PublicKey) bool {
+	if len(k) == 0 {
+		return false
+	}
+	t := loadTrust()
+	if !t.sealed {
+		return false
+	}
+	for _, have := range t.keys {
+		if have.Equal(k) {
+			return true
+		}
+	}
+	return false
 }
 
 /* ── administering the list, from the machine itself ───────────────────── */

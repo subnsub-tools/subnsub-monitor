@@ -10,18 +10,31 @@ package main
 //	  {"scope":["FEATURE_CODING"]}
 //	  → {"usages":[{"scope":"FEATURE_CODING",
 //	       "detail":{"limit":"2048","used":"117","resetTime":…},
-//	       "limits":[{"detail":{…},"window":300}]}]}
+//	       "limits":[{"detail":{…},"window":{"duration":300,"timeUnit":"TIME_UNIT_MINUTE"}}]}]}
 //
 // FEATURE_CODING's detail is the weekly quota; its limits[] carry the short
-// rate window. Every number arrives as a STRING, which is why the parse below
-// goes through ampNum rather than a typed struct — Codex's lesson about files
-// applies to gateways too.
+// rate window, whose length is a {duration, timeUnit} pair (CodexBar
+// KimiModels.KimiWindow; 300 minutes when absent). Every number arrives as a
+// STRING, which is why the parse below goes through ampNum rather than a
+// typed struct — Codex's lesson about files applies to gateways too.
+//
+// The plan chip comes from a second call, GetSubscription (CodexBar
+// KimiUsageFetcher, steipete/CodexBar@babfb51da4): the goods title of an
+// active subscription. GetSubscriptionStats, which this read before, names
+// the balance's TYPE ("SUBSCRIPTION") there, not the plan — a chip reading
+// "SUBSCRIPTION" was that field.
 //
 // Claude's cost rung, Claude's rules (claude.go): read two scalars from the
 // credential file, never refresh, never write back, publish no transport
 // text. Protocol per CodexBar's Kimi provider, credential-file path.
 // KIMI_CODE_HOME moves the directory, same as the CLI honours;
 // MON_KIMI_TOKEN overrides the token outright.
+//
+// The gateway has a twin at kimi.ai for accounts outside China (CodexBar
+// KimiRegion, @7618b4fdda); the CLI's credential file carries no issuing
+// host, and CodexBar keeps it China-only, so this does too. The request
+// headers are the browser's, as CodexBar sends them: the gateway is the
+// web console's, and Origin/Referer are derived from the host.
 
 import (
 	"encoding/json"
@@ -31,13 +44,18 @@ import (
 )
 
 const (
-	kimiUsagesURL = "https://www.kimi.com/apiv2/kimi.gateway.billing.v1.BillingService/GetUsages"
-	kimiStatsURL  = "https://www.kimi.com/apiv2/kimi.gateway.membership.v2.MembershipService/GetSubscriptionStats"
-	kimiTokenEnv  = "MON_KIMI_TOKEN"
-	kimiHomeEnv   = "KIMI_CODE_HOME"
+	kimiOrigin          = "https://www.kimi.com"
+	kimiUsagesURL       = kimiOrigin + "/apiv2/kimi.gateway.billing.v1.BillingService/GetUsages"
+	kimiSubscriptionURL = kimiOrigin + "/apiv2/kimi.gateway.membership.v2.MembershipService/GetSubscription"
+	kimiTokenEnv        = "MON_KIMI_TOKEN"
+	kimiHomeEnv         = "KIMI_CODE_HOME"
+	// The console's own identity, as CodexBar's KimiUsageFetcher sends it.
+	kimiUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+	// The rate window's length when the gateway names none.
+	kimiDefaultWindowMinutes = 300
 )
 
-var kimiCache provCache
+var kimiCache = provCache{pace: paceMark{id: "kimi"}}
 
 func collectKimi() Provider {
 	return kimiCache.collect(fetchKimi)
@@ -204,8 +222,16 @@ func fetchKimi() Provider {
 		return fail("token-expired", "creds-expired", "kimi")
 	}
 	hdr := map[string]string{
-		"Authorization": "Bearer " + token,
-		"Content-Type":  "application/json",
+		"Authorization":            "Bearer " + token,
+		"Content-Type":             "application/json",
+		"Accept":                   "*/*",
+		"Accept-Language":          "en-US,en;q=0.9",
+		"Origin":                   kimiOrigin,
+		"Referer":                  kimiOrigin + "/code/console",
+		"User-Agent":               kimiUserAgent,
+		"connect-protocol-version": "1",
+		"x-language":               "en-US",
+		"x-msh-platform":           "web",
 	}
 
 	status, body, err := provRequest("POST", kimiUsagesURL, hdr, []byte(`{"scope":["FEATURE_CODING"]}`))
@@ -252,10 +278,9 @@ func fetchKimi() Provider {
 			if used := kimiUsed(l.Detail); used != nil {
 				lim := Limit{Key: "rate", UsedPercent: *used, ResetsAt: kimiReset(l.Detail)}
 				lim.UsedAmount, lim.TotalAmount, lim.RemainingAmount = kimiAmounts(l.Detail)
-				if w := kimiNum(l.Window); w != nil && *w > 0 {
-					lim.WindowMinutes = w
-					lim.WindowLabel = windowLabel(*w)
-				}
+				w := kimiWindowMinutes(l.Window)
+				lim.WindowMinutes = fp(w)
+				lim.WindowLabel = windowLabel(w)
 				p.Limits = append(p.Limits, lim)
 			}
 		}
@@ -265,22 +290,68 @@ func fetchKimi() Provider {
 		return fail("no-readings", "no-window")
 	}
 
-	// Subscription stats are a second, separately-failing request and carry
-	// only the plan chip; losing them costs nothing the gauges need.
-	if status, body, err := provRequest("POST", kimiStatsURL, hdr, []byte("{}")); err == nil && status == 200 {
-		var stats struct {
-			SubscriptionBalance *struct {
-				Type any `json:"type"`
-			} `json:"subscriptionBalance"`
-		}
-		if json.Unmarshal(body, &stats) == nil && stats.SubscriptionBalance != nil {
-			if plan := tame(asStr(stats.SubscriptionBalance.Type, 32), 32); plan != "" {
-				p.PlanType = sp(plan)
-			}
+	// The subscription is a second, separately-failing request and carries
+	// only the plan chip; losing it costs nothing the gauges need.
+	if status, body, err := provRequest("POST", kimiSubscriptionURL, hdr, []byte("{}")); err == nil && status == 200 {
+		if plan := kimiPlan(body); plan != "" {
+			p.PlanType = sp(plan)
 		}
 	}
 
 	p.OK = true
 	p.RecordedAt = fp(now())
 	return p
+}
+
+// The rate window's length in minutes: a {duration, timeUnit} pair, a bare
+// number of minutes (the shape an earlier gateway sent), or the 5-hour
+// default. A unit this build does not know is no length, and the default
+// stands rather than a guess at the unit.
+func kimiWindowMinutes(v any) float64 {
+	switch x := v.(type) {
+	case map[string]any:
+		d := kimiNum(x["duration"])
+		if d == nil || *d <= 0 {
+			return kimiDefaultWindowMinutes
+		}
+		switch strings.ToUpper(asStr(x["timeUnit"], 24)) {
+		case "TIME_UNIT_MINUTE", "":
+			return *d
+		case "TIME_UNIT_HOUR":
+			return *d * 60
+		case "TIME_UNIT_DAY":
+			return *d * 1440
+		case "TIME_UNIT_WEEK":
+			return *d * 10080
+		}
+		return kimiDefaultWindowMinutes
+	default:
+		if w := kimiNum(v); w != nil && *w > 0 {
+			return *w
+		}
+	}
+	return kimiDefaultWindowMinutes
+}
+
+// The plan out of a GetSubscription answer: the goods title, only while the
+// subscription is active — an ended plan's title is not the plan the account
+// is on. Through the same sieve as every other published name.
+func kimiPlan(body []byte) string {
+	var doc struct {
+		Subscription *struct {
+			Active bool   `json:"active"`
+			Status string `json:"status"`
+			Goods  *struct {
+				Title string `json:"title"`
+			} `json:"goods"`
+		} `json:"subscription"`
+	}
+	if json.Unmarshal(body, &doc) != nil || doc.Subscription == nil || doc.Subscription.Goods == nil {
+		return ""
+	}
+	sub := doc.Subscription
+	if !sub.Active || sub.Status != "SUBSCRIPTION_STATUS_ACTIVE" {
+		return ""
+	}
+	return tame(sub.Goods.Title, 32)
 }
