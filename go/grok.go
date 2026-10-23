@@ -37,9 +37,13 @@ package main
 // this road now ends in `token-expired` — reported as such, not as a parse
 // failure, so the page says "sign in" rather than "unreadable".
 //
-// CodexBar also drives `grok agent stdio` for a richer billing object; on the
-// CLI versions seen here that RPC answers "Method not found", and it is not
-// shipped.
+// CodexBar also drives `grok agent stdio`. Its "Method not found" was the
+// method's name: ACP prefixes extension methods with `_`, and `_x.ai/billing`
+// answers (steipete/CodexBar@d82bddb55e) — with the same nested `config`
+// credits object the table's cli-chat-proxy request already reads, and the
+// same omitted percentage on a zero-usage week, which CodexBar then asks
+// grok.com about (@ad0c5679b7) exactly as this road does. A subprocess for a
+// reading the table already has is not shipped.
 
 import (
 	"encoding/binary"

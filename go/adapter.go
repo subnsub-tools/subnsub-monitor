@@ -227,6 +227,39 @@ type adapterValue struct {
 	Path  string            `json:"path,omitempty"`
 	Map   map[string]string `json:"map,omitempty"`
 	AnyOf []adapterCase     `json:"any_of,omitempty"`
+	// A value the windows read beside it contradict is not shown (the helper
+	// after 2026.10.18.5). Antigravity: Cloud Code can name currentTier
+	// free-tier for a paid account, and five-hour quota is paid-only — a Free
+	// beside a measured 5h window is the generic tier, not the plan (CodexBar
+	// AntigravityRemoteUsageFetcher.resolvePlan, steipete/CodexBar@f50cd6cee4).
+	// Only the contradiction goes; no plan is inferred from the window. A
+	// helper before this key shows the value it always did.
+	UnlessWindow *adapterContradiction `json:"unless_window,omitempty"`
+}
+
+// `value` is dropped when a window labelled any of `labels` was read. A
+// window is read only when it was measured and not switched off, so a bucket
+// the vendor disabled or left without a figure contradicts nothing.
+type adapterContradiction struct {
+	Value  string   `json:"value"`
+	Labels []string `json:"labels"`
+}
+
+func (c *adapterContradiction) holds(value string, limits []Limit) bool {
+	if c == nil || value == "" || !strings.EqualFold(value, c.Value) {
+		return false
+	}
+	for _, l := range limits {
+		if l.WindowLabel == nil {
+			continue
+		}
+		for _, label := range c.Labels {
+			if *l.WindowLabel == label {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 type adapterCase struct {
@@ -654,6 +687,11 @@ func adapterReset(v any, format string, at float64) float64 {
 	if v == nil {
 		return 0
 	}
+	if adapterIsBool(v) {
+		// Not an instant: `true` would read as one second from now
+		// (adapterFigure says why a boolean is never a figure).
+		return 0
+	}
 	if format == "" || format == "auto" {
 		if s, ok := v.(string); ok {
 			if e := isoToEpoch(strings.TrimSpace(s)); e > 0 {
@@ -949,6 +987,9 @@ func adapterRun(ad *vendorAdapter, docs map[string]any, cred map[string]any, at 
 	}
 	if ad.Plan != nil {
 		out.Plan = adapterPick(ad.Plan, docs, cred)
+		if ad.Plan.UnlessWindow.holds(out.Plan, out.Limits) {
+			out.Plan = ""
+		}
 	}
 	if ad.Tier != nil {
 		out.Tier = adapterPick(ad.Tier, docs, cred)
@@ -1435,20 +1476,62 @@ func adapterLimit(w *adapterWindow, ctx adapterCtx, cred map[string]any, at floa
 	return lim, true
 }
 
+// A window's figure — used, limit, remaining. adapterNum reads a JSON boolean
+// as 1 or 0, which a count or a flag may want; as a figure it is a reading
+// nobody sent ("percent": true would be 1% used). CodexBar stopped taking
+// booleans as percentages on both Claude paths (ClaudeWebExtraRateWindowParser
+// .percentValue, steipete/CodexBar@e1325bfd66), and here a boolean is no
+// figure at all: the row is skipped, never drawn at 1% or 0%.
+func adapterFigure(v any) (float64, bool) {
+	if adapterIsBool(v) {
+		return 0, false
+	}
+	return adapterNum(v)
+}
+
+func adapterFigureFraction(v any) (float64, bool) {
+	if adapterIsBool(v) {
+		return 0, false
+	}
+	return adapterFraction(v)
+}
+
+// Whether v is a JSON boolean, looking through the {"val": …} wrapper that
+// adapterNum reads through: a wrapped true is no figure either, or Grok's
+// {"monthlyLimit": {"val": true}} would be a one-cent limit (review
+// 2026-10-24).
+func adapterIsBool(v any) bool {
+	for range 8 {
+		switch x := v.(type) {
+		case bool:
+			return true
+		case map[string]any:
+			inner, ok := x["val"]
+			if !ok {
+				return false
+			}
+			v = inner
+			continue
+		}
+		return false
+	}
+	return false
+}
+
 // The percentage used, by the kind the table names. `ratio` also fills the
 // absolute figures, scaled (cents → dollars) when the table says so.
 func adapterUsed(w *adapterWindow, ctx adapterCtx) (float64, bool) {
 	switch w.UsedKind {
 	case "", "percent":
-		return adapterNum(ctx.get(w.Used))
+		return adapterFigure(ctx.get(w.Used))
 	case "remaining_percent":
-		r, ok := adapterNum(ctx.get(w.Used))
+		r, ok := adapterFigure(ctx.get(w.Used))
 		if !ok {
 			return 0, false
 		}
 		return 100 - r, true
 	case "remaining_fraction":
-		f, ok := adapterFraction(ctx.get(w.Used))
+		f, ok := adapterFigureFraction(ctx.get(w.Used))
 		if !ok {
 			return 0, false
 		}
@@ -1456,20 +1539,20 @@ func adapterUsed(w *adapterWindow, ctx adapterCtx) (float64, bool) {
 	case "used_fraction":
 		// A helper that predates this kind skips the row rather than misread
 		// it (the default below), which is what lets a table carry it.
-		f, ok := adapterFraction(ctx.get(w.Used))
+		f, ok := adapterFigureFraction(ctx.get(w.Used))
 		if !ok {
 			return 0, false
 		}
 		return 100 * f, true
 	case "ratio":
-		used, uok := adapterNum(ctx.get(w.Used))
-		limit, lok := adapterNum(ctx.get(w.Limit))
+		used, uok := adapterFigure(ctx.get(w.Used))
+		limit, lok := adapterFigure(ctx.get(w.Limit))
 		if !lok || limit <= 0 {
 			return 0, false
 		}
 		if !uok {
 			// Only the remainder was given: the used share is what is left over.
-			rem, rok := adapterNum(ctx.get(w.Remaining))
+			rem, rok := adapterFigure(ctx.get(w.Remaining))
 			if !rok {
 				return 0, false
 			}
@@ -1500,13 +1583,13 @@ func adapterAmounts(w *adapterWindow, ctx adapterCtx, lim *Limit) {
 	if scale == 0 {
 		scale = 1
 	}
-	if u, ok := adapterNum(ctx.get(w.Used)); ok {
+	if u, ok := adapterFigure(ctx.get(w.Used)); ok {
 		lim.UsedAmount = fp(round2(u * scale))
 	}
-	if l, ok := adapterNum(ctx.get(w.Limit)); ok {
+	if l, ok := adapterFigure(ctx.get(w.Limit)); ok {
 		lim.TotalAmount = fp(round2(l * scale))
 	}
-	if r, ok := adapterNum(ctx.get(w.Remaining)); ok {
+	if r, ok := adapterFigure(ctx.get(w.Remaining)); ok {
 		lim.RemainingAmount = fp(round2(r * scale))
 	} else if lim.UsedAmount != nil && lim.TotalAmount != nil {
 		lim.RemainingAmount = fp(round2(*lim.TotalAmount - *lim.UsedAmount))

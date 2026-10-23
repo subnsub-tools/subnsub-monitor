@@ -909,11 +909,81 @@ func TestAntigravityPlanFromCodeAssist(t *testing.T) {
 		{`{"currentTier":{"id":"free-tier","name":"Antigravity"},"paidTier":{"id":"g1-pro-tier","name":"Google AI Pro"}}`, "Pro"},
 		{`{"currentTier":{"id":"free-tier"}}`, "Free"},
 		{`{"paidTier":{"id":"g1-ultra-tier"}}`, "Ultra"},
-		{`{"currentTier":{"id":"standard-tier"}}`, "standard-tier"},
+		{`{"currentTier":{"id":"standard-tier"}}`, "Paid"},
+		{`{"currentTier":{"id":"legacy-tier"}}`, "legacy-tier"},
 	} {
-		docs := adapterDocs(t, "quota", `{"groups":[{"displayName":"Gemini","buckets":[{"window":"5h","remainingFraction":0.9}]}]}`, "assist", c.assist)
+		// Weekly only: the shape a Starter account has, where Free is no
+		// contradiction (TestAntigravityFreeBesideAFiveHourWindow has the rest).
+		docs := adapterDocs(t, "quota", `{"groups":[{"displayName":"Gemini","buckets":[{"window":"weekly","remainingFraction":0.9}]}]}`, "assist", c.assist)
 		if r := adapterRun(ad, docs, nil, v4Now); r.Plan != c.want {
 			t.Errorf("%s: plan %q, want %q", c.assist, r.Plan, c.want)
+		}
+	}
+}
+
+// Cloud Code can name currentTier free-tier for a paid account; five-hour
+// quota is paid-only, so a Free beside a measured, enabled 5h bucket is the
+// generic tier and not shown. Weekly-only (Starter), disabled and unmeasured
+// 5h buckets contradict nothing. The fixture is CodexBar's regression, scenario
+// by scenario (AntigravityRemoteUsageFetcherTests, steipete/CodexBar@f50cd6cee4);
+// where CodexBar names a paid tier by its `name` ("Google AI Pro") the table
+// maps its id, as it always has.
+func TestAntigravityFreeBesideAFiveHourWindow(t *testing.T) {
+	ad := vendorOf(t, "antigravity")
+	free := `{"currentTier":{"id":"free-tier","name":"Free"}}`
+	for _, c := range []struct {
+		name, assist, session, want string
+	}{
+		{"paid-tier", `{"currentTier":{"id":"free-tier","name":"Free"},"paidTier":{"id":"g1-pro-tier","name":"Google AI Pro"},"planInfo":{"planType":"Free"}}`,
+			`,{"bucketId":"gemini-5h","window":"5h","remainingFraction":0.5,"disabled":false}`, "Pro"},
+		{"paid-tier-id", `{"currentTier":{"id":"free-tier","name":"Free"},"paidTier":{"id":"standard-tier"},"planInfo":{"planType":"Free"}}`,
+			`,{"bucketId":"gemini-5h","window":"5h","remainingFraction":0.5,"disabled":false}`, "Paid"},
+		{"five-hour", free, `,{"bucketId":"gemini-5h","window":"5h","remainingFraction":0.5,"disabled":false}`, ""},
+		{"weekly", free, ``, "Free"},
+		{"disabled", free, `,{"bucketId":"gemini-5h","window":"5h","remainingFraction":0.5,"disabled":true}`, "Free"},
+		{"unmeasured", free, `,{"bucketId":"gemini-5h","window":"5h","disabled":false}`, "Free"},
+	} {
+		docs := adapterDocs(t, "quota", `{"groups":[{"displayName":"Gemini Models","buckets":[
+		  {"bucketId":"gemini-weekly","window":"weekly","remainingFraction":0.75}`+c.session+`]}]}`, "assist", c.assist)
+		r := adapterRun(ad, docs, nil, v4Now)
+		if r.Plan != c.want {
+			t.Errorf("%s: plan %q, want %q", c.name, r.Plan, c.want)
+		}
+		// The quota is read whatever the plan says.
+		if len(r.Limits) == 0 || r.Limits[0].Key != "gemini-weekly" || r.Limits[0].UsedPercent != 25 {
+			t.Errorf("%s: weekly window: %+v", c.name, r.Limits)
+		}
+	}
+	// A value the contradiction does not name is left alone, and a nil one
+	// (any other vendor) drops nothing.
+	five := []Limit{{Key: "session", WindowLabel: sp("5h")}}
+	if (&adapterContradiction{Value: "Free", Labels: []string{"5h"}}).holds("Pro", five) {
+		t.Error("only the value named is dropped")
+	}
+	if (*adapterContradiction)(nil).holds("Free", five) {
+		t.Error("no contradiction, nothing dropped")
+	}
+}
+
+// Cloud Code withholds newer models from an Antigravity client under 2.23.0,
+// and the Management Center speaks as the Hub at that floor
+// (src/utils/quota/constants.ts, CPAMC 91b47855bf; CLIProxyAPI's
+// internal/misc/antigravity_version.go keeps the same floor). Every request,
+// both channels and the plan's.
+func TestAntigravitySpeaksAsTheHubAtTheModelFloor(t *testing.T) {
+	ad := vendorOf(t, "antigravity")
+	if len(ad.Requests) == 0 {
+		t.Fatal("antigravity names no requests")
+	}
+	for _, r := range ad.Requests {
+		ua := r.Headers["User-Agent"]
+		v, ok := strings.CutPrefix(ua, "antigravity/hub/")
+		if !ok || !strings.HasSuffix(v, " darwin/arm64") {
+			t.Errorf("%s (%s): User-Agent %q is not the Hub's", r.ID, r.Channel, ua)
+			continue
+		}
+		if v = strings.TrimSuffix(v, " darwin/arm64"); !versionAtLeast(v, "2.23.0") {
+			t.Errorf("%s (%s): Hub %q is under the 2.23.0 floor", r.ID, r.Channel, v)
 		}
 	}
 }
@@ -1300,5 +1370,134 @@ func TestGrokClientVersionMeetsTheProxyFloor(t *testing.T) {
 		if r.Headers["x-xai-token-auth"] != "xai-grok-cli" || r.Headers["Authorization"] != "Bearer $TOKEN$" {
 			t.Errorf("%s: the CLI identity headers changed: %v", r.ID, r.Headers)
 		}
+	}
+}
+
+// The Management Center's own fixture for Claude's OAuth usage
+// (tests/fixtures/claude-oauth-usage.json, CPAMC b41c23890c), and the request
+// it pins (tests/claudeOAuthUsage.test.ts): Accept: application/json beside
+// the bearer, anthropic-beta on the CPA channel.
+func TestClaudeOAuthUsageFixture(t *testing.T) {
+	ad := vendorOf(t, "claude")
+	var usage *adapterRequest
+	for i := range ad.Requests {
+		if ad.Requests[i].ID == "usage" {
+			usage = &ad.Requests[i]
+		}
+	}
+	if usage == nil {
+		t.Fatal("claude names no usage request")
+	}
+	if h := usage.headersFor("cpa"); h["Accept"] != "application/json" || h["Authorization"] != "Bearer $TOKEN$" || h["anthropic-beta"] != "oauth-2025-04-20" {
+		t.Errorf("the CPA usage request's headers: %v", h)
+	}
+	if h := usage.headersFor("local"); h["Accept"] != "application/json" {
+		t.Errorf("the local usage request asks for JSON too: %v", h)
+	}
+	docs := adapterDocs(t, "usage", `{
+	  "five_hour": {"utilization": 42.5, "resets_at": "2026-10-09T18:00:00Z"},
+	  "seven_day": {"utilization": 16, "resets_at": "2026-10-15T09:00:00Z"},
+	  "seven_day_sonnet": {"utilization": 10, "resets_at": "2026-10-15T09:00:00Z"},
+	  "extra_usage": {"is_enabled": true, "monthly_limit": 5000, "used_credits": 1250, "utilization": 25,
+	    "currency": "USD", "disabled_reason": null, "user_disabled": false, "spend_limit_reached": false},
+	  "iguana_necktie": {"limit_dollars": 100, "used_dollars": 5.043595, "remaining_dollars": 94.956405,
+	    "utilization": 5.043595, "resets_at": "2026-11-01T00:00:00Z"},
+	  "additional_credit_balance": {"limit_dollars": 20, "used_dollars": 0, "remaining_dollars": 20,
+	    "utilization": 0, "resets_at": null},
+	  "unrelated": {"utilization": 99}
+	}`)
+	got := map[string]Limit{}
+	for _, l := range adapterRun(ad, docs, nil, v4Now).Limits {
+		got[l.Key] = l
+	}
+	if l := got["session"]; l.UsedPercent != 42.5 || l.ResetsAt == nil || *l.ResetsAt != isoToEpoch("2026-10-09T18:00:00Z") {
+		t.Errorf("five_hour: %+v", l)
+	}
+	if l := got["weekly"]; l.UsedPercent != 16 {
+		t.Errorf("seven_day: %+v", l)
+	}
+	if l := got["weekly_scoped"]; l.UsedPercent != 10 || l.Scope == nil || *l.Scope != "Sonnet" {
+		t.Errorf("seven_day_sonnet: %+v", l)
+	}
+	if l := got["cloud_credits"]; l.Unit != "usd" || l.UsedAmount == nil || *l.UsedAmount != 5.04 || *l.TotalAmount != 100 || *l.RemainingAmount != 94.96 {
+		t.Errorf("iguana_necktie, in dollars: %+v", l)
+	}
+	if l := got["extra"]; l.UsedPercent != 25 || l.Unit != "usd" || l.UsedAmount == nil || *l.UsedAmount != 12.5 || *l.TotalAmount != 50 {
+		t.Errorf("extra usage, minor units to dollars: %+v", l)
+	}
+	// The Management Center lists any complete top-level dollar object; the
+	// table reads the one Anthropic is known to send, and nothing else.
+	if len(got) != 5 {
+		t.Errorf("five windows, no more: %+v", got)
+	}
+}
+
+// A JSON boolean is no figure: `"percent": true` is not 1% used, nor false
+// 0% (CodexBar ClaudeWebUsageExtraWindowTests and ClaudeOAuthTests,
+// steipete/CodexBar@e1325bfd66). A null or malformed sibling in limits[]
+// takes nothing else with it.
+func TestClaudeBooleanPercentsAreNoFigure(t *testing.T) {
+	ad := vendorOf(t, "claude")
+	r := adapterRun(ad, adapterDocs(t, "usage", `{"five_hour":{"utilization":12},"limits":[
+	  {"kind":"weekly_scoped","group":"weekly","percent":true,"scope":{"model":{"display_name":"Fable"}}},
+	  {"kind":"weekly_scoped","group":"weekly","percent":false,"scope":{"model":{"display_name":"Story"}}}
+	]}`), nil, v4Now)
+	for _, l := range r.Limits {
+		if l.Key == "weekly_scoped" {
+			t.Errorf("a boolean percent became a window: %+v", l)
+		}
+	}
+	r = adapterRun(ad, adapterDocs(t, "usage", `{
+	  "five_hour": {"utilization": 11.0, "resets_at": "2026-07-03T00:30:00.282668+00:00"},
+	  "seven_day": {"utilization": 9.0, "resets_at": "2026-07-08T09:00:00.282694+00:00"},
+	  "limits": [
+	    null,
+	    "not an entry",
+	    {"kind": "weekly_scoped", "group": "weekly", "percent": 5, "resets_at": true,
+	     "scope": {"model": {"id": null, "display_name": "Fable"}, "surface": null}, "is_active": false}
+	  ]
+	}`), nil, v4Now)
+	var fable *Limit
+	for i := range r.Limits {
+		if r.Limits[i].Scope != nil && *r.Limits[i].Scope == "Fable" {
+			fable = &r.Limits[i]
+		}
+	}
+	if fable == nil || fable.UsedPercent != 5 || fable.ResetsAt != nil {
+		t.Errorf("Fable beside a null and a string entry, its boolean reset no instant: %+v", fable)
+	}
+	// Ratio figures too: a boolean limit is no limit.
+	r = adapterRun(ad, adapterDocs(t, "usage", `{"five_hour":{"utilization":1},
+	  "extra_usage":{"is_enabled":true,"monthly_limit":true,"used_credits":0,"currency":"USD"}}`), nil, v4Now)
+	for _, l := range r.Limits {
+		if l.Key == "extra" {
+			t.Errorf("a boolean monthly limit drew a window: %+v", l)
+		}
+	}
+	if adapterReset(true, "", v4Now) != 0 || adapterReset(false, "epoch_s", v4Now) != 0 {
+		t.Error("a boolean is no reset instant")
+	}
+}
+
+// A boolean wrapped as adapterNum reads a wrapper is no figure either, while
+// a wrapped number still is (review 2026-10-24).
+func TestAdapterWrappedBooleanIsNoFigure(t *testing.T) {
+	if _, ok := adapterFigure(map[string]any{"val": true}); ok {
+		t.Errorf("a wrapped true was read as a figure")
+	}
+	if _, ok := adapterFigure(map[string]any{"val": map[string]any{"val": false}}); ok {
+		t.Errorf("a doubly wrapped false was read as a figure")
+	}
+	if _, ok := adapterFigureFraction(map[string]any{"val": true}); ok {
+		t.Errorf("a wrapped true was read as a fraction")
+	}
+	if got := adapterReset(map[string]any{"val": true}, "auto", 1_800_000_000); got != 0 {
+		t.Errorf("a wrapped true was read as an instant: %v", got)
+	}
+	if f, ok := adapterFigure(map[string]any{"val": 5.0}); !ok || f != 5 {
+		t.Errorf("a wrapped number = %v %v, want 5", f, ok)
+	}
+	if f, ok := adapterFigure(map[string]any{"val": "42%"}); !ok || f != 42 {
+		t.Errorf("a wrapped percentage = %v %v, want 42", f, ok)
 	}
 }

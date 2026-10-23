@@ -268,7 +268,10 @@ func TestLocalAntigravityAsksTheQuotaWithoutAProject(t *testing.T) {
 	}
 	p := adapterFetch(Provider{ID: "antigravity", Name: "Antigravity", Source: "api"}, ag,
 		map[string]any{"token": map[string]any{"access_token": "tok-agy"}}, "local", send)
-	if !p.OK || len(p.Limits) != 2 || p.PlanType == nil || *p.PlanType != "Free" {
+	// free-tier beside a measured, enabled 5h bucket is Cloud Code's generic
+	// tier on a paid account, not the plan: no plan rather than Free (adapters
+	// v14, CodexBar f50cd6cee4 — TestAntigravityFreeBesideAFiveHourWindow).
+	if !p.OK || len(p.Limits) != 2 || p.PlanType != nil {
 		t.Fatalf("local reading: %+v", p)
 	}
 	if len(bodies) != 1 || bodies[0] != "{}" {

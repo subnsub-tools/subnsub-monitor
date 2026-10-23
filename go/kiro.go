@@ -23,15 +23,83 @@ package main
 // and literal-prefixed, spacing is [ \t] never \s, numbers carry the grouping
 // grammar, and a line that stops matching contributes nothing rather than a
 // wrong number.
+//
+// OFFLINE, THE CLI IS NOT RUN. On a network without internet kiro-cli does not
+// fail: it opens Kiro's and Google's sign-in pages in the browser, and this
+// collector asks on every push it is due — a desktop would collect a tab per
+// attempt. --no-interactive turns off the chat loop, not that sign-in. So the
+// usage host is asked first, unauthenticated and bodiless (HEAD, four
+// seconds); any HTTP answer at all says the network is there, and a transport
+// failure skips the run, leaving the last reading standing as provCache does
+// for any failure (CodexBar KiroUsageLimitsAPI.ensureReachable,
+// steipete/CodexBar@49e7581587). CodexBar asks only on background refreshes
+// and reads the profile's region from kiro-cli's private SQLite state; every
+// collection here is unattended, so it is always asked, and the state
+// database is never opened: the two regions' hosts CodexBar knows (us-east-1
+// and eu-central-1) are asked at once and either answering is enough, so a
+// network that lets only one of them through does not stop a working CLI
+// (review 2026-10-24). Any answer counts, a redirect included — it is
+// answered, not followed.
 
 import (
+	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
 
-const kiroBinEnv = "MON_KIRO_BIN"
+const (
+	kiroBinEnv       = "MON_KIRO_BIN"
+	kiroReachTimeout = 4 * time.Second
+)
+
+// The usage hosts of the two regions CodexBar knows, us-east-1 first, its
+// default when the region is unknown (KiroUsageLimitsAPI.profileEndpoints).
+var kiroReachURLs = []string{
+	"https://codewhisperer.us-east-1.amazonaws.com/",
+	"https://q.eu-central-1.amazonaws.com/",
+}
+
+// Whether Kiro's service answers at all. A variable so a test can say no
+// without a network.
+var kiroReachable = func() bool { return kiroAnswers(kiroReachURLs, kiroReachTimeout) }
+
+// kiroAnswers asks each URL at once, unauthenticated and bodiless, through
+// the environment's proxy as every provider request goes; true as soon as
+// one answers with any HTTP status.
+func kiroAnswers(urls []string, timeout time.Duration) bool {
+	client := &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	got := make(chan bool, len(urls))
+	for _, u := range urls {
+		go func(u string) {
+			req, err := http.NewRequest(http.MethodHead, u, nil)
+			if err != nil {
+				got <- false
+				return
+			}
+			req.Header.Set("User-Agent", "subnsub-monitor")
+			resp, err := client.Do(req)
+			if err != nil {
+				got <- false
+				return
+			}
+			resp.Body.Close()
+			got <- true
+		}(u)
+	}
+	for range urls {
+		if <-got {
+			return true
+		}
+	}
+	return false
+}
 
 var kiroCache = provCache{pace: paceMark{id: "kiro"}}
 
@@ -134,6 +202,9 @@ func fetchKiro() Provider {
 	bin := vendorBinary(kiroBinEnv, vendorCandidates("kiro-cli"))
 	if bin == "" {
 		return fail("not-installed", "cli-missing", "kiro-cli")
+	}
+	if !kiroReachable() {
+		return fail("unreachable", "req-failed")
 	}
 	out, exited, err := runVendorCLI(bin, []string{"chat", "--no-interactive", "/usage"},
 		[]string{"KIRO_", "AWS_", "Q_"}, 30*time.Second)

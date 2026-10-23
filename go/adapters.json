@@ -1,5 +1,5 @@
 {
-  "version": 13,
+  "version": 14,
   "min_helper": "2026.10.14.2",
   "_": [
     "The quota adapters behind the CPA rung — see adapter.go for the vocabulary.",
@@ -45,7 +45,12 @@
     "row as it always did.",
     "v13 (2026.10.14.2 keeps reading it, CPAMC 390718ec): Grok's client version is 1.0.46. cli-chat-proxy.grok.com refuses an",
     "x-grok-client-version under 1.0.13 with 426 (CLIProxyAPI #6249, since 2026-10-01), so the 0.2.91 the table named left Grok's",
-    "CPA and local rungs without any window; the user-agent names the same version twice. No new key, no new host."
+    "CPA and local rungs without any window; the user-agent names the same version twice. No new key, no new host.",
+    "v14 (2026.10.14.2 keeps reading it, CPAMC 714de076, CodexBar 8928b6ee): Antigravity speaks as the Hub, antigravity/hub/2.23.0",
+    "darwin/arm64 — Cloud Code withholds newer models from clients under 2.23.0 (CPAMC 91b47855bf, CLIProxyAPI's floor). Claude's",
+    "usage asks Accept: application/json (CPAMC b41c23890c). Antigravity's plan: standard-tier is Paid, and `unless_window` (the",
+    "helper after 2026.10.18.5) drops a Free that a measured 5h window contradicts — Cloud Code can say free-tier for a paid",
+    "account, and five-hour quota is paid-only (CodexBar f50cd6cee4); a helper before the key shows the Free it always did. No new host."
   ],
   "vendors": {
     "claude": {
@@ -59,6 +64,7 @@
           "headers": {
             "Authorization": "Bearer $TOKEN$",
             "Content-Type": "application/json",
+            "Accept": "application/json",
             "User-Agent": "claude-cli/2.1.280 (external, cli)"
           },
           "headers_cpa": {
@@ -548,7 +554,7 @@
           "headers": {
             "Authorization": "Bearer $TOKEN$",
             "Content-Type": "application/json",
-            "User-Agent": "antigravity/cli/1.0.13 (aidev_client; os_type=darwin; arch=arm64)"
+            "User-Agent": "antigravity/hub/2.23.0 darwin/arm64"
           },
           "body": "{\"project\":\"{cred.project_id|projectId|metadata.project_id|metadata.projectId|attributes.project_id|attributes.projectId|attributes.gemini_virtual_project}\"}",
           "requires": {
@@ -567,7 +573,7 @@
           "headers": {
             "Authorization": "Bearer $TOKEN$",
             "Content-Type": "application/json",
-            "User-Agent": "antigravity/cli/1.0.13 (aidev_client; os_type=darwin; arch=arm64)"
+            "User-Agent": "antigravity/hub/2.23.0 darwin/arm64"
           },
           "body": "{}",
           "channel": "local"
@@ -579,7 +585,7 @@
           "headers": {
             "Authorization": "Bearer $TOKEN$",
             "Content-Type": "application/json",
-            "User-Agent": "antigravity/cli/1.0.13 (aidev_client; os_type=darwin; arch=arm64)"
+            "User-Agent": "antigravity/hub/2.23.0 darwin/arm64"
           },
           "body": "{\"metadata\":{\"ideType\":\"ANTIGRAVITY\"}}",
           "optional": true
@@ -632,7 +638,14 @@
           "g1-pro-tier": "Pro",
           "g1-ultra-tier": "Ultra",
           "g1-ultra-lite-tier": "Ultra Lite",
+          "standard-tier": "Paid",
           "free-tier": "Free"
+        },
+        "unless_window": {
+          "value": "Free",
+          "labels": [
+            "5h"
+          ]
         }
       }
     },
