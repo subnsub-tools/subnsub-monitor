@@ -263,6 +263,8 @@ func connect(base, token string) {
 	startCustom()
 	startSpaces(base, tok)
 	startIPv4()
+	// And the reach record's probe (reach.go): idle until a push fails.
+	go reachLoop()
 	client := &http.Client{
 		Timeout:   15 * time.Second,
 		Transport: relayTransport(),
@@ -330,6 +332,7 @@ func connect(base, token string) {
 		case err != nil:
 			fails++
 			warnf("push failed")
+			reachRelayLost(time.Now())
 			// No response, no hint — and the backoff below stretches the gap
 			// past a shell command's whole lifetime. If anything is waiting,
 			// only a poll can find it now, so the console loop is woken on
@@ -337,6 +340,7 @@ func connect(base, token string) {
 			hints.wakeNow()
 			wait = every * math.Min(math.Pow(2, float64(fails)), 10)
 		case resp.StatusCode == 200:
+			reachRelayHeard(time.Now())
 			absorbHint(hints, resp.Body)
 			if fails > 0 {
 				warnf("reconnected")
@@ -390,6 +394,7 @@ func connect(base, token string) {
 				warnf("push rejected: %d", code)
 			}
 			fails++
+			reachRelayLost(time.Now())
 			hints.wakeNow() // rejected pushes carry no hint; see the err case
 			// 401/403 is the relay saying this token is not (or is no longer)
 			// one it will take — the other moment worth asking the site for a
@@ -520,6 +525,8 @@ type Beacon struct {
 	// direct road the relay is still the record's one durable home.
 	Outages      []outageRow `json:"outages,omitempty"`
 	OutagesSince int64       `json:"outages_since,omitempty"`
+	// And the reach record's (types.go Reach).
+	Reach []outageRow `json:"reach,omitempty"`
 	// And the archive's newest closed five-minute buckets, without process
 	// names (history.go historyCoarseClosed): the relay files them, so a
 	// browser that cannot reach the tunnel still has a trend to draw.
@@ -552,14 +559,15 @@ func beaconMode() bool {
 func pushBody() any {
 	snap := collectAll()
 	// What this push carries of the outage record, for the answer that
-	// acknowledges it (outages.go outageAcked).
+	// acknowledges it (outages.go outageAcked), and of the reach record.
 	outageSent(snap.Outages)
+	reachSent(snap.Reach)
 	if addr := directAddress(); addr != "" && beaconMode() {
 		return Beacon{Beacon: true, CapturedAt: snap.CapturedAt, AgentID: snap.AgentID,
 			AgentLabel: snap.AgentLabel, HelperVersion: helperVersion, DirectAddr: addr,
 			Rename: snap.Rename, Econ: snap.Econ,
 			Console: snap.Console, Update: snap.Update, AutoUpdate: snap.AutoUpdate, Diagnostics: snap.Diagnostics, Signed: snap.Signed, Act: snap.Act, MyIP: snap.MyIP,
-			Spaces: snap.Spaces, Wiped: snap.Wiped, Outages: snap.Outages, OutagesSince: snap.OutagesSince,
+			Spaces: snap.Spaces, Wiped: snap.Wiped, Outages: snap.Outages, OutagesSince: snap.OutagesSince, Reach: snap.Reach,
 			Hist:       historyCoarseClosed(beaconHistRows),
 			PublicIPv4: snap.PublicIPv4, PublicCC: snap.PublicCC,
 			UpdateNext: snap.UpdateNext, UpdateLast: snap.UpdateLast}

@@ -64,6 +64,8 @@ import (
 	"time"
 
 	"github.com/tailscale/tailcat"
+	"tailscale.com/derp/derphttp"
+	"tailscale.com/net/netmon"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
@@ -109,6 +111,7 @@ type Tailcat struct {
 	key    key.NodePrivate
 	psk    tailcat.PresharedKey
 	region tailcfg.DERPRegionID
+	reg    *tailcfg.DERPRegion // the region started in, as it is dialed (ProbeRelay)
 	byName bool
 	blob   string
 
@@ -186,6 +189,7 @@ func StartTailcat(cfg TailcatConfig) (*Tailcat, error) {
 	t.srv = srv
 	t.blob = string(srv.ConnBlob())
 	t.region = reg.RegionID
+	t.reg = reg
 	t.byName = byName
 	if t.region != pinned {
 		if werr := writeRegion(cfg.StateDir, t.region); werr != nil {
@@ -362,6 +366,52 @@ func (t *Tailcat) start(reg *tailcfg.DERPRegion, logf logger.Logf) (*tailcat.Ser
 	}
 	t.ln = ln
 	return srv, nil
+}
+
+// ProbeRelay reports whether this machine can reach the DERP relay its tunnel
+// waits at, right now: a TLS connection to the region, dialed and verified by
+// the very path the tunnel's own DERP client takes (derphttp DialRegionTLS,
+// the one tailscale's netcheck uses — the environment's proxy, IPv4 and IPv6
+// raced, each node given its own short timeout before the next, the map's
+// CertName honoured) against the region as the tunnel dials it (dialByName
+// has already rewritten it where DNS disagrees with the map). The tunnel's own
+// connection is the library's and its health cannot be read back, so this is
+// a fresh one, opened and closed. A connection that verifies is a machine a
+// browser could reach over tailcat — the helper's evidence, while its relay
+// push is failing, that it was online all the same (reach.go). A captive
+// portal or a firewall that lets nothing through fails it, as it should.
+func (t *Tailcat) ProbeRelay(ctx context.Context) error {
+	if t == nil || t.reg == nil {
+		return errors.New("tailcat: no region to probe")
+	}
+	c := derphttp.NewNetcheckClient(logger.Discard, netmon.NewStatic())
+	conn, closer, _, err := c.DialRegionTLS(ctx, t.reg)
+	if err != nil {
+		return err
+	}
+	conn.Close()
+	closer.Close()
+	return nil
+}
+
+// PeerRx is how many bytes this machine has received from the peer over the
+// tunnel so far, and whether the tunnel knows the peer. A browser that is
+// reading a stream acknowledges what it reads, so the count moves while the
+// frames arrive; a path gone dark stops it, while writes into the socket's
+// buffer can go on succeeding for a while yet (reach.go evidence).
+func (t *Tailcat) PeerRx(k key.NodePublic) (int64, bool) {
+	if t == nil || t.srv == nil {
+		return 0, false
+	}
+	st := t.srv.Status()
+	if st == nil {
+		return 0, false
+	}
+	p, ok := st.Peer[k]
+	if !ok || p == nil {
+		return 0, false
+	}
+	return p.RxBytes, true
 }
 
 // ConnBlob is this machine's address on the tunnel: what a watcher pastes to

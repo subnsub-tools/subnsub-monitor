@@ -346,6 +346,12 @@ type Snapshot struct {
 	// `outages_until`) and only what is newer travels.
 	Outages      []outageRow `json:"outages,omitempty"`
 	OutagesSince int64       `json:"outages_since,omitempty"`
+
+	// The rows of the reach record (reach.go) the relay has not yet
+	// acknowledged: stretches this machine was online while its push was
+	// failing, which the page takes out of the relay's silences. Absent on
+	// an ordinary push (hint.go `reach_until`).
+	Reach []outageRow `json:"reach,omitempty"`
 }
 
 func now() float64 { return float64(time.Now().UnixNano()) / 1e9 }
@@ -487,7 +493,7 @@ func collectAllOpts(consumeSeries bool) Snapshot {
 		AdaptersVersion: adaptersVersion(),
 		Diagnostics:     diagnosticsEnabled(), Signed: loadTrust().sealed, Act: tileActionsOn(), MyIP: myipAvailable(),
 		DirectAddr: directAddress(), Econ: econPublic(), Wiped: outageLastWipe(),
-		Outages: outagePending(time.Now()), OutagesSince: outageSince()}
+		Outages: outagePending(time.Now()), OutagesSince: outageSince(), Reach: reachPending(time.Now())}
 	// Concurrently, holding the registry's order for the output. Serial was
 	// fine at four collectors; at eight, five of them making real requests
 	// with ten-second deadlines, a bad network day could stack past the

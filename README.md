@@ -182,6 +182,7 @@ Run `subnsub-monitor` with no arguments to inspect the exact JSON snapshot produ
 
 - **Process diagnostics:** On Linux (and Android running as `shell` or `root`), the dashboard can request a read-only top-20 process resource table (PID, executable name, CPU%, memory%, and age — never command-line arguments, environment variables, or open files). The helper also records the top 5 process names alongside each 5-minute CPU bucket in its local 30-day history (`history.jsonl`), served only over the direct tunnel.
 - **Outage & wipe detection:** The helper maintains a local heartbeat timestamp and records intervals when the machine was powered down, suspended, or wiped and re-provisioned (distinguishing a fresh OS install from a reboot via `/etc/machine-id`, `/etc/hostid`, or macOS root APFS volume UUID in `host-id`, which never leaves the machine).
+- **Reach while the relay is unreachable:** While its pushes to the relay are failing, the helper records the stretches the machine was demonstrably online anyway: a browser was receiving its tailcat stream and acknowledging it, or a TLS connection to the tunnel's DERP region succeeded (dialed exactly as the tunnel's own DERP client dials it, every 30 seconds, and only while pushes fail). The stretches (`reach.json`, start, end and which evidence) are sent with the next accepted push, so the dashboard does not count the relay's own silence as the machine's downtime (`go/reach.go`).
 
 ## Machine identity & naming
 
@@ -537,7 +538,7 @@ All state lives in `~/.config/subnsub-monitor/` (mode `0700`):
 | `clone-access`, `clones`, `clones.revoked` | Client-side delegated access credential and host-side admitted/revoked copy records |
 | `probes.json`, `probes.key`, `probes-state.json` | Service probe definitions, target HMAC key, and rolling uptime buckets |
 | `metrics.d/`, `metrics.sock` | Custom metric definitions and the local Unix domain push socket |
-| `history.jsonl`, `outages.json`, `declared-outage` | Local 30-day 5-minute metric archive and outage records |
+| `history.jsonl`, `outages.json`, `reach.json`, `declared-outage` | Local 30-day 5-minute metric archive, outage records, and reach records |
 | `adapters.json`, `adapters.sig` | Cached hot-updated adapter table and its Ed25519 signature |
 
 ## Building from source

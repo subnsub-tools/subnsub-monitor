@@ -311,6 +311,34 @@ func admitNow(k key.NodePublic) {
 	}
 }
 
+// How a stream tells a browser that is reading from a path gone dark
+// (events, reach.go): the peer's received bytes are looked at this often,
+// and a stream counts as acknowledged while they moved within the second.
+const (
+	streamAckEvery    = 5 * time.Second
+	streamAckedWithin = 15 * time.Second
+)
+
+// The running carrier's probe of its DERP relay (transport ProbeRelay), for
+// the reach record (reach.go): whether this machine can be reached over
+// tailcat while the relay push is failing. nil while no carrier is up.
+var directProbeF struct {
+	sync.Mutex
+	f func(context.Context) error
+}
+
+func setDirectProbe(f func(context.Context) error) {
+	directProbeF.Lock()
+	directProbeF.f = f
+	directProbeF.Unlock()
+}
+
+func directProbe() func(context.Context) error {
+	directProbeF.Lock()
+	defer directProbeF.Unlock()
+	return directProbeF.f
+}
+
 // directAddress is the tunnel's current address, or "" while it is down.
 // Read by every relay push (types.go) so the dashboard learns the road.
 func directAddress() string {
@@ -440,6 +468,7 @@ func runDirect(ctx context.Context) {
 		})
 		publishAddress(conf, tc)
 		setDirectAddress(tc.ConnBlob())
+		setDirectProbe(tc.ProbeRelay)
 		how := ""
 		if tc.ByName() {
 			how = ", dialed by name: this machine's DNS sends the relay elsewhere"
@@ -450,6 +479,7 @@ func runDirect(ctx context.Context) {
 			warnf("direct: up via the public tailcat DERP (region %d%s) — best effort, no guarantee", tc.Region(), how)
 		}
 		serveDirect(ctx, tc, h)
+		setDirectProbe(nil)
 		setDirectAdmit(nil)
 		h.pipes.endAll()
 		tc.Close()
@@ -1058,6 +1088,28 @@ func (h *directHandler) events(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	rc := http.NewResponseController(w)
+	// Whether the browser is still taking the frames: the bytes the tunnel
+	// has received from it (its acknowledgements) moved in the last
+	// streamAckedWithin, looked at every streamAckEvery. A flush only says
+	// the socket's buffer took the bytes, which it goes on doing for a while
+	// after the path has gone dark (review 2026-10-24).
+	var rxN int64 = -1
+	var rxAt, rxLooked time.Time
+	acked := func(now time.Time) bool {
+		if h.carrier == nil {
+			return false
+		}
+		if now.Sub(rxLooked) >= streamAckEvery {
+			rxLooked = now
+			if n, ok := h.carrier.PeerRx(peer); ok {
+				if rxN >= 0 && n > rxN {
+					rxAt = now
+				}
+				rxN = n
+			}
+		}
+		return !rxAt.IsZero() && now.Sub(rxAt) <= streamAckedWithin
+	}
 	emit := func(b []byte) bool {
 		if err := rc.SetWriteDeadline(time.Now().Add(15 * time.Second)); err != nil {
 			return false
@@ -1065,7 +1117,17 @@ func (h *directHandler) events(w http.ResponseWriter, r *http.Request) {
 		if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {
 			return false
 		}
-		return rc.Flush() == nil
+		if rc.Flush() != nil {
+			return false
+		}
+		// A frame that left for a browser that is still acknowledging what
+		// it reads is the machine answering end to end — evidence for the
+		// reach record while the relay push is failing (reach.go), and
+		// nothing otherwise.
+		if now := time.Now(); acked(now) {
+			reachNote(now, reachKindTunnel)
+		}
+		return true
 	}
 	if b, err := h.helloFrame(r); err == nil && !emit(b) {
 		return

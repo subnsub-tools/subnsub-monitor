@@ -93,6 +93,8 @@ type pushHint struct {
 	// unix seconds (outages.go outageAcked). Absent from a relay that does
 	// not keep the record.
 	OutagesUntil *float64 `json:"outages_until"`
+	// The same for the reach record (reach.go reachAcked).
+	ReachUntil *float64 `json:"reach_until"`
 }
 
 // Where the push loop files what the relay said and the console loop asks.
@@ -143,6 +145,7 @@ func (b *hintBox) absorb(raw []byte) {
 	noteWatched(parsed && h.Watch != nil && *h.Watch)
 	// The outage record's acknowledgement, read on every machine too.
 	outageAcked(parsed, h.OutagesUntil)
+	reachAcked(parsed, h.ReachUntil)
 	if parsed && h.Update != nil && *h.Update {
 		nudgeUpdate()
 	}
