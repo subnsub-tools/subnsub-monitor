@@ -938,8 +938,12 @@ func TestKimiMonthlyWindow(t *testing.T) {
 
 // The Code API's ratio pools, `usages.limit_7d` / `limit_5h` (CodexBar
 // KimiModels, @51ed16bdd3), when the counters are not there; and when both
-// are, the counter — a 0 ratio beside a counter of 19 is a placeholder
-// (@fd2414d295), and the table has no way to say that except by order.
+// are, whichever says more is used (KimiUsageSnapshot.resolvedRatioWindow,
+// @8ab81e2ebd: "conflicting readings for the same period use the
+// more-exhausted quota") — a 0 ratio beside a counter of 19 is a placeholder
+// (@fd2414d295), and a 0.5 ratio beside it is the reading. The table says
+// so by order and `merge: max`: the counter first, the pool over it only
+// when it is the higher.
 func TestKimiRatioPools(t *testing.T) {
 	pools := adapterDocs(t, "usage", `{"usages":{"limit_7d":{"used_ratio":0.125,"reset_time":"2026-09-20T00:00:00Z"},"limit_5h":{"used_ratio":0.625}}}`)
 	r := adapterRun(vendorOf(t, "kimi"), pools, nil, v4Now)
@@ -958,6 +962,36 @@ func TestKimiRatioPools(t *testing.T) {
 	r = adapterRun(vendorOf(t, "kimi"), mixed, nil, v4Now)
 	if len(r.Limits) != 1 || r.Limits[0].Key != "weekly" || r.Limits[0].UsedPercent != 19 {
 		t.Errorf("the counter stands over the zero placeholder: %+v", r.Limits)
+	}
+	// The pool that says more is the reading, in the pool's own terms — its
+	// reset; the weekly counter names no length, so neither does the window —
+	// and still one window, in the counter's place.
+	more := adapterDocs(t, "usage", `{"usage":{"limit":"100","used":"19","remaining":"81","resetTime":"2026-09-19T16:45:57Z"},
+	  "limits":[{"detail":{"limit":"50","used":"10"},"window":{"duration":300,"timeUnit":"TIME_UNIT_MINUTE"}}],
+	  "usages":{"limit_7d":{"used_ratio":0.5,"reset_time":"2026-09-19T16:45:58Z"},"limit_5h":{"used_ratio":0.2}}}`)
+	r = adapterRun(vendorOf(t, "kimi"), more, nil, v4Now)
+	if len(r.Limits) != 2 {
+		t.Fatalf("one window per key: %+v", r.Limits)
+	}
+	if w := r.Limits[1]; w.Key != "weekly" || w.UsedPercent != 50 || w.WindowMinutes != nil ||
+		w.ResetsAt == nil || *w.ResetsAt != isoToEpoch("2026-09-19T16:45:58Z") {
+		t.Errorf("the pool at 50%% stands over the counter at 19%%: %+v", w)
+	}
+	if s := r.Limits[0]; s.Key != "rate" || s.UsedPercent != 20 || s.WindowMinutes == nil || *s.WindowMinutes != 300 {
+		t.Errorf("the counter at 20%% keeps its place over the pool at 20%%, window length and all: %+v", s)
+	}
+	// The 5h pool names no duration and no reset here: when it stands over
+	// the counter it keeps the counter's 300 minutes and reset — one period,
+	// one length — or the page would lose the pace mark it drew a push before.
+	session := adapterDocs(t, "usage", `{"limits":[{"detail":{"limit":"50","used":"10","resetTime":"2026-09-19T12:00:00Z"},"window":{"duration":300,"timeUnit":"TIME_UNIT_MINUTE"}}],
+	  "usages":{"limit_5h":{"used_ratio":0.6}}}`)
+	r = adapterRun(vendorOf(t, "kimi"), session, nil, v4Now)
+	if len(r.Limits) != 1 {
+		t.Fatalf("one window per key: %+v", r.Limits)
+	}
+	if s := r.Limits[0]; s.Key != "rate" || s.UsedPercent != 60 || s.WindowMinutes == nil || *s.WindowMinutes != 300 ||
+		s.ResetsAt == nil || *s.ResetsAt != isoToEpoch("2026-09-19T12:00:00Z") {
+		t.Errorf("the pool at 60%% stands over the counter at 20%% with the counter's length and reset: %+v", s)
 	}
 }
 
@@ -1238,5 +1272,33 @@ func TestAdapterFetchNamesThePlanEvenWithNoWindow(t *testing.T) {
 	}
 	if p.PlanType == nil || *p.PlanType != "SuperGrok Heavy" {
 		t.Errorf("the plan the table read should ride on the failure: %+v", p.PlanType)
+	}
+}
+
+// cli-chat-proxy.grok.com refuses an x-grok-client-version under 1.0.13 with
+// 426 "Your Grok CLI version is outdated" (CLIProxyAPI #6249, 2026-10-01); the
+// table named 0.2.91 until adapters v11 and so read no Grok window at all.
+// The Management Center pins the same floor in tests/xaiQuotaHeaders.test.ts
+// (CPAMC fdea9765, 1.0.46): the header and both user-agent versions must agree.
+func TestGrokClientVersionMeetsTheProxyFloor(t *testing.T) {
+	ad := vendorOf(t, "xai")
+	if len(ad.Requests) == 0 {
+		t.Fatal("xai names no requests")
+	}
+	for _, r := range ad.Requests {
+		v := r.Headers["x-grok-client-version"]
+		if !strings.Contains(r.URL, "cli-chat-proxy.grok.com") {
+			continue
+		}
+		if v == "" || !versionAtLeast(v, "1.0.13") {
+			t.Errorf("%s: x-grok-client-version %q is under the 1.0.13 floor cli-chat-proxy enforces", r.ID, v)
+		}
+		want := "grok-pager/" + v + " grok-shell/" + v + " (macos; aarch64)"
+		if ua := r.Headers["user-agent"]; ua != want {
+			t.Errorf("%s: user-agent %q does not carry the client version twice: want %q", r.ID, ua, want)
+		}
+		if r.Headers["x-xai-token-auth"] != "xai-grok-cli" || r.Headers["Authorization"] != "Bearer $TOKEN$" {
+			t.Errorf("%s: the CLI identity headers changed: %v", r.ID, r.Headers)
+		}
 	}
 }

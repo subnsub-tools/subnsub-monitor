@@ -124,7 +124,7 @@ func systemSnapshot() System {
 	s.miss(mSwap)
 	macLoad(&s, ctl)
 	macUptime(&s, ctl)
-	statfsRoot(&s, "/")
+	macRoot(&s)
 	macMounts(&s)
 	// Disk THROUGHPUT is a different matter from disk capacity, and macOS has
 	// no cgo-free counter for it: the figure lives behind IOKit, and the one
@@ -266,6 +266,33 @@ func macCPU(s *System, out string) {
 	s.miss(mCPU)
 }
 
+// The internal disk, the way About This Mac counts it. On a current Mac "/" is
+// a sealed snapshot of the system volume, one of several APFS volumes sharing
+// a container: statfs answers with the CONTAINER's size and free space but with
+// that one volume's use — ten-odd gigabytes on every Mac, so the card read a
+// few percent on a disk that was nearly full, and the real figure sat on a
+// /System/Volumes/Data tile beside it. Whatever the container can no longer
+// give out, over its size, is the disk's fullness; the other volumes' tiles
+// go (macMountHidden).
+func macRoot(s *System) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs("/", &st); err != nil {
+		s.miss(mDisk)
+		return
+	}
+	total, used, usedPct, ok := statfsCalc(&st)
+	if !ok {
+		s.miss(mDisk)
+		return
+	}
+	if cstr(st.Fstypename[:]) == "apfs" {
+		if all := total - float64(st.Bavail)*fsBlockSize(&st); all >= used && all <= total {
+			used, usedPct = all, pct(all, total)
+		}
+	}
+	s.DiskTotal, s.DiskUsed, s.DiskUsedPercent = fp(total), fp(used), usedPct
+}
+
 // The filesystems other than root, from getfsstat — one syscall that hands
 // back a full statfs per mount, so nothing here calls statfs a second time on
 // a path that might be a network volume with an absent server.
@@ -301,7 +328,7 @@ func scanMacMounts() ([]Mount, bool) {
 		path := cstr(st.Mntonname[:])
 		fstype := cstr(st.Fstypename[:])
 		dev := cstr(st.Mntfromname[:])
-		if path == "/" || !realFsTypes[fstype] || dev == "" || seenDev[dev] {
+		if path == "/" || !realFsTypes[fstype] || dev == "" || seenDev[dev] || macMountHidden(path, st.Flags) {
 			continue
 		}
 		seenDev[dev] = true

@@ -13,8 +13,8 @@ package main
 // WHAT THIS DOES AND DOES NOT PROMISE, stated plainly because a review read
 // the first version as claiming more than it delivers. The fold removes the
 // segments an operating system GENERATES from an identity — the username under
-// a home directory, the account under an automount root, the label on a
-// removable volume. It does NOT redact a name somebody chose to type: a
+// a home directory, the account under an automount root. It does NOT redact a
+// name somebody chose to type, and a Mac's disk label is one: a
 // machine that mounts a disk at /srv/customer-acme sends /srv/customer-acme,
 // because that string is the answer to "which disk is full" and inventing a
 // number in its place would leave the section unable to do its job.
@@ -31,7 +31,7 @@ package main
 //	/var/lib/docker/overlay2  → /var/lib/docker
 //
 //	/run/media/alice/stick    → /run/media
-//	/Volumes/Alice Backup     → /Volumes
+//	/Volumes/Alice Backup     → /Volumes/Alice Backup
 //
 // Home directories and the automount roots collapse to the anchor itself
 // because the segment after them is an identity by construction. Everything
@@ -56,8 +56,12 @@ const (
 	// the ones that matter are the fullest — which is what capMounts keeps.
 	maxMounts = 8
 	// A folded path is at most three short segments. The cap is a backstop
-	// against a single absurd segment, not the main limit.
-	maxMountPath = 40
+	// against a single absurd segment, not the main limit — and it is also the
+	// row's identity, so it has room for a Mac volume name: two disks called
+	// "MacBook Pro Time Machine Backup A" and "…B" cut to the same 40
+	// characters were one tile reading the fuller (review 2026-10-23). The
+	// relay's MAX_MOUNT_PATH is the same number.
+	maxMountPath = 80
 	// How deep a path may be before it stops describing a disk. Three keeps
 	// /var/lib/docker and macOS's /System/Volumes/Data whole.
 	maxMountDepth = 3
@@ -75,10 +79,13 @@ const (
 //	/home /Users /root /export/home    the login directories
 //	/media /run/media                  where desktop Linux automounts a stick,
 //	                                   as /media/<user>/<label>
-//	/Volumes                           where macOS mounts every external disk,
-//	                                   as /Volumes/<label> — and a label is
-//	                                   whatever its owner typed, "Alice Tax
-//	                                   Backup" being a real thing to call a disk
+//
+// /Volumes is NOT one. macOS mounts every external disk there as
+// /Volumes/<label>, with no account in the path, and folding it put every
+// disk a Mac had plugged in on one tile reading the fullest of them. Each
+// goes out under its own label now, the name Finder shows (operator ruling
+// 2026-10-23: one tile per external disk, with its volume name; the Monitor
+// keeps no identity-privacy rule since 2026-10-18).
 //
 // Whole prefixes rather than segment names, because /System/Volumes/Data is
 // where macOS keeps its data volume on every machine ever made and carries no
@@ -94,7 +101,6 @@ var foldAnchors = map[string]bool{
 	"/home": true, "/Users": true, "/root": true,
 	"/export/home": true,
 	"/media":       true, "/run/media": true,
-	"/Volumes": true,
 }
 
 // Filesystems that are a DISK. An allowlist rather than a list of things to
@@ -111,6 +117,43 @@ var realFsTypes = map[string]bool{
 	"ntfs": true, "ntfs3": true, "fuseblk": true,
 	"apfs": true, "hfs": true, "hfsplus": true,
 	"ufs": true, "ffs": true,
+}
+
+// <sys/mount.h>'s MNT_RDONLY and MNT_DONTBROWSE, spelled out for the reason
+// system_darwin.go spells out MNT_NOWAIT: the syscall package does not export
+// them on darwin. Here rather than there so the rule below is tested on every
+// platform the suite runs on.
+const (
+	macMntRdonly     = 0x00000001
+	macMntDontBrowse = 0x00100000
+)
+
+// Whether a Mac mount is one of the system's own volumes rather than a disk
+// somebody uses. APFS gives the one internal disk a mount point per volume —
+// Data, VM, Preboot and Update in the main container, xarts, iSCPreboot and
+// Hardware in the small iBoot one — and each arrived as a tile of its own:
+// seven tiles for one disk, six of them reading a percent or two. Any one of
+// three marks is enough:
+//
+//	/System/            Apple's own hierarchy, where nothing else can mount
+//	CoreSimulator       the read-only image Xcode mounts per simulator runtime
+//	read-only AND       a Time Machine snapshot, an image the system mounted
+//	nobrowse            out of Finder's sight: it cannot fill, and nobody
+//	                    put it there to be looked at
+//
+// Never either flag on its own. nobrowse is a mount option anyone can give a
+// backup disk to keep it out of Finder, and an NTFS or write-protected disk
+// mounts read-only; both are real disks whose fullness belongs on the card
+// (review 2026-10-23).
+//
+// The internal disk's fullness goes nowhere with them: macRoot reports it,
+// for the whole container, in the root figures.
+func macMountHidden(path string, flags uint32) bool {
+	if strings.HasPrefix(path, "/System/") || path == "/Library/Developer/CoreSimulator" ||
+		strings.HasPrefix(path, "/Library/Developer/CoreSimulator/") {
+		return true
+	}
+	return flags&macMntRdonly != 0 && flags&macMntDontBrowse != 0
 }
 
 // Fold one mount point down to the disk it describes. Returns "" for anything
@@ -146,11 +189,9 @@ func foldMountPath(p string) string {
 			return ""
 		}
 		segs = append(segs, seg)
-		// An anchor is a whole PREFIX, not a segment name, and the difference is
-		// a real macOS path: /Volumes/<label> is a disk somebody named, while
-		// /System/Volumes/Data is where macOS keeps the data volume on every
-		// machine ever made. Matching the bare segment folded the second one
-		// away for a privacy risk it does not carry.
+		// An anchor is a whole PREFIX, not a segment name: /home/alice folds,
+		// /srv/home/data does not. Matching the bare segment folded paths away
+		// for a privacy risk they do not carry.
 		if foldAnchors["/"+strings.Join(segs, "/")] {
 			return capMountPath("/" + strings.Join(segs, "/"))
 		}

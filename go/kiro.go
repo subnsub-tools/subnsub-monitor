@@ -95,6 +95,35 @@ func kiroReset(s string) *float64 {
 	return fp(float64(t.Unix()))
 }
 
+// The window behind a reset date: the calendar month that ends on it, in
+// minutes. Kiro's credits are monthly and the CLI prints only the day they
+// return, which CodexBar reads as a monthly window paced over the calendar
+// month (KiroStatusProbe's monthlyWindowSentinelMinutes and
+// KiroProviderDescriptor's calendarMonthResetWindow, steipete/CodexBar@3386b0ad).
+// Without a length the page would walk a reset already behind us forward a
+// DAY at a time and could draw no pace mark. The month begins on the same
+// day of the month before, or that month's last day when it has no such
+// day (Mar 31 began Feb 28 — ampRenewal's rule, run backwards), and its
+// length is the real elapsed time, in the zone kiroReset read the date in.
+// No reset, no window.
+func kiroMonthWindow(reset *float64) *float64 {
+	if reset == nil || !finite(*reset) {
+		return nil
+	}
+	end := time.Unix(int64(*reset), 0).In(time.Local)
+	y, mo, d := end.Date()
+	first := time.Date(y, mo-1, 1, 0, 0, 0, 0, time.Local)
+	if last := first.AddDate(0, 1, -1).Day(); d > last {
+		d = last
+	}
+	start := time.Date(first.Year(), first.Month(), d, end.Hour(), end.Minute(), end.Second(), 0, time.Local)
+	mins := end.Sub(start).Minutes()
+	if mins <= 0 || !finite(mins) {
+		return nil
+	}
+	return fp(round2(mins))
+}
+
 func fetchKiro() Provider {
 	p := Provider{ID: "kiro", Name: "Kiro", Source: "cli", CapturedAt: now()}
 	fail := func(err, code string, arg ...string) Provider {
@@ -181,7 +210,7 @@ func parseKiroUsage(p Provider, out string, exited bool) Provider {
 	if pct != nil {
 		p.Limits = append(p.Limits, Limit{
 			Key: "credits", UsedPercent: *pct,
-			WindowLabel: sp("plan"), ResetsAt: resets,
+			WindowLabel: sp("plan"), WindowMinutes: kiroMonthWindow(resets), ResetsAt: resets,
 		})
 		if balance != "" {
 			p.Credits = &Credits{HasCredits: true, Balance: balance}

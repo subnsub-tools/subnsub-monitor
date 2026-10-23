@@ -9,19 +9,20 @@ package main
 // /home/alice on build-07 is gone" is the same fact wearing an identity, and
 // the relay has no business holding the second one.
 //
-// Two lines that were once held here have since been lifted by the operator,
+// Three lines that were once held here have since been lifted by the operator,
 // and the public threat-model page (monitor-security.html) says so in plain
 // words rather than this file pretending otherwise: interface names and the
 // addresses bound to them ARE sent (NICs below, nics.go, since 2026-08-06),
-// and the machine's public IPv4 IS looked up and sent unless MON_IPV4=off
-// (ipv4.go). Process NAMES are still never part of a snapshot: the twenty
-// busiest processes go only on request (inspect.go) — in clear through the
-// relay to the asking browser, which does not keep them — and the machine's
-// OWN history file keeps the busiest program names per bucket (prochist.go),
-// served over the tunnel only. The kernel version is deliberately cut to
-// major.minor — "6.8" tells you whether a box is ancient, "6.8.0-1050-oracle"
-// also tells an attacker who reads the relay which cloud to look at and which
-// CVEs to try.
+// the machine's public IPv4 IS looked up and sent unless MON_IPV4=off
+// (ipv4.go), and a Mac's external disks go out under their volume labels
+// (mounts.go, since 2026-10-23). Process NAMES are still never part of a
+// snapshot: the twenty busiest processes go only on request (inspect.go) — in
+// clear through the relay to the asking browser, which does not keep them —
+// and the machine's OWN history file keeps the busiest program names per
+// bucket (prochist.go), served over the tunnel only. The kernel version is
+// deliberately cut to major.minor — "6.8" tells you whether a box is ancient,
+// "6.8.0-1050-oracle" also tells an attacker who reads the relay which cloud
+// to look at and which CVEs to try.
 //
 // COVERAGE IS HONEST RATHER THAN UNIFORM. Linux gets everything, because /proc
 // hands it over for free. macOS gets what the standard library can reach

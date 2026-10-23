@@ -199,6 +199,20 @@ type adapterWindow struct {
 	// A legacy row that only applies when the modern one produced nothing:
 	// skipped when any listed key was already emitted.
 	SkipIfAny []string `json:"skip_if_any,omitempty"`
+	// A later row for a key already emitted is dropped — the table's order
+	// says which reading is trusted. `merge: "max"` lets it stand instead
+	// when it reads MORE used than the one before: two readings of one
+	// period that disagree, and the more exhausted is the one to believe
+	// (CodexBar KimiUsageSnapshot.resolvedRatioWindow,
+	// steipete/CodexBar@8ab81e2ebd — Kimi's ratio pool beside its counter,
+	// where until then only a zero pool gave way to the counter). The row
+	// that stands replaces the other whole, amounts and all, save what it
+	// does not say about the period itself: its length and its reset, kept
+	// from the row it replaces when it names none — one period, one length
+	// (Kimi's 5h pool names no duration; without the counter's 300 minutes
+	// the page would draw no pace mark). A helper from before this key
+	// drops the later row as it always did.
+	Merge string `json:"merge,omitempty"`
 }
 
 type adapterMatch struct {
@@ -858,6 +872,15 @@ type adapterReading struct {
 	Limited       bool
 }
 
+// What makes two windows the same one: the wire key, and the scope where
+// there is one — a 7d Opus window beside the 7d window is two windows.
+func limitDedupeKey(l Limit) string {
+	if l.Scope != nil {
+		return l.Key + "\x00" + *l.Scope
+	}
+	return l.Key
+}
+
 // Every window the table can read out of the documents. Window order is the
 // table's order; a window with no usable figure is simply not a window.
 func adapterRun(ad *vendorAdapter, docs map[string]any, cred map[string]any, at float64) adapterReading {
@@ -896,11 +919,24 @@ func adapterRun(ad *vendorAdapter, docs map[string]any, cred map[string]any, at 
 			if !ok {
 				continue
 			}
-			dedupe := lim.Key
-			if lim.Scope != nil {
-				dedupe += "\x00" + *lim.Scope
-			}
+			dedupe := limitDedupeKey(lim)
 			if emitted[dedupe] {
+				if w.Merge == "max" {
+					for i := range out.Limits {
+						if limitDedupeKey(out.Limits[i]) == dedupe {
+							if lim.UsedPercent > out.Limits[i].UsedPercent {
+								if lim.WindowMinutes == nil {
+									lim.WindowMinutes = out.Limits[i].WindowMinutes
+								}
+								if lim.ResetsAt == nil {
+									lim.ResetsAt = out.Limits[i].ResetsAt
+								}
+								out.Limits[i] = lim
+							}
+							break
+						}
+					}
+				}
 				continue
 			}
 			emitted[dedupe] = true

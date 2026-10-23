@@ -1,5 +1,5 @@
 {
-  "version": 11,
+  "version": 13,
   "min_helper": "2026.10.14.2",
   "_": [
     "The quota adapters behind the CPA rung — see adapter.go for the vocabulary.",
@@ -38,7 +38,14 @@
     "v11 (2026.10.14.2): Antigravity's local rung — agy's own token file (~/.gemini/antigravity-cli/antigravity-oauth-token,",
     "written on Linux and wherever the OS keyring is unavailable; on macOS the keychain item is encrypted and unreadable),",
     "and a quota request per channel: the proxy's carries the project its credential names, the local one none — Google",
-    "answers retrieveUserQuotaSummary without it (verified 2026-10-14), and agy's file holds no project id."
+    "answers retrieveUserQuotaSummary without it (verified 2026-10-14), and agy's file holds no project id.",
+    "v12 (the helper after 2026.10.18.5, CodexBar 3386b0ad): `merge: max` on a window — a later row for a key already read",
+    "stands when it says more is used. Kimi's ratio pools beside its counters: two readings of one period that disagree,",
+    "and the more exhausted is the one believed (before: the counter, always). A helper before this key drops the later",
+    "row as it always did.",
+    "v13 (2026.10.14.2 keeps reading it, CPAMC 390718ec): Grok's client version is 1.0.46. cli-chat-proxy.grok.com refuses an",
+    "x-grok-client-version under 1.0.13 with 426 (CLIProxyAPI #6249, since 2026-10-01), so the 0.2.91 the table named left Grok's",
+    "CPA and local rungs without any window; the user-agent names the same version twice. No new key, no new host."
   ],
   "vendors": {
     "claude": {
@@ -707,6 +714,7 @@
           "from": "usage",
           "base": "usages.limit_7d",
           "key": "weekly",
+          "merge": "max",
           "label": "7d",
           "used_kind": "used_fraction",
           "used": "used_ratio",
@@ -716,6 +724,7 @@
           "from": "usage",
           "base": "usages.limit_5h",
           "key": "rate",
+          "merge": "max",
           "label": "5h",
           "used_kind": "used_fraction",
           "used": "used_ratio",
@@ -755,9 +764,9 @@
           "headers": {
             "Authorization": "Bearer $TOKEN$",
             "x-xai-token-auth": "xai-grok-cli",
-            "x-grok-client-version": "0.2.91",
+            "x-grok-client-version": "1.0.46",
             "accept": "*/*",
-            "user-agent": "grok-pager/0.2.91 grok-shell/0.2.91 (macos; aarch64)",
+            "user-agent": "grok-pager/1.0.46 grok-shell/1.0.46 (macos; aarch64)",
             "x-userid": "{cred.sub|subject|user_id|userId|metadata.sub|metadata.subject|metadata.user_id|metadata.userId|attributes.sub|attributes.user_id|oauth.sub|user.sub|user.id|*.user_id}"
           },
           "optional": true
@@ -769,9 +778,9 @@
           "headers": {
             "Authorization": "Bearer $TOKEN$",
             "x-xai-token-auth": "xai-grok-cli",
-            "x-grok-client-version": "0.2.91",
+            "x-grok-client-version": "1.0.46",
             "accept": "*/*",
-            "user-agent": "grok-pager/0.2.91 grok-shell/0.2.91 (macos; aarch64)",
+            "user-agent": "grok-pager/1.0.46 grok-shell/1.0.46 (macos; aarch64)",
             "x-userid": "{cred.sub|subject|user_id|userId|metadata.sub|metadata.subject|metadata.user_id|metadata.userId|attributes.sub|attributes.user_id|oauth.sub|user.sub|user.id|*.user_id}"
           },
           "optional": true
@@ -783,9 +792,9 @@
           "headers": {
             "Authorization": "Bearer $TOKEN$",
             "x-xai-token-auth": "xai-grok-cli",
-            "x-grok-client-version": "0.2.91",
+            "x-grok-client-version": "1.0.46",
             "accept": "*/*",
-            "user-agent": "grok-pager/0.2.91 grok-shell/0.2.91 (macos; aarch64)",
+            "user-agent": "grok-pager/1.0.46 grok-shell/1.0.46 (macos; aarch64)",
             "x-userid": "{cred.sub|subject|user_id|userId|metadata.sub|metadata.subject|metadata.user_id|metadata.userId|attributes.sub|attributes.user_id|oauth.sub|user.sub|user.id|*.user_id}"
           },
           "optional": true

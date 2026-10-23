@@ -374,6 +374,41 @@ func TestKiloFallbackTriesCentsAndMicro(t *testing.T) {
 	}
 }
 
+// The credits window is the calendar month ending on the reset date
+// (CodexBar KiroStatusProbe / KiroProviderDescriptor, steipete/CodexBar@3386b0ad),
+// as long as that month really is: 31 days to Sep 1, 28 to Mar 31 of a
+// common year (Feb 31 is Feb 28), and none at all without a reset.
+func TestKiroWindowIsTheCalendarMonth(t *testing.T) {
+	days := func(from, to string) float64 {
+		a, _ := time.ParseInLocation("2006-01-02", from, time.Local)
+		b, _ := time.ParseInLocation("2006-01-02", to, time.Local)
+		return b.Sub(a).Minutes()
+	}
+	for _, c := range []struct{ reset, from string }{
+		{"2026-09-01", "2026-08-01"},
+		{"2026-03-31", "2026-02-28"},
+		{"2026-07-01", "2026-06-01"},
+		{"2026-01-15", "2025-12-15"},
+	} {
+		got := kiroMonthWindow(kiroReset(c.reset))
+		if got == nil || *got != days(c.from, c.reset) {
+			t.Errorf("%s: want the month from %s (%v min), got %v", c.reset, c.from, days(c.from, c.reset), got)
+		}
+	}
+	if kiroMonthWindow(nil) != nil {
+		t.Error("no reset, no window")
+	}
+	p := parseKiroUsage(Provider{ID: "kiro", Source: "cli"}, "Estimated Usage | resets on 2026-09-01 | KIRO FREE\nCredits (0.00 of 50 covered in plan)\n", false)
+	if len(p.Limits) != 1 || p.Limits[0].WindowMinutes == nil || *p.Limits[0].WindowMinutes != days("2026-08-01", "2026-09-01") ||
+		p.Limits[0].WindowLabel == nil || *p.Limits[0].WindowLabel != "plan" {
+		t.Errorf("the credits window carries its month: %+v", p.Limits)
+	}
+	p = parseKiroUsage(Provider{ID: "kiro", Source: "cli"}, "Plan: KIRO PRO MAX | 1 usage breakdowns\nCredits (0 of 5000 covered in plan)\n", false)
+	if len(p.Limits) != 1 || p.Limits[0].WindowMinutes != nil {
+		t.Errorf("no reset date, no window length: %+v", p.Limits)
+	}
+}
+
 func TestKiroMMDDRejectsImpossibleDates(t *testing.T) {
 	if kiroReset("02/31") != nil {
 		t.Fatal("02/31 normalises to March under time.Date and must be refused")

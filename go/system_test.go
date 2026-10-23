@@ -209,9 +209,9 @@ func TestSnapshotCarriesNoIdentity(t *testing.T) {
 		//                identifying strings", and mounts.go says so at length:
 		//                the segments an OS GENERATES from an account — the user
 		//                under a home directory, the account under an automount
-		//                root, the label on a removable volume — are dropped,
-		//                while a mount point somebody chose the words for is
-		//                sent as written. The test above holds the first half
+		//                root — are dropped, while a mount point somebody chose
+		//                the words for, a Mac's disk label among them, is sent
+		//                as written. The test above holds the first half
 		//                against this box's own $HOME; TestFoldMountPath does it
 		//                exhaustively.
 		"cpu_user": true, "cpu_system": true, "cpu_iowait": true, "cpu_steal": true,

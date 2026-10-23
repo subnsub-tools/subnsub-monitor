@@ -43,12 +43,16 @@ func TestFoldMountPath(t *testing.T) {
 		{"/root/projects/acme", "/root"},
 		{"/media/alice/usb-stick", "/media"},
 		{"/run/media/alice/usb-stick", "/run/media"},
-		{"/Volumes/Alice Tax Backup", "/Volumes"},
 
 		// …and the paths that still go out whole, because a mount point somebody
 		// chose for a disk is the thing this section exists to report.
 		{"/mnt/backup-acme", "/mnt/backup-acme"},
 		{"/srv/data", "/srv/data"},
+		// A Mac's external disks, one row each under the name Finder shows.
+		{"/Volumes/Alice Tax Backup", "/Volumes/Alice Tax Backup"},
+		{"/Volumes/T7", "/Volumes/T7"},
+		{"/Volumes/MacBook Pro Time Machine Backup A", "/Volumes/MacBook Pro Time Machine Backup A"},
+		{"/srv/home/data", "/srv/home/data"},
 
 		// Windows volume roots, and ONLY volume roots.
 		{`D:\`, `D:\`},
@@ -75,7 +79,7 @@ func TestFoldMountPath(t *testing.T) {
 // every test written in English.
 func TestFoldMountPathCaps(t *testing.T) {
 	long := "/mnt/" + string(make([]byte, 0))
-	for i := 0; i < 60; i++ {
+	for i := 0; i < 120; i++ {
 		long += "x"
 	}
 	got := foldMountPath(long)
@@ -84,7 +88,7 @@ func TestFoldMountPathCaps(t *testing.T) {
 	}
 
 	wide := "/mnt/"
-	for i := 0; i < 60; i++ {
+	for i := 0; i < 120; i++ {
 		wide += "\u5bbd"
 	}
 	got = foldMountPath(wide)
@@ -331,5 +335,34 @@ func TestFoldMountPathRefusesInvisibleCharacters(t *testing.T) {
 	// An ordinary non-ASCII path is not affected by any of that.
 	if got := foldMountPath("/mnt/\u5907\u4efd"); got != "/mnt/\u5907\u4efd" {
 		t.Errorf("a legitimate non-ASCII path was refused: %q", got)
+	}
+}
+
+// A Mac's own volumes stay off the card; a disk somebody plugged in does not.
+// The flags are what getfsstat hands back for each on an Apple-silicon Mac.
+func TestMacMountHidden(t *testing.T) {
+	cases := []struct {
+		path  string
+		flags uint32
+		want  bool
+	}{
+		{"/System/Volumes/Data", macMntDontBrowse, true},
+		{"/System/Volumes/VM", macMntDontBrowse, true},
+		{"/System/Volumes/xarts", macMntDontBrowse, true},
+		{"/System/Volumes/Preboot", 0, true}, // should a release drop nobrowse
+		{"/Library/Developer/CoreSimulator/Volumes/iOS_22A3351", macMntRdonly | macMntDontBrowse, true},
+		{"/Library/Developer/CoreSimulator", 0, true}, // the same, once folded
+		{"/Volumes/com.apple.TimeMachine.localsnapshots", macMntRdonly | macMntDontBrowse, true},
+		{"/Volumes/Backup", 0, false},
+		{"/Volumes/Backup", macMntDontBrowse, false}, // kept out of Finder by its owner
+		{"/Volumes/NTFS", macMntRdonly, false},       // macOS mounts NTFS read-only
+		{"/Volumes/Work", 0x00001000, false},         // MNT_LOCAL alone
+		{"/mnt/CoreSimulator-backup", 0, false},
+		{"/Systems", 0, false},
+	}
+	for _, c := range cases {
+		if got := macMountHidden(c.path, c.flags); got != c.want {
+			t.Errorf("macMountHidden(%q, %#x) = %v, want %v", c.path, c.flags, got, c.want)
+		}
 	}
 }
