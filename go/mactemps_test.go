@@ -81,12 +81,13 @@ func TestHIDRows(t *testing.T) {
 		labels = append(labels, r.Label)
 		byLabel[r.Label] = r.ID
 	}
-	// By name; the thermometer is reported, under a number and no name.
-	if got := strings.Join(labels, "|"); got != "|NAND CH0 temp|PMU tdie1|gas gauge battery|pACC MTR Temp Sensor3" {
+	// The CPU's first, then by name; the thermometer is reported, under a
+	// number and no name.
+	if got := strings.Join(labels, "|"); got != "pACC MTR Temp Sensor3||NAND CH0 temp|PMU tdie1|gas gauge battery" {
 		t.Fatalf("labels %q", got)
 	}
-	if rows[0].TempC != 22 {
-		t.Errorf("unlabelled row reads %v", rows[0].TempC)
+	if rows[1].TempC != 22 {
+		t.Errorf("unlabelled row reads %v", rows[1].TempC)
 	}
 
 	// The same sensors in another order, one of them silent and one that was
@@ -107,8 +108,35 @@ func TestHIDRows(t *testing.T) {
 	if seen != 3 || len(again) != 5 {
 		t.Errorf("%d rows, %d of them known from before", len(again), seen)
 	}
-	if again[0].ID != rows[0].ID {
-		t.Errorf("the unlabelled sensor moved from %s to %s", rows[0].ID, again[0].ID)
+	if again[1].ID != rows[1].ID {
+		t.Errorf("the unlabelled sensor moved from %s to %s", rows[1].ID, again[1].ID)
+	}
+}
+
+// An M1's 49 services against the snapshot's 32: the CPU clusters' readings
+// survive the cut, which by name alone took every one of them.
+func TestHIDRowsCPUSurviveTheCap(t *testing.T) {
+	var all []hidReading
+	for i := 1; i <= 8; i++ {
+		for _, p := range []string{"PMU tdie", "PMU tdev", "PMU2 tdie", "PMU2 tdev"} {
+			all = append(all, hidReading{p + itoa(i), 50, true})
+		}
+	}
+	for _, n := range []string{"ANE MTR Temp Sensor1", "NAND CH0 temp", "PMGR SOC Die Temp Sensor0",
+		"eACC MTR Temp Sensor0", "pACC MTR Temp Sensor2", "pACC MTR Temp Sensor9",
+		"GPU MTR Temp Sensor1", "SOC MTR Temp Sensor0"} {
+		all = append(all, hidReading{n, 60, true})
+	}
+	rows := capTemps(hidRows(all))
+	if len(rows) != maxTemps {
+		t.Fatalf("%d rows", len(rows))
+	}
+	var head []string
+	for _, r := range rows[:5] {
+		head = append(head, r.Label)
+	}
+	if got := strings.Join(head, "|"); got != "eACC MTR Temp Sensor0|pACC MTR Temp Sensor2|pACC MTR Temp Sensor9|GPU MTR Temp Sensor1|SOC MTR Temp Sensor0" {
+		t.Errorf("first rows %q", got)
 	}
 }
 

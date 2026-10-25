@@ -154,6 +154,22 @@ type hidReading struct {
 // that might be either of two sensors is not a reading of one.
 func hidChannel(name string) int { return int(crc32.ChecksumIEEE([]byte(name))%9999) + 1 }
 
+// Which services are reported first: the CPU clusters', then the GPU's and
+// the SoC's, then the rest. A Mac has more than a snapshot carries (an M1
+// reports 49 against maxTemps) and the cut falls where the order puts it. By
+// name alone it fell on pACC and eACC, which sort after every capital: the
+// page had every PMU die and not one CPU reading, and the CPU is the
+// temperature it leads with (2026-10-25).
+func hidRank(name string) int {
+	switch {
+	case strings.HasPrefix(name, "pACC MTR "), strings.HasPrefix(name, "eACC MTR "):
+		return 0
+	case strings.HasPrefix(name, "GPU MTR "), strings.HasPrefix(name, "SOC MTR "):
+		return 1
+	}
+	return 2
+}
+
 func hidRows(all []hidReading) []Temp {
 	named := map[string]int{}
 	for _, r := range all {
@@ -165,12 +181,17 @@ func hidRows(all []hidReading) []Temp {
 			read = append(read, r)
 		}
 	}
-	sort.Slice(read, func(i, j int) bool { return read[i].name < read[j].name })
+	sort.Slice(read, func(i, j int) bool {
+		if a, b := hidRank(read[i].name), hidRank(read[j].name); a != b {
+			return a < b
+		}
+		return read[i].name < read[j].name
+	})
 	out := make([]Temp, 0, len(read))
 	taken := map[int]bool{}
 	for _, r := range read {
 		ch := hidChannel(r.name)
-		// Two names on one number: the first by name keeps it, every push.
+		// Two names on one number: the first in that order keeps it, every push.
 		if taken[ch] || len(out) >= maxTempRowsIn {
 			continue
 		}
