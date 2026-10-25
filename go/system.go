@@ -234,6 +234,13 @@ type System struct {
 	// a configuration and never reported in `missing`. Same judgement as swap.
 	TempC *float64 `json:"temp_c,omitempty"`
 
+	// The machine's main temperature (temps.go mainTemp): the processor's,
+	// taken over every sensor rather than the rows Temps has room for, or the
+	// hottest where no processor sensor is known — TempMainCPU says which.
+	// What the page's Temp tile shows and what the history keeps.
+	TempMainC   *float64 `json:"temp_main_c,omitempty"`
+	TempMainCPU bool     `json:"temp_main_cpu,omitempty"`
+
 	// The sensors that number is the hottest of, one row each (temps.go):
 	// driver name, channel label, reading and the driver's own limits. Linux
 	// only, and absent on the same machines temp_c is.

@@ -90,7 +90,7 @@ func histSlack() int { return histMaxBytes / 32 }
 var histRewrites int
 
 // One row: [bucket_start, cpu, mem, disk, swap, rx, tx, {provider: worst%},
-// {service: status}, {io_read/io_write/mount:<path>: peak},
+// {service: status}, {io_read/io_write/temp/mount:<path>: peak},
 // {process name: [avg%, peak%], "": [the rest, avg%]}]. Numbers are one-decimal
 // floats or nil. The last two are optional: old rows lack the system map, and
 // only a machine with diagnostics on writes the process one (prochist.go).
@@ -754,6 +754,8 @@ func historyRecord(snap *Snapshot) {
 		}
 		systemPeak(b.system, "io_read", peakOf(nil, sys.DiskReadBps, ioR), math.MaxFloat64)
 		systemPeak(b.system, "io_write", peakOf(nil, sys.DiskWriteBps, ioW), math.MaxFloat64)
+		// The main temperature at its peak in the bucket (temps.go mainTemp).
+		systemPeak(b.system, "temp", sys.TempMainC, 300)
 		// When the system booted, to the minute: a change between rows is a
 		// reboot the page can mark on the line.
 		if sys.UptimeSec != nil && *sys.UptimeSec > 0 && snap.CapturedAt > 0 {

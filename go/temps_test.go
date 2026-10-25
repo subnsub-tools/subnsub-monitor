@@ -245,6 +245,10 @@ func TestFillTemps(t *testing.T) {
 	if len(s.Temps) != 2 {
 		t.Fatalf("%d rows", len(s.Temps))
 	}
+	// The main temperature is the package's, not the hottest core's.
+	if s.TempMainC == nil || *s.TempMainC != 60 || !s.TempMainCPU {
+		t.Fatalf("temp_main_c %v cpu %v, want the package's 60", s.TempMainC, s.TempMainCPU)
+	}
 	// Within the refresh window the sensors are not read again, and a caller
 	// that edits its rows is not editing the next snapshot's.
 	s.Temps[0].TempC = -1
@@ -263,6 +267,7 @@ func TestFillTemps(t *testing.T) {
 	}
 	for _, want := range []string{
 		`"temp_c":97.5`,
+		`"temp_main_c":60,"temp_main_cpu":true`,
 		`{"id":"coretemp/1/temp1","chip":"coretemp","label":"Package id 0","temp_c":60}`,
 	} {
 		if !strings.Contains(string(blob), want) {
@@ -277,7 +282,42 @@ func TestFillTemps(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		fillTemps(&bare, tempsRefreshSec, func() []Temp { scans++; return nil })
 	}
-	if bare.TempC != nil || bare.Temps != nil || scans != 1 {
+	if bare.TempC != nil || bare.Temps != nil || bare.TempMainC != nil || scans != 1 {
 		t.Fatalf("sensorless machine: temp_c %v, rows %v, %d scans", bare.TempC, bare.Temps, scans)
+	}
+}
+
+func TestMainTemp(t *testing.T) {
+	row := func(id, chip, label string, c float64) Temp { return Temp{ID: id, Chip: chip, Label: label, TempC: c} }
+	nvme := row("nvme/1/temp1", "nvme", "Composite", 70)
+	for _, tc := range []struct {
+		name  string
+		rows  []Temp
+		apple bool
+		want  float64
+		cpu   bool
+	}{
+		{"an M1's clusters, averaged", []Temp{row("hid/1/temp1", "hid", "PMU tdie1", 80),
+			row("hid/1/temp2", "hid", "pACC MTR Temp Sensor2", 70), row("hid/1/temp3", "hid", "eACC MTR Temp Sensor0", 60)}, true, 65, true},
+		{"an M2's named SMC cores, averaged", []Temp{row("smc/1/Tp01", "smc", "CPU performance core 1", 64),
+			row("smc/1/Tp1h", "smc", "CPU efficiency core 1", 60), row("smc/1/Tg0f", "smc", "GPU 1", 90), nvme}, true, 62, true},
+		{"an unknown chip's Tp and Te keys", []Temp{row("smc/1/Tp00", "smc", "", 50), row("smc/1/Te05", "smc", "", 60),
+			row("smc/1/Tg0f", "smc", "", 90)}, true, 55, true},
+		{"not on an Intel Mac", []Temp{row("smc/1/Tp0P", "smc", "", 50), row("smc/1/TC0P", "smc", "CPU proximity", 45)}, false, 45, true},
+		{"coretemp's package", []Temp{row("coretemp/1/temp1", "coretemp", "Package id 0", 48),
+			row("coretemp/1/temp2", "coretemp", "Core 0", 51), nvme}, false, 48, true},
+		{"coretemp's hottest core without a package", []Temp{row("coretemp/1/temp2", "coretemp", "Core 0", 42),
+			row("coretemp/1/temp3", "coretemp", "Core 1", 46), nvme}, false, 46, true},
+		{"Tdie over Tctl", []Temp{row("k10temp/1/temp1", "k10temp", "Tctl", 70), row("k10temp/1/temp2", "k10temp", "Tdie", 60)}, false, 60, true},
+		{"a board's CPU zone", []Temp{row("cpu_thermal/1/zone", "cpu_thermal", "", 44), nvme}, false, 44, true},
+		{"no processor: the hottest", []Temp{row("acpitz/1/temp1", "acpitz", "", 28), nvme}, false, 70, false},
+	} {
+		got, cpu := mainTemp(tc.rows, tc.apple)
+		if got != tc.want || cpu != tc.cpu {
+			t.Errorf("%s: %v %v, want %v %v", tc.name, got, cpu, tc.want, tc.cpu)
+		}
+	}
+	if c, cpu := mainTemp(nil, true); c != 0 || cpu {
+		t.Errorf("no sensors: %v %v", c, cpu)
 	}
 }

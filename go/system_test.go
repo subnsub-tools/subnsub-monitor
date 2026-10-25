@@ -226,6 +226,9 @@ func TestSnapshotCarriesNoIdentity(t *testing.T) {
 		// and channel label, which come from kernel source rather than from
 		// the machine, and numbers (temps.go).
 		"temps": true,
+		// 2026-10-26, asked for by the operator: a history of the temperature.
+		// One number, the processor's or the hottest, and which of the two.
+		"temp_main_c": true, "temp_main_cpu": true,
 	}
 	for _, k := range topLevelKeys(blob) {
 		if !allowed[k] {

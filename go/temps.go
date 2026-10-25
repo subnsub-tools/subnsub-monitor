@@ -38,6 +38,8 @@ package main
 
 import (
 	"os"
+	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -372,6 +374,81 @@ func fillTemps(s *System, refreshSec float64, scan func() []Temp) {
 		}
 	}
 	s.TempC = fp(best)
+	if c, cpu := mainTemp(all, runtime.GOARCH == "arm64"); c > 0 {
+		s.TempMainC, s.TempMainCPU = fp(round2(c)), cpu
+	}
 	// A copy: the cache hands the same backing array to every snapshot.
 	s.Temps = append([]Temp(nil), capTemps(all)...)
+}
+
+var (
+	mainHIDCPU  = regexp.MustCompile(`^[pe]ACC MTR Temp Sensor\d+$`)
+	mainSMCCore = regexp.MustCompile(`^CPU (?:performance|efficiency|super) core \d+$`)
+	mainMacCore = regexp.MustCompile(`^CPU core \d+$`)
+	mainPackage = regexp.MustCompile(`^Package id \d+$`)
+	mainCore    = regexp.MustCompile(`^Core \d+$`)
+	mainZone    = regexp.MustCompile(`(?i)^(?:x86_pkg_temp|(?:cpu|soc)\d*[_-]?thermal)$`)
+)
+
+// The machine's main temperature and whether it is the processor's: what
+// iStat Menus, Stats and macmon lead with. An Apple Silicon Mac's CPU
+// cluster sensors averaged (an M1's pACC and eACC; from the M2 on the SMC's
+// cores as appleSMCRows names them, or every Tp and Te key on a chip the
+// table does not know), an Intel Mac's cores, die or proximity, coretemp's
+// package or its hottest core, k10temp's Tdie or Tctl, a board's CPU thermal
+// zone — the first of those the machine has. Where it has none, the hottest
+// reading. Over every sensor, so the cap on rows never moves it. The page's
+// tempMain (monitor.js) holds the same rules for helpers older than this.
+func mainTemp(all []Temp, appleSilicon bool) (float64, bool) {
+	if len(all) == 0 {
+		return 0, false
+	}
+	key := func(t Temp) string { return t.ID[strings.LastIndexByte(t.ID, '/')+1:] }
+	amd := func(t Temp) bool { return t.Chip == "k10temp" || t.Chip == "zenpower" }
+	rules := []struct {
+		match func(Temp) bool
+		avg   bool
+	}{
+		{func(t Temp) bool { return t.Chip == "hid" && mainHIDCPU.MatchString(t.Label) }, true},
+		{func(t Temp) bool { return t.Chip == "smc" && mainSMCCore.MatchString(t.Label) }, true},
+		{func(t Temp) bool {
+			k := key(t)
+			return appleSilicon && t.Chip == "smc" && len(k) == 4 && k[0] == 'T' && (k[1] == 'p' || k[1] == 'e')
+		}, true},
+		{func(t Temp) bool { return t.Chip == "smc" && mainMacCore.MatchString(t.Label) }, true},
+		{func(t Temp) bool { return t.Chip == "smc" && t.Label == "CPU die" }, false},
+		{func(t Temp) bool { return t.Chip == "smc" && t.Label == "CPU proximity" }, false},
+		{func(t Temp) bool { return t.Chip == "coretemp" && mainPackage.MatchString(t.Label) }, false},
+		{func(t Temp) bool { return t.Chip == "coretemp" && mainCore.MatchString(t.Label) }, false},
+		{func(t Temp) bool { return amd(t) && t.Label == "Tdie" }, false},
+		{func(t Temp) bool { return amd(t) && t.Label == "Tctl" }, false},
+		{func(t Temp) bool { return mainZone.MatchString(t.Chip) }, false},
+	}
+	for _, r := range rules {
+		n, sum, top := 0, 0.0, 0.0
+		for _, t := range all {
+			if !r.match(t) {
+				continue
+			}
+			if n == 0 || t.TempC > top {
+				top = t.TempC
+			}
+			n++
+			sum += t.TempC
+		}
+		if n == 0 {
+			continue
+		}
+		if r.avg {
+			return sum / float64(n), true
+		}
+		return top, true
+	}
+	top := all[0].TempC
+	for _, t := range all[1:] {
+		if t.TempC > top {
+			top = t.TempC
+		}
+	}
+	return top, false
 }
