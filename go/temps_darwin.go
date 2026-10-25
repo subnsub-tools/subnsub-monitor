@@ -12,6 +12,7 @@ package main
 import (
 	"encoding/binary"
 	"runtime"
+	"syscall"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
@@ -40,11 +41,13 @@ func openLib(path string) (uintptr, bool) {
 	return h, err == nil && h != 0
 }
 
-// This machine's sensors. Apple Silicon is asked for its HID services first
-// and falls back to the SMC, which it also has; an Intel Mac has only the SMC.
+// This machine's sensors. Apple Silicon is asked for its HID services, and
+// for the SMC's processor and GPU keys when those services do not carry the
+// processor (appleRows); an Intel Mac has only the SMC.
 func localTemps() []Temp {
 	if runtime.GOARCH == "arm64" {
-		if rows := hidRows(hidTemps()); len(rows) > 0 {
+		brand, _ := syscall.Sysctl("machdep.cpu.brand_string")
+		if rows := appleRows(hidRows(hidTemps()), appleGen(brand), smcTemps); len(rows) > 0 {
 			return rows
 		}
 	}

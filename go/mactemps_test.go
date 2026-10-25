@@ -189,3 +189,111 @@ func TestParseTempRows(t *testing.T) {
 		t.Errorf("%d rows admitted", len(got))
 	}
 }
+
+func TestAppleGen(t *testing.T) {
+	for brand, want := range map[string]int{
+		"Apple M1": 1, "Apple M2 Pro": 2, "Apple M3 Max": 3, "Apple M4": 4, "Apple M12 Ultra": 12,
+		"Intel(R) Core(TM) i7-8850H CPU @ 2.60GHz": 0, "Apple A18 Pro": 0, "": 0, "Apple Mx": 0,
+	} {
+		if got := appleGen(brand); got != want {
+			t.Errorf("appleGen(%q) = %d, want %d", brand, got, want)
+		}
+	}
+}
+
+// An M2 Pro's SMC, 2026-10-25, a few of its 195 keys: the table's cores and
+// GPU clusters come out named and in its order, the rest stay behind.
+func TestAppleSMCRowsM2(t *testing.T) {
+	read := map[string]float64{
+		"Tp00": 56.74, "Tp01": 63.44, "Tp02": 76.22, "Tp05": 61.07, "Tp09": 63.33, "Tp0D": 60.71,
+		"Tp0X": 61.67, "Tp0b": 59.55, "Tp0f": 60.72, "Tp0j": 59.14,
+		"Tp1h": 66.11, "Tp1t": 59.75, "Tp1p": 61.9, "Tp1l": 62.17,
+		"Tg0f": 58.28, "Tg0j": 59.26, "Te05": 59.93, "Tf06": 83.13, "TA0P": 44.88,
+	}
+	rows := appleSMCRows(2, read)
+	var got []string
+	for _, r := range rows {
+		got = append(got, strings.TrimPrefix(r.ID, "smc/1/")+"="+r.Label)
+		if r.Chip != "smc" || tempIDRE.FindStringSubmatch(r.ID) == nil || admitTempLabel(r.Label) != r.Label {
+			t.Errorf("row %+v", r)
+		}
+	}
+	want := "Tp01=CPU performance core 1|Tp05=CPU performance core 2|Tp09=CPU performance core 3|" +
+		"Tp0D=CPU performance core 4|Tp0X=CPU performance core 5|Tp0b=CPU performance core 6|" +
+		"Tp0f=CPU performance core 7|Tp0j=CPU performance core 8|" +
+		"Tp1h=CPU efficiency core 1|Tp1t=CPU efficiency core 2|Tp1p=CPU efficiency core 3|Tp1l=CPU efficiency core 4|" +
+		"Tg0f=GPU 1|Tg0j=GPU 2"
+	if s := strings.Join(got, "|"); s != want {
+		t.Errorf("rows\n %s\nwant\n %s", s, want)
+	}
+
+	// A key the machine lacks is skipped and the count closes up: an M4 Pro's
+	// GPU keys are not the plain M4's.
+	m4 := appleSMCRows(4, map[string]float64{"Tp01": 50, "Te05": 45, "Tg1U": 40, "Tg1k": 41})
+	if len(m4) != 4 || m4[2].Label != "GPU 1" || m4[3].Label != "GPU 2" {
+		t.Errorf("M4 Pro rows %+v", m4)
+	}
+
+	// A plain M3: its efficiency cores under the table's keys, its
+	// performance cores under Tp ones. The table does not describe it, so
+	// three efficiency cores are not reported as the processor.
+	m3 := appleSMCRows(3, map[string]float64{"Te05": 50, "Te0L": 51, "Te0P": 52, "Tp01": 60, "Tp05": 61, "Tg0f": 55})
+	var m3keys []string
+	for _, r := range m3 {
+		m3keys = append(m3keys, strings.TrimPrefix(r.ID, "smc/1/")+"="+r.Label)
+	}
+	if s := strings.Join(m3keys, " "); s != "Te05= Te0L= Te0P= Tp01= Tp05=" {
+		t.Errorf("plain M3 rows %s", s)
+	}
+
+	// A chip the table does not know: every Tp and Te key, by key, unnamed.
+	unknown := appleSMCRows(9, read)
+	var keys []string
+	for _, r := range unknown {
+		keys = append(keys, strings.TrimPrefix(r.ID, "smc/1/"))
+		if r.Label != "" {
+			t.Errorf("unknown chip row named %q", r.Label)
+		}
+	}
+	if s := strings.Join(keys, " "); s != "Te05 Tp00 Tp01 Tp02 Tp05 Tp09 Tp0D Tp0X Tp0b Tp0f Tp0j Tp1h Tp1l Tp1p Tp1t" {
+		t.Errorf("unknown chip keys %s", s)
+	}
+}
+
+// Every name the table can give is one the helper (and the relay) admits.
+func TestAppleSMCLabelsAdmitted(t *testing.T) {
+	for gen, set := range appleSMCKeys {
+		read := map[string]float64{}
+		for _, ks := range []string{set.super, set.perf, set.eff, set.gpu} {
+			for _, k := range strings.Fields(ks) {
+				if !smcTempKey(k) {
+					t.Errorf("M%d: %q is not a temperature key", gen, k)
+				}
+				read[k] = 50
+			}
+		}
+		for _, r := range appleSMCRows(gen, read) {
+			if r.Label == "" || admitTempLabel(r.Label) != r.Label {
+				t.Errorf("M%d: %s labelled %q", gen, r.ID, r.Label)
+			}
+		}
+	}
+}
+
+func TestAppleRows(t *testing.T) {
+	asked := 0
+	smc := func() map[string]float64 { asked++; return map[string]float64{"Tp01": 63, "Tp1h": 60, "Tg0f": 58} }
+	m1 := []Temp{{ID: "hid/1/temp1", Chip: "hid", Label: "pACC MTR Temp Sensor2", TempC: 68}}
+	if rows := appleRows(m1, 1, smc); len(rows) != 1 || asked != 0 {
+		t.Errorf("an M1's HID carries the CPU: %d rows, SMC asked %d times", len(rows), asked)
+	}
+	m2 := []Temp{{ID: "hid/1/temp3690", Chip: "hid", Label: "NAND CH0 temp", TempC: 40}}
+	rows := appleRows(m2, 2, smc)
+	var labels []string
+	for _, r := range rows {
+		labels = append(labels, r.Label)
+	}
+	if s := strings.Join(labels, "|"); s != "CPU performance core 1|CPU efficiency core 1|GPU 1|NAND CH0 temp" || asked != 1 {
+		t.Errorf("an M2: %s, SMC asked %d times", s, asked)
+	}
+}

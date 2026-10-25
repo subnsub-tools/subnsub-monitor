@@ -138,6 +138,8 @@ var tempLabelWords = map[string]bool{
 var tempLabelNumbered = map[string]bool{
 	"Package id": true, "Core": true, "Sensor": true, "Tccd": true,
 	"AUXTIN": true, "PECI Agent": true, "temp": true, "CPU core": true,
+	// the words this helper gives an Apple Silicon Mac's SMC keys (mactemps.go appleSMCRows)
+	"CPU performance core": true, "CPU efficiency core": true, "CPU super core": true, "GPU": true,
 }
 
 // A channel label, or nothing: only what a driver is known to write.

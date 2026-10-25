@@ -127,6 +127,117 @@ func smcRows(read map[string]float64) []Temp {
 	return out
 }
 
+// From the M2 on, an Apple Silicon Mac keeps its processor's temperatures in
+// the SMC and not among its HID services — an M2 Pro has 57 services and no
+// pACC or eACC among them — under keys that change from one generation to
+// the next. Which key is which core is the table Stats keeps
+// (github.com/exelban/stats, Modules/Sensors/values.swift, MIT; see
+// helper/NOTICE), the processor and GPU rows only, in its order. Keys
+// separated by spaces.
+type appleSMCSet struct{ super, perf, eff, gpu string }
+
+var appleSMCKeys = map[int]appleSMCSet{
+	1: {perf: "Tp01 Tp05 Tp0D Tp0H Tp0L Tp0P Tp0X Tp0b", eff: "Tp09 Tp0T",
+		gpu: "Tg05 Tg0D Tg0L Tg0T"},
+	2: {perf: "Tp01 Tp05 Tp09 Tp0D Tp0X Tp0b Tp0f Tp0j", eff: "Tp1h Tp1t Tp1p Tp1l",
+		gpu: "Tg0f Tg0j"},
+	3: {perf: "Tf04 Tf09 Tf0A Tf0B Tf0D Tf0E Tf44 Tf49 Tf4A Tf4B Tf4D Tf4E", eff: "Te05 Te0L Te0P Te0S",
+		gpu: "Tf14 Tf18 Tf19 Tf1A Tf24 Tf28 Tf29 Tf2A"},
+	4: {perf: "Tp01 Tp05 Tp09 Tp0D Tp0V Tp0Y Tp0b Tp0e", eff: "Te05 Te0S Te09 Te0H",
+		gpu: "Tg0G Tg0H Tg1U Tg1k Tg0K Tg0L Tg0d Tg0e Tg0j Tg0k"},
+	5: {super: "Tp00 Tp04 Tp08 Tp0C Tp0G Tp0K", perf: "Tp0O Tp0R Tp0U Tp0X Tp0a Tp0d Tp0g Tp0j Tp0m Tp0p Tp0u Tp0y",
+		gpu: "Tg0U Tg0X Tg0d Tg0g Tg0j Tg1Y Tg1c Tg1g"},
+	6: {super: "Tp0j Tp0g Tp09 Tp07", perf: "Tp0m Tp0L Tp0I Tp0d Tp0E Tp0G Tp0b Tp05",
+		eff: "Te07 Te08 Te09 Te0c Te0h Te0i",
+		gpu: "Tg1e Tg0d Tg0c Tg0b Tg1c Tg1d Tg07 Tg1f Tg09 Tg0a Tg1g Tg1h"},
+}
+
+var appleGenRE = regexp.MustCompile(`^Apple M(\d{1,2})\b`)
+
+// "Apple M2 Pro" → 2. An Intel brand string, an A-series chip or nothing → 0.
+func appleGen(brand string) int {
+	m := appleGenRE.FindStringSubmatch(strings.TrimSpace(brand))
+	if m == nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(m[1])
+	return n
+}
+
+// The SMC's processor and GPU rows for a chip of this generation, the cores
+// first. A key is named for its kind and counted among the keys of that kind
+// this machine has: an M4 Pro has its GPU under keys the plain M4 does not,
+// and calls them GPU 1 and 2 all the same. The table is believed only when
+// every kind of core it lists is found: models of one generation differ (a
+// plain M3 has its efficiency cores under the table's keys and its
+// performance cores under Tp ones, not Tf), and three efficiency cores
+// alone would be reported as the processor (review 2026-10-26). Otherwise —
+// and for a generation the table does not know — every Tp and Te key comes
+// without a name, the rule macmon reads the processor by, so the processor
+// still has a temperature.
+func appleSMCRows(gen int, read map[string]float64) []Temp {
+	var out []Temp
+	if set, ok := appleSMCKeys[gen]; ok {
+		seen := map[string]bool{}
+		for _, kind := range []struct {
+			keys, word string
+			core       bool
+		}{
+			{set.super, "CPU super core", true}, {set.perf, "CPU performance core", true},
+			{set.eff, "CPU efficiency core", true}, {set.gpu, "GPU", false},
+		} {
+			n := 0
+			for _, k := range strings.Fields(kind.keys) {
+				c, ok := read[k]
+				if !ok || seen[k] {
+					continue
+				}
+				seen[k] = true
+				n++
+				out = append(out, Temp{ID: "smc/1/" + k, Chip: "smc", Label: kind.word + " " + strconv.Itoa(n), TempC: c})
+			}
+			if kind.core && kind.keys != "" && n == 0 {
+				out = nil
+				break
+			}
+		}
+	}
+	if len(out) > 0 {
+		return out
+	}
+	keys := make([]string, 0, len(read))
+	for k := range read {
+		if smcTempKey(k) && (k[1] == 'p' || k[1] == 'e') {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		out = append(out, Temp{ID: "smc/1/" + k, Chip: "smc", TempC: read[k]})
+	}
+	return out
+}
+
+// Whether the HID services carry the processor: an M1's pACC and eACC.
+func hidHasCPU(rows []Temp) bool {
+	for _, r := range rows {
+		if hidRank(r.Label) == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// An Apple Silicon Mac's rows: its HID services when they carry the
+// processor (an M1); otherwise the SMC's processor and GPU keys, then the
+// HID services. The SMC is only asked when it is needed.
+func appleRows(hid []Temp, gen int, smc func() map[string]float64) []Temp {
+	if hidHasCPU(hid) {
+		return hid
+	}
+	return append(appleSMCRows(gen, smc()), hid...)
+}
+
 // The product names Apple Silicon gives its temperature services. Firmware
 // strings, the same on every machine of a model — and held to this list all
 // the same, because the property they are read from is one any HID device

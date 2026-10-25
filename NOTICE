@@ -77,3 +77,10 @@ SPDX-License-Identifier: MIT
 gVisor netstack — https://github.com/google/gvisor
 Copyright 2018 The gVisor Authors
 SPDX-License-Identifier: Apache-2.0 (and MIT for the netstack tree)
+
+------------------------------------------------------------------------
+Stats — https://github.com/exelban/stats
+The table of Apple Silicon SMC temperature keys in go/mactemps.go
+(appleSMCKeys) is taken from Stats' Modules/Sensors/values.swift.
+Copyright (c) 2019 Serhiy Mytrovtsiy
+SPDX-License-Identifier: MIT
