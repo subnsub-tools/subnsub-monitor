@@ -159,6 +159,7 @@ For collectors that invoke a local CLI (`codex`, `amp`, `kiro-cli`, `agy`), the 
 - Network interface names and addresses, plus public IPv4 (queried every 30 minutes via `https://1.1.1.1/cdn-cgi/trace`; disable with `MON_IPV4=off`).
 - Sanitized mount paths (paths under `/home/...`, `/Users/...`, `/run/media/...`, or `/media/...` collapse to their root prefix so OS usernames are never sent). A Mac's external disks are sent as `/Volumes/<name>`, one row each; the system's own volumes (`/System/...`, simulator runtimes, read-only hidden mounts) are not sent, and the root figure counts the whole APFS container.
 - Installed coding-agent CLI versions, read directly from package manifests on disk without executing `--version` (`go/clis.go`; disable with `MON_CLIS=off`).
+- Token counts for Claude Code and Codex, read from their transcripts on disk: by UTC hour (the last 25) and UTC day (the last 32), per tool and model, in five kinds (input, output, cache read, cache write, reasoning) with a reply count. Numbers and model names only, never a prompt, a reply, a path or a session id (`go/tokens.go`; disable with `MON_TOKENS=off`).
 
 Run `subnsub-monitor` with no arguments to inspect the exact JSON snapshot produced on your machine.
 
@@ -517,6 +518,7 @@ Every persistent toggle is stored as a file in `~/.config/subnsub-monitor/`; env
 | `MON_NETNS` | `off`, or comma-separated namespace names (`a,b`) to probe on Linux |
 | `MON_ROADS` | Set `off` to skip multi-exit speed probing before binary updates |
 | `MON_CLIS` | Set `off` to disable reporting installed coding-agent CLI versions |
+| `MON_TOKENS` | Set `off` to disable reporting coding-agent token counts |
 | `MON_CPA_URL`, `MON_CPA_KEY` | CLI Proxy API management base URL and secret key |
 | `MON_COPILOT_TOKEN`, `MON_GROK_TOKEN`, `MON_KILO_TOKEN`, `MON_KIMI_TOKEN` | Provide a vendor token via environment instead of reading the CLI's file |
 | `MON_AMP_BIN`, `MON_AGY_BIN`, `MON_CODEX_BIN`, `MON_KIRO_BIN` | Explicit absolute path to the respective vendor CLI binary |

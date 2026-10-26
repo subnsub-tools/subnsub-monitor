@@ -112,14 +112,14 @@ LABEL=com.subnsub.monitor   # shows up in `launchctl list`; brand domain there t
 # script that publishes the binaries. A binary that does not match is not installed, and a swapped binary
 # would otherwise be free to read ~/.claude/.credentials.json and post it
 # somewhere, which no amount of care in the Go source can prevent.
-SUM_linux_amd64=561939a5bd6eaef416c123ed067790e0fc41eba36471a5f6fbbe92fa406413c0
-SUM_linux_arm64=897cb982385de88bdb4393aa9b9dcaaa1d9fb34bd66002cb33b726c4deefdd15
-SUM_linux_arm=d9bf1c9e1857c4f233d326d04e7148988ca99c101f1edf18d4e72d7521f44226
-SUM_darwin_amd64=01022471642f6fa225661836a1fb5f473a910bd323cba9d4db76cc08da8b618d
-SUM_darwin_arm64=394e474aedca67db77704867711d11df9d1c3329654735c22dbe95c4c22dcb9d
-SUM_freebsd_amd64=ecb25c9afe9134d45461b43e78ba3993b8ecad96b823f806a6a47f693f4c7cd2
-SUM_freebsd_arm64=4a63e759fadaab5ad7f05a1f5645befeb7e5acc34456b6b6e09d50851470b817
-SUM_android_arm64=e7038a41cfc30c4dea73688bb2f3e097cb6348894011b60ff077037416c2f24a
+SUM_linux_amd64=6657b4592da3e69cf1d4aba0a6161c4693fbafd8c8fed7d70d88f94eeb9c3d5b
+SUM_linux_arm64=718e7f69218a1a2e1ce4e5caf7eda3178538513eee302c7f71d985bd32e9339e
+SUM_linux_arm=64dcc088bb53374413862ca0660d58434af89e201419080c78cc08245f191357
+SUM_darwin_amd64=fd8f496aa81cb84111618bb75e1b7fd8dde73ab083340a41974aa5811ff51418
+SUM_darwin_arm64=9d536b80f0b3f7b5aa6888fe6bd942d58917fe17404589a02ada6e30bfd8759b
+SUM_freebsd_amd64=6ba3d801a6f04973c75d00ac8451067c04d0909e9818855a938d00d2f18c0e1a
+SUM_freebsd_arm64=144eead995922a5b5a15d09dc1d170a5b94de39ac0dcb983949196513f875343
+SUM_android_arm64=f4cf292fde2d5ebf2a93d2753884605f203efebb9fdb19b62947ebb1c3faebd5
 
 say()  { printf '%s\n' "$*"; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }

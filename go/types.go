@@ -302,6 +302,10 @@ type Snapshot struct {
 	// Agent usage card's versions. A closed vocabulary like the tiles'.
 	CLIs []CLI `json:"cli,omitempty"`
 
+	// What the coding agents spent here, by hour and day, tool and model
+	// (tokens.go): the Agent usage card's token section. Counts only.
+	Tokens *TokenUsage `json:"tok,omitempty"`
+
 	// The exits of this machine's other network namespaces (spaces.go).
 	Spaces []Space `json:"spaces,omitempty"`
 
@@ -531,7 +535,16 @@ func collectAllOpts(consumeSeries bool) Snapshot {
 		defer wg.Done()
 		cpa = collectCPA()
 	}()
+	// The transcripts' token counts: at most one pass a minute, the last
+	// answer between (tokens.go), so the tunnel's rate costs nothing here.
+	var tokens *TokenUsage
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		tokens = tokenSnapshot()
+	}()
 	wg.Wait()
+	snap.Tokens = tokens
 	snap.Providers = mergeCPA(results, cpa)
 	snap.Services = services
 	snap.ServiceSources = serviceSources
