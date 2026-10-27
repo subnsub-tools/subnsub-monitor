@@ -435,13 +435,13 @@ var collectors = []struct {
 	{"kiro", collectKiro},
 }
 
-const codexBarReferenceCommit = "8928b6ee4c8069f283d4621486ffbeaf8086cb12"
+const codexBarReferenceCommit = "7749f7b94ae8f1b84b9ffb2046643cec810f4078"
 
 // The CLI Proxy API Management Center commit whose quota page the CPA rung's
 // adapters.json was worked out from (protocol: endpoints, headers, fields).
 // Lockstep with the relay's REFERENCE_COMMITS and the coverage registry;
 // coverage_test.go checks all three.
-const cpamcReferenceCommit = "714de0760a3ce86094b178fb46f834d34bc4a2a5"
+const cpamcReferenceCommit = "64b4f5aed19b8f791eb21eb9e785ea379ea05b44"
 
 // Only mark a reference where the collector's source documents what was
 // actually taken from it. Codex and Claude, for example, do not get a blanket

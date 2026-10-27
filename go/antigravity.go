@@ -186,6 +186,14 @@ func fetchAgyReport(bin string) Provider {
 // that exits 1, first on PATH, and BROWSER names the same stub. The CLI's
 // own log goes into the directory as well, one file per run, instead of
 // into the user's log folder; the directory is removed with the run.
+//
+// And no update: any agy launch more than fifteen minutes after its last
+// check starts its background auto-updater, which for one CodexBar user
+// fetched about 2.1 GB of release tarballs in 30 days of passive probes
+// (CodexBar AntigravityProviderDescriptor.childEnvironment,
+// steipete/CodexBar@d6c651ca26, #4739). AGY_CLI_DISABLE_AUTO_UPDATE turns it
+// off — spelled "true", agy ignores "1" — and an inherited "false" never
+// reaches the child, since vendorEnv passes no AGY_ variable through.
 func agyRun(bin string) (string, bool, error) {
 	dir, err := os.MkdirTemp("", "subnsub-agy-")
 	if err != nil {
@@ -209,7 +217,8 @@ func agyRun(bin string) (string, bool, error) {
 	}
 	env = append(env,
 		"PATH="+dir+string(os.PathListSeparator)+path,
-		"BROWSER="+filepath.Join(dir, "open"))
+		"BROWSER="+filepath.Join(dir, "open"),
+		"AGY_CLI_DISABLE_AUTO_UPDATE=true")
 	// The whole tree on the deadline: agy's server is a child of its own
 	// (runVendorCLITree), and a hung one must not outlive this run.
 	return runVendorCLITree(bin, []string{

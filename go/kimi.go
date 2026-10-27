@@ -22,7 +22,10 @@ package main
 // KimiUsageFetcher, steipete/CodexBar@babfb51da4): the goods title of an
 // active subscription. GetSubscriptionStats, which this read before, names
 // the balance's TYPE ("SUBSCRIPTION") there, not the plan — a chip reading
-// "SUBSCRIPTION" was that field.
+// "SUBSCRIPTION" was that field. It is read again now for what it does
+// carry, the membership's own windows (kimiWithMembership): the month's
+// shared balance and the Code 7-day ratio — the only reading a lapsed Code
+// plan has left.
 //
 // Claude's cost rung, Claude's rules (claude.go): read two scalars from the
 // credential file, never refresh, never write back, publish no transport
@@ -38,6 +41,7 @@ package main
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,6 +51,7 @@ const (
 	kimiOrigin          = "https://www.kimi.com"
 	kimiUsagesURL       = kimiOrigin + "/apiv2/kimi.gateway.billing.v1.BillingService/GetUsages"
 	kimiSubscriptionURL = kimiOrigin + "/apiv2/kimi.gateway.membership.v2.MembershipService/GetSubscription"
+	kimiStatsURL        = kimiOrigin + "/apiv2/kimi.gateway.membership.v2.MembershipService/GetSubscriptionStats"
 	kimiTokenEnv        = "MON_KIMI_TOKEN"
 	kimiHomeEnv         = "KIMI_CODE_HOME"
 	// The console's own identity, as CodexBar's KimiUsageFetcher sends it.
@@ -245,52 +250,26 @@ func fetchKimi() Provider {
 		return fail("api-error", "http-status", itoa(status))
 	}
 
-	var doc struct {
-		Usages []struct {
-			Scope  string      `json:"scope"`
-			Detail *kimiDetail `json:"detail"`
-			Limits []struct {
-				Detail *kimiDetail `json:"detail"`
-				Window any         `json:"window"`
-			} `json:"limits"`
-		} `json:"usages"`
-	}
-	if json.Unmarshal(body, &doc) != nil {
+	limits, ok := kimiCodingLimits(body)
+	if !ok {
 		return fail("api-error", "http-shape")
 	}
+	p.Limits = limits
 
-	for _, u := range doc.Usages {
-		if u.Scope != "FEATURE_CODING" {
-			continue
-		}
-		if used := kimiUsed(u.Detail); used != nil {
-			lim := Limit{
-				Key: "weekly", UsedPercent: *used,
-				WindowLabel: sp("7d"), ResetsAt: kimiReset(u.Detail),
-			}
-			lim.UsedAmount, lim.TotalAmount, lim.RemainingAmount = kimiAmounts(u.Detail)
-			p.Limits = append(p.Limits, lim)
-		}
-		// The short rate window rides in limits[]; only the first is the
-		// governing one, per Kimi's own client.
-		if len(u.Limits) > 0 {
-			l := u.Limits[0]
-			if used := kimiUsed(l.Detail); used != nil {
-				lim := Limit{Key: "rate", UsedPercent: *used, ResetsAt: kimiReset(l.Detail)}
-				lim.UsedAmount, lim.TotalAmount, lim.RemainingAmount = kimiAmounts(l.Detail)
-				w := kimiWindowMinutes(l.Window)
-				lim.WindowMinutes = fp(w)
-				lim.WindowLabel = windowLabel(w)
-				p.Limits = append(p.Limits, lim)
-			}
-		}
-		break
+	// The membership's own windows, a separately-failing request like the
+	// plan's below. A lapsed Code plan answers GetUsages with no Code pools
+	// at all — `{"totalQuota":{…}}`, no `usages` — and its membership quota
+	// is then the only reading there is (CodexBar KimiUsageFetcher,
+	// steipete/CodexBar@5a84dca9ba: "keep web usage when a lapsed plan has no
+	// Code pools"); with neither, the read fails as it always did.
+	if status, body, err := provRequest("POST", kimiStatsURL, hdr, []byte("{}")); err == nil && status == 200 {
+		p.Limits = kimiWithMembership(p.Limits, body)
 	}
 	if len(p.Limits) == 0 {
 		return fail("no-readings", "no-window")
 	}
 
-	// The subscription is a second, separately-failing request and carries
+	// The subscription is another separately-failing request and carries
 	// only the plan chip; losing it costs nothing the gauges need.
 	if status, body, err := provRequest("POST", kimiSubscriptionURL, hdr, []byte("{}")); err == nil && status == 200 {
 		if plan := kimiPlan(body); plan != "" {
@@ -302,6 +281,154 @@ func fetchKimi() Provider {
 	p.RecordedAt = fp(now())
 	return p
 }
+
+// The FEATURE_CODING pools out of a GetUsages answer: the weekly detail and
+// the first of limits[], the short rate window. False only when the body is
+// not the gateway's shape at all; an answer with no Code pools — a lapsed
+// plan's `{"totalQuota":{…}}`, `usages` absent or null (CodexBar KimiModels,
+// steipete/CodexBar@5a84dca9ba made it optional) — is no windows, not a
+// broken answer.
+func kimiCodingLimits(body []byte) ([]Limit, bool) {
+	var doc struct {
+		Usages []struct {
+			Scope  string      `json:"scope"`
+			Detail *kimiDetail `json:"detail"`
+			Limits []struct {
+				Detail *kimiDetail `json:"detail"`
+				Window any         `json:"window"`
+			} `json:"limits"`
+		} `json:"usages"`
+	}
+	if json.Unmarshal(body, &doc) != nil {
+		return nil, false
+	}
+	var out []Limit
+	for _, u := range doc.Usages {
+		if u.Scope != "FEATURE_CODING" {
+			continue
+		}
+		if used := kimiUsed(u.Detail); used != nil {
+			lim := Limit{
+				Key: "weekly", UsedPercent: *used,
+				WindowLabel: sp("7d"), ResetsAt: kimiReset(u.Detail),
+			}
+			lim.UsedAmount, lim.TotalAmount, lim.RemainingAmount = kimiAmounts(u.Detail)
+			out = append(out, lim)
+		}
+		// The short rate window rides in limits[]; only the first is the
+		// governing one, per Kimi's own client.
+		if len(u.Limits) > 0 {
+			l := u.Limits[0]
+			if used := kimiUsed(l.Detail); used != nil {
+				lim := Limit{Key: "rate", UsedPercent: *used, ResetsAt: kimiReset(l.Detail)}
+				lim.UsedAmount, lim.TotalAmount, lim.RemainingAmount = kimiAmounts(l.Detail)
+				w := kimiWindowMinutes(l.Window)
+				lim.WindowMinutes = fp(w)
+				lim.WindowLabel = windowLabel(w)
+				out = append(out, lim)
+			}
+		}
+		break
+	}
+	return out, true
+}
+
+// The membership's windows out of a GetSubscriptionStats answer, added to
+// what GetUsages read (CodexBar KimiUsageSnapshot.toUsageSnapshot):
+//
+//	{"subscriptionBalance":{"feature":"FEATURE_OMNI","type":"SUBSCRIPTION",
+//	   "amountUsedRatio":0.42,"expireTime":"2026-11-22T00:00:00Z"},
+//	 "ratelimitCode7d":{"ratio":0.5,"enabled":true,"resetTime":"…"}}
+//
+// The subscription balance is the month's "Total usage", the pool every
+// feature draws on, so its amountUsedRatio and not the Code-only
+// kimiCodeUsedRatio; it renews at expireTime, which CodexBar shows as the
+// window's reset. Labelled "month" as the table labels the Code API's
+// limit_month_total, the same lane (KimiUsageSnapshot prefers that pool
+// when it has both). A balance of another feature or type — a GIFT, which
+// expires rather than renews — is not this window.
+//
+// ratelimitCode7d is the Code weekly quota as the membership service counts
+// it, FEATURE_CODING's weekly detail through a second endpoint. Where the
+// detail is missing (a lapsed plan) it is the weekly reading. Where both are
+// there and agree — within a point, and resets within five minutes — it adds
+// nothing. Where they disagree it stands as a row of its own, the week scoped
+// "Code", rather than one figure hiding the other: a higher ratio on another
+// reset is another period, not a worse reading of this one (CodexBar
+// KimiUsageSnapshot, kimi-code-7d and isEquivalentToWeeklyWindow). Ratios
+// arrive as numbers; strings are taken too, as everything else this gateway
+// sends is one.
+func kimiWithMembership(limits []Limit, body []byte) []Limit {
+	var doc struct {
+		SubscriptionBalance *struct {
+			Feature         string `json:"feature"`
+			Type            string `json:"type"`
+			AmountUsedRatio any    `json:"amountUsedRatio"`
+			ExpireTime      any    `json:"expireTime"`
+		} `json:"subscriptionBalance"`
+		RatelimitCode7d *struct {
+			Ratio     any   `json:"ratio"`
+			Enabled   *bool `json:"enabled"`
+			ResetTime any   `json:"resetTime"`
+		} `json:"ratelimitCode7d"`
+	}
+	if json.Unmarshal(body, &doc) != nil {
+		return limits
+	}
+	ratioPct := func(v any) *float64 {
+		r := kimiNum(v)
+		if r == nil {
+			return nil
+		}
+		return fp(round2(min(max(*r*100, 0), 100)))
+	}
+	if b := doc.SubscriptionBalance; b != nil &&
+		(b.Feature == "" || b.Feature == "FEATURE_OMNI") && (b.Type == "" || b.Type == "SUBSCRIPTION") {
+		if used := ratioPct(b.AmountUsedRatio); used != nil && !kimiHasKey(limits, "monthly") {
+			limits = append(limits, Limit{
+				Key: "monthly", UsedPercent: *used, WindowLabel: sp("month"),
+				ResetsAt: kimiReset(&kimiDetail{ResetTime: b.ExpireTime}),
+			})
+		}
+	}
+	if c := doc.RatelimitCode7d; c != nil && (c.Enabled == nil || *c.Enabled) {
+		if used := ratioPct(c.Ratio); used != nil {
+			week := Limit{
+				Key: "weekly", UsedPercent: *used, WindowLabel: sp("7d"),
+				ResetsAt: kimiReset(&kimiDetail{ResetTime: c.ResetTime}),
+			}
+			switch i := kimiKeyIndex(limits, "weekly"); {
+			case i < 0:
+				limits = append(limits, week)
+			case !kimiSameWeek(week, limits[i]):
+				week.Key, week.Scope = "code_weekly", sp("Code")
+				limits = append(limits, week)
+			}
+		}
+	}
+	return limits
+}
+
+// Two weekly readings of one period: within a point of each other, with
+// resets five minutes apart at most. Without both resets there is no telling
+// they are the same week, and they are kept apart.
+func kimiSameWeek(a, b Limit) bool {
+	if a.ResetsAt == nil || b.ResetsAt == nil {
+		return false
+	}
+	return math.Abs(a.UsedPercent-b.UsedPercent) <= 1 && math.Abs(*a.ResetsAt-*b.ResetsAt) <= 300
+}
+
+func kimiKeyIndex(limits []Limit, key string) int {
+	for i := range limits {
+		if limits[i].Key == key {
+			return i
+		}
+	}
+	return -1
+}
+
+func kimiHasKey(limits []Limit, key string) bool { return kimiKeyIndex(limits, key) >= 0 }
 
 // The rate window's length in minutes: a {duration, timeUnit} pair, a bare
 // number of minutes (the shape an earlier gateway sent), or the 5-hour

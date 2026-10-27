@@ -117,6 +117,105 @@ func TestKimiResetAcceptsEveryShapeSeen(t *testing.T) {
 	}
 }
 
+// GetUsages with Code pools reads them; a lapsed plan's answer has none —
+// `{"totalQuota":…}` and no `usages`, the fixture of CodexBar's
+// KimiLapsedSubscriptionTests (steipete/CodexBar@5a84dca9ba) — which is no
+// windows rather than a broken answer, so the membership still gets asked.
+func TestKimiCodingLimitsToleratesALapsedPlan(t *testing.T) {
+	got, ok := kimiCodingLimits([]byte(`{"usages":[{"scope":"FEATURE_CODING",
+	  "detail":{"limit":"2048","used":"117","resetTime":"2026-10-27T00:00:00Z"},
+	  "limits":[{"detail":{"limit":"200","used":"50"},"window":{"duration":300,"timeUnit":"TIME_UNIT_MINUTE"}}]}]}`))
+	if !ok || len(got) != 2 || got[0].Key != "weekly" || got[0].UsedPercent != 5.71 ||
+		got[1].Key != "rate" || got[1].UsedPercent != 25 || got[1].WindowMinutes == nil || *got[1].WindowMinutes != 300 {
+		t.Fatalf("active plan: ok=%v %+v", ok, got)
+	}
+	for _, body := range []string{
+		`{"totalQuota":{"limit":"100","used":"36","remaining":"64"}}`,
+		`{"usages":null}`,
+		`{"usages":[{"scope":"FEATURE_OMNI","detail":{"limit":"100","used":"1"}}]}`,
+	} {
+		if got, ok := kimiCodingLimits([]byte(body)); !ok || len(got) != 0 {
+			t.Errorf("%s: ok=%v %+v", body, ok, got)
+		}
+	}
+	if _, ok := kimiCodingLimits([]byte(`{"usages":{"scope":"FEATURE_CODING"}}`)); ok {
+		t.Error("an answer not in the gateway's shape is a broken answer")
+	}
+}
+
+// The membership's windows: the subscription balance as the month's Total
+// usage, renewing at its expireTime (CodexBar's lapsed fixture: 0 used, the
+// 22nd of next month), and nothing out of an empty answer — a lapsed plan
+// with neither still fails, as CodexBar keeps its scope error.
+func TestKimiMembershipKeepsALapsedPlanReading(t *testing.T) {
+	stats := []byte(`{"subscriptionBalance":{"feature":"FEATURE_OMNI","type":"SUBSCRIPTION","unit":"UNIT_CREDIT",
+	  "amountUsedRatio":0,"expireTime":"2026-11-22T00:00:00Z"}}`)
+	got := kimiWithMembership(nil, stats)
+	if len(got) != 1 || got[0].Key != "monthly" || got[0].UsedPercent != 0 ||
+		got[0].WindowLabel == nil || *got[0].WindowLabel != "month" ||
+		got[0].ResetsAt == nil || *got[0].ResetsAt != isoToEpoch("2026-11-22T00:00:00Z") {
+		t.Fatalf("lapsed: %+v", got)
+	}
+	got = kimiWithMembership(nil, []byte(`{"subscriptionBalance":{"feature":"FEATURE_OMNI","type":"SUBSCRIPTION","amountUsedRatio":1.4}}`))
+	if len(got) != 1 || got[0].UsedPercent != 100 {
+		t.Errorf("an overdrawn pool reads full: %+v", got)
+	}
+	for _, body := range []string{
+		`{}`,
+		`not json`,
+		// A gift expires rather than renews: not the month's window.
+		`{"subscriptionBalance":{"feature":"FEATURE_OMNI","type":"GIFT","amountUsedRatio":0.5}}`,
+		`{"subscriptionBalance":{"feature":"FEATURE_CODING","type":"SUBSCRIPTION","amountUsedRatio":0.5}}`,
+		`{"subscriptionBalance":{"feature":"FEATURE_OMNI","type":"SUBSCRIPTION"}}`,
+		`{"ratelimitCode7d":{"ratio":0.5,"enabled":false}}`,
+	} {
+		if got := kimiWithMembership(nil, []byte(body)); len(got) != 0 {
+			t.Errorf("%s: %+v", body, got)
+		}
+	}
+}
+
+// The Code 7-day ratio is the weekly quota through a second endpoint: the
+// weekly reading where FEATURE_CODING has none, nothing more where the two
+// agree, and a row of its own, scoped Code, where they do not — the detail
+// kept whole, its amounts and reset with it.
+func TestKimiMembershipCode7dJoinsTheWeekOnlyWhenItAgrees(t *testing.T) {
+	reset := isoToEpoch("2026-10-30T00:00:00Z")
+	code7d := func(ratio, at string) []byte {
+		return []byte(`{"ratelimitCode7d":{"ratio":` + ratio + `,"enabled":true,"resetTime":"` + at + `"}}`)
+	}
+	got := kimiWithMembership(nil, code7d("0.25", "2026-10-30T00:00:00Z"))
+	if len(got) != 1 || got[0].Key != "weekly" || got[0].UsedPercent != 25 || got[0].Scope != nil ||
+		got[0].WindowLabel == nil || *got[0].WindowLabel != "7d" || got[0].ResetsAt == nil {
+		t.Fatalf("no detail: %+v", got)
+	}
+	detail := func(resets *float64) []Limit {
+		l := Limit{Key: "weekly", UsedPercent: 40, WindowLabel: sp("7d"), ResetsAt: resets}
+		l.UsedAmount, l.TotalAmount, l.RemainingAmount = fp(40), fp(100), fp(60)
+		return []Limit{l, {Key: "rate", UsedPercent: 10}}
+	}
+	got = kimiWithMembership(detail(fp(reset)), code7d("0.405", "2026-10-30T00:01:00Z"))
+	if len(got) != 2 || got[0].UsedPercent != 40 || got[0].UsedAmount == nil {
+		t.Errorf("an agreeing ratio adds nothing and leaves the detail as it was: %+v", got)
+	}
+	got = kimiWithMembership(detail(fp(reset)), code7d("0.5", "2026-11-03T00:00:00Z"))
+	if len(got) != 3 || got[0].Key != "weekly" || got[0].UsedPercent != 40 || got[0].UsedAmount == nil ||
+		got[0].ResetsAt == nil || *got[0].ResetsAt != reset {
+		t.Fatalf("a disagreeing ratio leaves the detail whole: %+v", got)
+	}
+	if c := got[2]; c.Key != "code_weekly" || c.UsedPercent != 50 || c.Scope == nil || *c.Scope != "Code" ||
+		c.ResetsAt == nil || *c.ResetsAt != isoToEpoch("2026-11-03T00:00:00Z") || c.UsedAmount != nil {
+		t.Errorf("and stands as its own row: %+v", c)
+	}
+	if got[1].Key != "rate" || got[1].UsedPercent != 10 {
+		t.Errorf("the rate window is untouched: %+v", got[1])
+	}
+	got = kimiWithMembership(detail(nil), code7d("0.4", "2026-10-30T00:00:00Z"))
+	if len(got) != 3 || got[0].ResetsAt != nil || got[2].Key != "code_weekly" {
+		t.Errorf("without the detail's reset the two cannot be shown to be one week: %+v", got)
+	}
+}
+
 // ── shared plumbing ───────────────────────────────────────────────────────
 
 func TestProvCacheFloorsOnAttemptsAndServesStale(t *testing.T) {

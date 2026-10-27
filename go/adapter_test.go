@@ -11,6 +11,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 )
 
 func adapterDocs(t *testing.T, pairs ...string) map[string]any {
@@ -1169,13 +1170,23 @@ func TestCodexFetchCarriesTheNewFields(t *testing.T) {
 	ad := vendorOf(t, "codex")
 	cred := map[string]any{"id_token": map[string]any{"chatgpt_account_id": "acct-9"}}
 	asked := map[string]map[string]string{}
+	// adapterFetch reads at the wall clock, not v4Now, so the two available
+	// grants lapse ahead of it here: the shared fixture's own dates passed on
+	// 2026-10-22, and a lapsed grant is rightly no date.
+	ahead := func(days int) string {
+		return time.Now().UTC().AddDate(0, 0, days).Format(time.RFC3339)
+	}
+	credits := strings.NewReplacer(
+		"2026-10-29T19:15:12Z", ahead(7),
+		"2026-10-22T20:48:34Z", ahead(1),
+	).Replace(codexResetCreditsFixture)
 	send := func(method, target string, header map[string]string, data string) (int, []byte, *Provider) {
 		asked[target] = header
 		switch {
 		case strings.HasSuffix(target, "/wham/usage"):
 			return 200, []byte(codexUsageV4Fixture), nil
 		case strings.HasSuffix(target, "/wham/rate-limit-reset-credits"):
-			return 200, []byte(codexResetCreditsFixture), nil
+			return 200, []byte(credits), nil
 		case strings.Contains(target, "/subscriptions?account_id=acct-9"):
 			return 403, []byte("<html>challenge</html>"), nil // Cloudflare, as seen
 		}
