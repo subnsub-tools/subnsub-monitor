@@ -77,6 +77,12 @@ const (
 	// then flow are NOT frames — they are the Transfer tool's own encrypted
 	// pipe frames, opaque to the machine, on /v1/pipe/send and /v1/pipe/recv.
 	TypePipe = "pipe"
+	// TypePair is the one frame a pairing node serves (pair.go): the
+	// machine's own tunnel address, handed to the browser whose key the
+	// install line named, over the pairing node's tunnel — the road by which
+	// a browser that minted the line learns where the machine it installed
+	// actually waits. Its body is Pair. Served on request, never streamed.
+	TypePair = "pair"
 )
 
 // Limits are the byte ceilings per frame type, applied to the SERIALISED
@@ -92,6 +98,7 @@ var Limits = map[string]int{
 	TypeResult:   256 << 10,
 	TypeHistory:  1 << 20,
 	TypePipe:     4 << 10,
+	TypePair:     4 << 10,
 }
 
 // Capabilities a peer may announce or be granted. Each one is authorised on
@@ -202,6 +209,12 @@ type Pipe struct {
 	// both sides have to attach before it is forgotten.
 	OK     bool `json:"ok,omitempty"`
 	TTLSec int  `json:"ttl_sec,omitempty"`
+}
+
+// Pair is the body of a TypePair frame: the machine's own tunnel address
+// ("tc…"), which the browser dials from then on.
+type Pair struct {
+	Addr string `json:"addr"`
 }
 
 // Sentinel errors from Decode. Callers switch on these to decide whether the

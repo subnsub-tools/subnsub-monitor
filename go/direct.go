@@ -478,7 +478,12 @@ func runDirect(ctx context.Context) {
 		} else {
 			warnf("direct: up via the public tailcat DERP (region %d%s) — best effort, no guarantee", tc.Region(), how)
 		}
+		// A browser waiting to hear this node's address (pairing.go), for as
+		// long as this carrier lives: the address it hands over is this one.
+		pctx, pcancel := context.WithCancel(ctx)
+		go runPairing(pctx, conf, tc)
 		serveDirect(ctx, tc, h)
+		pcancel()
 		setDirectProbe(nil)
 		setDirectAdmit(nil)
 		h.pipes.endAll()
@@ -988,6 +993,11 @@ func (h *directHandler) hello(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Write(b)
+	// A browser that says hello here knows this node's own address: a
+	// pairing waiting for that browser is over (pairing.go).
+	if k, ok := transport.PeerFromContext(r.Context()); ok && !h.guestOf(r) {
+		notePeerHello(k)
+	}
 }
 
 // quotaAutoAsked reports whether a tunnel reader opened its stream saying
@@ -1286,6 +1296,9 @@ func runAddressCLI() int {
 		fmt.Println("(direct mode is off — 'subnsub-monitor direct on')")
 	}
 	fmt.Printf("node key: %s\n", pub.String())
+	if s := pairingStatusLine(conf, time.Now()); s != "" {
+		fmt.Println(s)
+	}
 	return 0
 }
 

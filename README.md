@@ -20,6 +20,7 @@ This repository contains the Go helper (`go/`), the installation scripts (`insta
 - [Installation](#installation)
   - [Android over USB](#android-over-usb)
 - [Direct mode](#direct-mode)
+  - [Pairing](#pairing)
 - [Supported providers](#supported-providers)
   - [Subprocess execution rules](#subprocess-execution-rules)
 - [Security & privacy model](#security--privacy-model)
@@ -83,6 +84,7 @@ The `<TOKEN>` comes from your signed-in Monitor dashboard. You can use the same 
 | `--auto-update` | Check hourly for newer releases and install automatically (requires remote updates enabled) |
 | `--sessions-sync` | Redact and sync local coding-agent transcripts to your account archive |
 | `--direct --allow nodekey:…` | Enable direct mode for the specified browser node key (no account or token required; see [Direct mode](#direct-mode)) |
+| `--pair <token>` | Pair with the self-hosted Monitor page that made the line, for the last `--allow` key on it, so the machine shows up there without its address being pasted back (see [Pairing](#pairing)) |
 | `--derpmap https://…` | Use a custom DERP map URL instead of the default public map |
 
 When copied from a signed-in dashboard, the install command also sets `MON_PUBKEY=…` to pin your dashboard's Ed25519 public key in `~/.config/subnsub-monitor/trusted-keys` (see [Command signing (`trust`)](#command-signing-trust)).
@@ -117,7 +119,15 @@ The Direct card on the Monitor page generates a browser node key and prints this
 - **Relay features not present in standalone direct mode:** Cloud presence history, relay-stored trends while the machine is unreachable, cloud session archiving, web push notifications, and cross-machine account folding require an account and relay connection.
 - **Read-only by default:** The tunnel only starts when at least one browser key is listed in `~/.config/subnsub-monitor/allowed-clients` (`subnsub-monitor allow <key>` / `disallow <key>`). Allowing a browser node key grants **read-only** observation (`hello`, snapshots, 1 Hz health stream, and local history). Commands and interactive terminals require the browser's Ed25519 signing key to be pinned in `trusted-keys` (`MON_PUBKEY` or `subnsub-monitor trust <key>`).
 - **Hybrid mode (Relay + Direct):** When configured with both a relay token and `--direct`, both transports run side by side. Interactive terminals and plaintext shell commands always travel exclusively over the direct tunnel, never through the relay. Set `MON_TRANSPORT=relay` or `MON_TRANSPORT=tailcat` to force a single transport.
-- **CLI controls:** `subnsub-monitor direct on|off`, `allow`, `disallow`, `address` (prints the direct address and node key), and `transfer on|off` (allows an authorized browser to relay an end-to-end encrypted peer-to-peer file transfer stream through the tunnel when direct WebRTC fails; enabled by default when direct mode is on).
+- **CLI controls:** `subnsub-monitor direct on|off`, `allow`, `disallow`, `address` (prints the direct address and node key, and a pairing still waiting), and `transfer on|off` (allows an authorized browser to relay an end-to-end encrypted peer-to-peer file transfer stream through the tunnel when direct WebRTC fails; enabled by default when direct mode is on).
+
+### Pairing
+
+From helper 2026.10.28.1 the self-hosted Monitor page (`/monitor`) adds `--pair <token>` to its line, and pins its own signing key with `MON_PUBKEY`. The token is a one-time tailcat identity that page made for this machine: 64 hex characters of a node private key, a dot, and that node's `tc…` address, which names one DERP region. The installer writes it, with the browser key it is for, to `~/.config/subnsub-monitor/pairing` (mode `0600`).
+
+While the file is there and the machine's own tunnel is up, the helper starts a second, short-lived node under that identity (`pairing.go`, `transport/pair.go`). It admits only that one browser key, re-checked against `allowed-clients` on every request, and serves one frame: `GET /v1/pair` answers with the machine's own tunnel address. The page then dials that address like any other. The pairing is deleted once that browser says hello to the machine's own node after the pairing was written, once its key is disallowed, or a week after the file was written, whichever comes first.
+
+The machine's own node key, pre-shared key and region are generated on the machine as always and never travel in a line. Until the pairing is done, treat the line like a password: whoever runs it first is the machine the page shows.
 
 ## Supported providers
 
@@ -537,6 +547,7 @@ All state lives in `~/.config/subnsub-monitor/` (mode `0700`):
 | `console`, `update`, `autoupdate`, `direct`, `sessions-sync`, `derpmap` | Feature switches (file presence enables the feature) |
 | `trusted-keys`, `econ-key` | Pinned Ed25519 command-signing public keys and the machine's X25519 sealing key |
 | `allowed-clients`, `tailcat.key`, `tailcat.psk`, `address` | Authorized browser node keys and WireGuard/tailcat tunnel credentials |
+| `pairing` | A pairing token from the self-hosted page's line and the browser key it is for, until that browser has the address (at most a week) |
 | `clone-access`, `clones`, `clones.revoked` | Client-side delegated access credential and host-side admitted/revoked copy records |
 | `probes.json`, `probes.key`, `probes-state.json` | Service probe definitions, target HMAC key, and rolling uptime buckets |
 | `metrics.d/`, `metrics.sock` | Custom metric definitions and the local Unix domain push socket |

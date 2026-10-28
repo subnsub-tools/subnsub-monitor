@@ -64,6 +64,15 @@
 #
 #   curl -fsSL .../install.sh | sh -s -- --direct --allow nodekey:…
 #
+# The self-hosted page's line adds --pair <token>: a one-time identity that
+# page made for this machine, so it can find the machine without anybody
+# carrying its address back. The helper waits under that identity, for that
+# one browser key, and hands it this machine's own address over the
+# encrypted tunnel; then the pairing is deleted (and after a week regardless).
+# The machine's own key and address are made here as always and never travel
+# in a line. Until the pairing is done, treat the line like a password: whoever
+# runs it first is the machine that page will show.
+#
 # Source: https://github.com/subnsub-tools/subnsub-monitor (Apache-2.0)
 #
 # …and if you would rather look first, which is the reasonable instinct for
@@ -112,14 +121,14 @@ LABEL=com.subnsub.monitor   # shows up in `launchctl list`; brand domain there t
 # script that publishes the binaries. A binary that does not match is not installed, and a swapped binary
 # would otherwise be free to read ~/.claude/.credentials.json and post it
 # somewhere, which no amount of care in the Go source can prevent.
-SUM_linux_amd64=64d354ca2a43870c54bf6fdc6aeb61ef6ada904cd61dc606aa28c0a92cc5f8e9
-SUM_linux_arm64=c90b1df00d7ac8f962f6741a7004a4083246a3dc2497ff5456d4e825e78cf55e
-SUM_linux_arm=90bf50ac269f184b89302fcd0ca732b238f7606b1e48991efc58e85c62669168
-SUM_darwin_amd64=1174cd9973662f0b202c26a851be258fe698caf87afffed1b08af4ade25f01d4
-SUM_darwin_arm64=8ba55bf1ca275e5f5d0132478efb644d318ed739c8cfe4ae3d1f46cfc70277c5
-SUM_freebsd_amd64=f603a4862fec7d35a506e7b76c3bb3a7596008b903b11d9e733e8e28676f5014
-SUM_freebsd_arm64=c7087adcd5773d1e30a728fb69c7c935747513bab5683e762cd12d8bb14a5407
-SUM_android_arm64=0ab873efc20aa707ea4f6c123a31d50cb21c20f58360d7ac820724e5078c0595
+SUM_linux_amd64=789f7b8309803c58673a3a26dfb77e731791cdf83f2866d8d43dfcfa3f103a7f
+SUM_linux_arm64=84f8da2b6436f874909b713f9ac2218044286d4457eabe8075b27d643633dfe9
+SUM_linux_arm=e91aca8dc0d1ee9de6b053ab0f5ac8b1d4523900e56bd08d0477f86fe01fa607
+SUM_darwin_amd64=195d722b5cd1d9e7f66000f578f006361c1471d72bb8b3476515695231bcfeb1
+SUM_darwin_arm64=aa2ca471d95d4fd4a6967a4af60408020eb9fa780fef9d7bbafa7482cb9660cc
+SUM_freebsd_amd64=5e05b691854cf1a2b46a866033b37b80263d32c232dad52e2f1928c2907ae715
+SUM_freebsd_arm64=4abea20de2c4cc190b8b9b93d866504f41b3766abfcf14e48f91de818c67256a
+SUM_android_arm64=0fd5f2e3732be0725747e0c8d2cdc8bd6a0a06292156109f6842c2111e58a9f1
 
 say()  { printf '%s\n' "$*"; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -337,7 +346,8 @@ uninstall() {
           "$HOME/.config/$NAME/address.new" \
           "$HOME/.config/$NAME/tailcat.psk" "$HOME/.config/$NAME/tailcat.psk.new" \
           "$HOME/.config/$NAME/clones" "$HOME/.config/$NAME/clones.new" \
-          "$HOME/.config/$NAME/clone-access" "$HOME/.config/$NAME/clone-access.new"
+          "$HOME/.config/$NAME/clone-access" "$HOME/.config/$NAME/clone-access.new" \
+          "$HOME/.config/$NAME/pairing" "$HOME/.config/$NAME/pairing.new"
     # The binary the last self-update moved aside. Left behind it would be an
     # unreferenced few megabytes under a name nothing else will ever clean up.
     rm -f "${INSTALLED_BIN:-$BINDIR/$NAME}.prev"
@@ -391,6 +401,9 @@ SYNC_ARG=""
 DIRECT_ARG=""
 ALLOW_KEYS=""
 DERPMAP_ARG="${MON_DERPMAP:-}"
+# The self-hosted page's pairing token (helper/go/pairing.go): for the last
+# --allow key on the line, the browser that made it.
+PAIR_ARG=""
 # A second helper on a machine that already runs one under ANOTHER user.
 # Refused by default — see the guard below the switches for why.
 SECOND_ARG="${MON_SECOND:-}"
@@ -404,6 +417,8 @@ while [ $# -gt 0 ]; do
       --allow=*) ALLOW_KEYS="$ALLOW_KEYS ${1#--allow=}"; shift ;;
       --derpmap) [ $# -ge 2 ] || die "--derpmap needs an https URL"; DERPMAP_ARG=$2; shift 2 ;;
       --derpmap=*) DERPMAP_ARG=${1#--derpmap=}; shift ;;
+      --pair) [ $# -ge 2 ] || die "--pair needs a pairing token"; PAIR_ARG=$2; shift 2 ;;
+      --pair=*) PAIR_ARG=${1#--pair=}; shift ;;
       --name) [ $# -ge 2 ] || die "--name needs a value"; NAME_ARG=$2; shift 2 ;;
       --name=*) NAME_ARG=${1#--name=}; shift ;;
       --console) CONSOLE_ARG=on; shift ;;
@@ -446,7 +461,7 @@ DIRECT_ON=no
 # the tunnel never consults is a switch that looks set.
 if [ -z "$TOKEN" ] && [ "$DIRECT_ON" != yes ]; then
     die "no token and no --direct. Usage: sh install.sh <TOKEN> [--name LABEL] [--console] [--remote-update] [--auto-update] [--diagnostics] [--sessions-sync] [--second]
-       sh install.sh --direct --allow nodekey:... [--derpmap https://...]  (no account needed)"
+       sh install.sh --direct --allow nodekey:... [--pair TOKEN] [--derpmap https://...]  (no account needed)"
 fi
 if [ -n "$ALLOW_KEYS" ] && [ "$DIRECT_ON" != yes ]; then
     die "--allow needs --direct (or a machine where direct mode is already on)"
@@ -476,6 +491,32 @@ if [ -n "$DERPMAP_ARG" ]; then
     case "$DERPMAP_ARG" in
       *[!A-Za-z0-9:/._-]*) die "--derpmap URL has unexpected characters" ;;
     esac
+fi
+# The pairing token: 64 lowercase hex characters (the pairing node's private
+# key), a dot, and its tailcat address. Shape only — the helper checks that
+# the two halves belong together — but refused here, while a person is
+# watching, rather than left in a file that pairs with nobody. It is for the
+# browser whose key the same line allows, so a line without one is refused.
+PAIR_FOR=""
+if [ -n "$PAIR_ARG" ]; then
+    [ "$DIRECT_ON" = yes ] || die "--pair needs --direct (or a machine where direct mode is already on)"
+    [ -n "$ALLOW_KEYS" ] || die "--pair needs the browser key it is for (--allow nodekey:...)"
+    [ "${#PAIR_ARG}" -le 2120 ] || die "--pair: not a pairing token (too long)"
+    pair_key=${PAIR_ARG%%.*}
+    pair_addr=${PAIR_ARG#*.}
+    [ "$pair_key" != "$PAIR_ARG" ] || die "--pair: not a pairing token (want <64 hex>.<tc address>)"
+    [ "${#pair_key}" -eq 64 ] || die "--pair: not a pairing token (want 64 hex characters before the dot)"
+    case "$pair_key" in
+      *[!0-9a-f]*) die "--pair: not a pairing token (non-hex characters before the dot)" ;;
+    esac
+    case "$pair_addr" in
+      tc?*) ;;
+      *) die "--pair: not a pairing token (the address after the dot starts with tc)" ;;
+    esac
+    case "${pair_addr#tc}" in
+      *[!A-Za-z0-9_-]*) die "--pair: not a pairing token (unexpected characters in the address)" ;;
+    esac
+    for k in $ALLOW_KEYS; do PAIR_FOR=$k; done
 fi
 
 # ----------------------------------------------------------- one per machine
@@ -960,6 +1001,15 @@ if [ -n "$DERPMAP_ARG" ]; then
     printf '%s\n' "$DERPMAP_ARG" > "$conf/derpmap.new"
     chmod 0600 "$conf/derpmap.new"
     mv -f "$conf/derpmap.new" "$conf/derpmap"
+fi
+# The pairing (go/pairing.go): replaces an earlier one, and a line run again
+# starts its week again. Owner-only from the first byte (umask 077 above): it
+# holds the pairing node's private key until the browser has the address.
+if [ -n "$PAIR_ARG" ]; then
+    rm -f "$conf/pairing.new"
+    printf '%s\n%s\n' "$PAIR_ARG" "$PAIR_FOR" > "$conf/pairing.new"
+    chmod 0600 "$conf/pairing.new"
+    mv -f "$conf/pairing.new" "$conf/pairing"
 fi
 # The address changes if the tunnel identity does, and a stale one from a
 # previous install would be printed below as though it were current.
@@ -1483,9 +1533,18 @@ if [ -f "$conf/direct" ]; then
         say "                no browser is allowed yet, so the tunnel is not running:"
         say "                  $BINDIR/$NAME allow <nodekey:...>   (the key is on the Monitor page)"
     else
+        if [ -n "$PAIR_ARG" ]; then
+            say "                paired by this line: the machine appears by itself on the Monitor"
+            say "                page that made it, within a minute of that page being open, for a week."
+        fi
         n=0
         while [ $n -lt 20 ] && [ ! -s "$conf/address" ]; do sleep 1; n=$((n+1)); done
-        if [ -s "$conf/address" ]; then
+        if [ -s "$conf/address" ] && [ -n "$PAIR_ARG" ]; then
+            say "                address — only if it does not appear, paste it on that page:"
+            say ""
+            say "                  $(cat "$conf/address")"
+            say ""
+        elif [ -s "$conf/address" ]; then
             say "                address — paste it on the Monitor page:"
             say ""
             say "                  $(cat "$conf/address")"
