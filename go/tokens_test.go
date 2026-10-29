@@ -29,9 +29,16 @@ func tkuReset(t *testing.T) {
 	chunk, file, pass := tokChunk, tokFileBudget, tokPassBudget
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	t.Setenv("MON_TOKENS", "")
+	// No Amp CLI set going under a test (tokens_amp_test.go stands one in).
+	bin := ampTokBinary
+	ampTokBinary = func() string { return "" }
+	ampTok.Lock()
+	ampTok.threads, ampTok.loaded, ampTok.ranAt, ampTok.complete, ampTok.legacy = nil, true, 0, false, nil
+	ampTok.Unlock()
 	t.Cleanup(func() {
 		wipe()
 		tokChunk, tokFileBudget, tokPassBudget = chunk, file, pass
+		ampTokBinary = bin
 	})
 }
 
@@ -295,7 +302,8 @@ func TestTokensFoldTheLeastUsedModels(t *testing.T) {
 	if all.n != int64(tokMaxKeys+10) {
 		t.Fatalf("folding lost rows: %+v", all)
 	}
-	if got := tkuSum(u, "claude", "other", true); got.n != 12 {
+	// Room is kept for an "other" of each tool: the least used past that fold.
+	if got := tkuSum(u, "claude", "other", true); got.n != int64(10+len(tokTools)) {
 		t.Fatalf("other = %+v", got)
 	}
 }

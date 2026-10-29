@@ -106,6 +106,10 @@ type TokenUsage struct {
 
 type tokKey struct{ tool, model string }
 
+// The tools counted: the names the relay and the page take (monitor-worker
+// src/clean.js TOK_TOOLS, monitor.js TK_TOOLS).
+var tokTools = map[string]bool{"claude": true, "codex": true, "antigravity": true, "amp": true}
+
 type tokCell struct{ in, out, cr, cw, w1h, rs, n int64 }
 
 func (c *tokCell) add(o tokCell) {
@@ -139,7 +143,17 @@ type tokFile struct {
 	have  bool
 	hours map[tokSlot]tokCell
 	days  map[tokSlot]tokCell
-	ids   []uint64 // Claude: the replies this file counted
+	ids   []uint64 // Claude, Antigravity: the replies this file counted
+	// Antigravity (tokens_agy.go): the next call's rowid, the database's and
+	// its -wal file's stamp when last read whole, and how far into the -wal
+	// file the read got.
+	next int64
+	sig  int64
+	wal  *sqlWAL
+	// Amp (tokens_amp.go): the thread's `updated` and rows this account was
+	// built from.
+	ampUpdated string
+	ampRows    int
 }
 
 var tokRun sync.Mutex // one pass at a time
@@ -341,6 +355,41 @@ func tokPass(t time.Time) *TokenUsage {
 		}
 		r.Close()
 	}
+	// Antigravity's conversations (tokens_agy.go) and Amp's threads
+	// (tokens_amp.go), each an account of its own like a transcript.
+	agy := agyRoots()
+	for _, root := range agy {
+		r, err := os.OpenRoot(root)
+		if err != nil {
+			partial = true
+			continue
+		}
+		cands, part := agyCandidates(root, from)
+		if part {
+			partial = true
+		}
+		for _, c := range cands {
+			if n >= tokMaxFiles {
+				partial = true
+				break
+			}
+			n++
+			id := "antigravity\x00" + root + "\x00" + c.rel
+			seen[id] = true
+			f := st.files[id]
+			if f == nil {
+				f = &tokFile{tool: "antigravity"}
+				st.files[id] = f
+			}
+			if !tokAgyRead(r, c.rel, id, f, &spent, hourFrom, dayFrom) {
+				partial = true
+			}
+		}
+		r.Close()
+	}
+	if !tokAmpPass(&st.files, seen, hourFrom, dayFrom, from) {
+		partial = true
+	}
 	for id, f := range st.files {
 		if !seen[id] {
 			tokDrop(id, f)
@@ -358,7 +407,7 @@ func tokPass(t time.Time) *TokenUsage {
 			}
 		}
 	}
-	if len(srcs) == 0 && len(st.kept) == 0 && len(st.keptH) == 0 {
+	if len(srcs) == 0 && len(agy) == 0 && len(st.files) == 0 && len(st.kept) == 0 && len(st.keptH) == 0 {
 		return nil
 	}
 
@@ -785,8 +834,8 @@ func tokAnswer(unix int64, hours, days map[tokSlot]tokCell, partial bool) *Token
 	})
 	fold := map[tokKey]tokKey{}
 	if len(keys) > tokMaxKeys {
-		// Room among the keys kept for an "other" for each of the two tools.
-		keep := tokMaxKeys - 2
+		// Room among the keys kept for an "other" for each tool.
+		keep := tokMaxKeys - len(tokTools)
 		for _, k := range keys[keep:] {
 			fold[k] = tokKey{k.tool, "other"}
 		}
@@ -883,7 +932,7 @@ func tokLoadRows(out map[tokSlot]tokCell, rows [][]any) {
 		}
 		tool, _ := r[1].(string)
 		model, _ := r[2].(string)
-		if (tool != "claude" && tool != "codex") || tokModel(model) != model {
+		if !tokTools[tool] || tokModel(model) != model {
 			continue
 		}
 		at := asNum(r[0])
